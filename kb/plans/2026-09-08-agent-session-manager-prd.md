@@ -56,7 +56,7 @@ tags:
 | Cost | `$1.97`，无 cost-state 时空 | `total_cost_usd` | 是 |
 | Branch | git 分支 | `git_branch` | 是 |
 | Tools | tool_use 数；hover 显示 top 5 工具名 | `tool_use_count` / `session_tool_counts` | 是 |
-| Flags | 图标：history-only、background、sdk、有 subagent、有 PR | `source` / `is_background` / `entrypoint` / `subagent_count` / `pr_url` | 否 |
+| Kind | 来源徽章：CLI（默认不加标记）/ **SDK**（`entrypoint = sdk-cli`）/ **BG**（`sessionKind = bg`）/ **History**（transcript 已被清理）；另有 subagent 数与 PR / Artifact 图标 | `entrypoint` / `is_background` / `source` / `subagent_count` / `pr_url` | 是（按 kind 分组） |
 | ID | 短 uuid（前 8 位），点击复制 | `id` | 否 |
 
 **实现**：
@@ -72,7 +72,7 @@ tags:
 
 1. **项目过滤**：可搜索的下拉，多选；列表按最近活动排序，显示每项目 session 数；"全部"为默认。同一 git 仓库的 worktree 目录（`~/.herdr/worktrees/<repo>-<branch>` 等）在下拉里按仓库聚合，可展开选具体 worktree。
 2. **时间过滤**：预设（今天 / 3 天 / 7 天 / 30 天 / 全部）+ 自定义日期范围；作用字段可切换 Updated（默认）或 Started。
-3. **更多过滤（折叠在 "Filters" 弹出面板）**：来源（transcript / history-only）、隐藏 SDK 驱动 session（`entrypoint = sdk-cli`，默认隐藏）、隐藏后台 session（`sessionKind = bg`）、最少 prompt 数（默认 ≥1，过滤掉空 session）、权限模式、使用过的工具名（多选）、有 PR / 有 subagent。
+3. **更多过滤（折叠在 "Filters" 弹出面板）**：Kind 三态多选（CLI / SDK / BG，**默认全选，不隐藏任何一种**，仅靠 Kind 列徽章区分）、来源（transcript / history-only）、最少 prompt 数（默认 ≥1，过滤掉空 session）、权限模式、使用过的工具名（多选）、有 PR / 有 subagent。
 4. 当前生效的过滤以 chip 显示，可逐个移除；"Reset" 清空。
 5. 过滤条件持久化，下次启动恢复。
 
@@ -224,7 +224,9 @@ agent-session-manager/            Cargo workspace
 
 线程模型：主线程（GPUI 前台）、SQLite 线程（单连接，closure 队列）、索引线程池（rayon）、watcher 线程。所有跨线程数据用 `Arc<…>` 不可变快照 + `smol::channel`。
 
-依赖（锁定精确版本）：`gpui-kit = "=0.6.0"`、`rusqlite` bundled、`serde` / `serde_json`（raw_value）、`memmap2`、`memchr`、`rayon`、`notify` + `notify-debouncer-full`、`grep-searcher` + `grep-regex`、`regex`、`jiff`（时间）、`directories`、`anyhow`、`smol`、`tracing`。
+依赖（锁定精确版本）：`gpui-kit = "=0.6.1"`（内含 gpui-pre 0.3.x = Zed main 快照；选型论证见 `kb/docs/gpui-framework-research.md` §1.3）、`rusqlite` bundled、`serde` / `serde_json`（raw_value）、`memmap2`、`memchr`、`rayon`、`notify` + `notify-debouncer-full`、`grep-searcher` + `grep-regex`、`regex`、`jiff`（时间）、`directories`、`anyhow`、`smol`、`tracing`。
+
+**不要自己再声明 `gpui` 依赖**，否则会出现两份 GPUI 导致类型不匹配；核心 crate `crates/core` 完全不依赖 gpui，UI 层若需退回官方 git 依赖可独立替换。
 
 ## 3. 里程碑
 
@@ -237,7 +239,7 @@ agent-session-manager/            Cargo workspace
 | **M4 详情面板**（2 天） | R6，Markdown、折叠、subagent、导出 | 30MB session 打开 <200ms |
 | **M5 实时与打磨**（1.5 天） | R7 watcher、R8 history、R9、R10、R11、菜单、cargo-bundle、图标 | 新 session 5s 内出现；`.app` 可双击运行 |
 
-开发规范：新功能先写行为测试（core crate 用 fixture；UI 用 gpui-kit `test-support` 的 `TestAppContext` 做 delegate 级测试）；每个里程碑完成后截图归档到 `tmp/<date>-<task>/` 并 commit。
+开发规范：新功能先写行为测试（core crate 用 fixture JSONL；UI 用 gpui-kit 0.6.1 新增的 `gpui_kit::test` 无头 UI 测试 + `test-support` feature，覆盖 delegate 与交互）；每个里程碑完成后截图归档到 `tmp/<date>-<task>/` 并 commit。
 
 ## 4. 风险与对策
 
@@ -254,9 +256,12 @@ agent-session-manager/            Cargo workspace
 ## 5. 开放问题（需你拍板）
 
 1. Preview 列默认用 **First prompt** 还是 **Title**（新版本才有 ai-title，覆盖率目前 5/654）？本 PRD 默认 First prompt。
-2. SDK 驱动的 session（`entrypoint = sdk-cli`，本机 1,033 条记录）默认隐藏是否符合预期？
-3. 应用名与 bundle id：暂定 "Agent Session Manager" / `top.ideachat.agent-session-manager`。
-4. 是否需要 "在终端 resume" 直接拉起终端（涉及 AppleScript 权限），还是仅复制命令？
+2. 是否需要 "在终端 resume" 直接拉起终端（涉及 AppleScript 权限），还是仅复制命令？
+
+### 已定决策（2026-09-15）
+
+- **应用名 / bundle id**：Agent Session Manager / `com.reorx.agent-session-manager`（用户写作 `come.reorx.…`，按反向域名惯例取 `com.`，如需改回请说明）。
+- **SDK session 不隐藏**：`entrypoint = sdk-cli` 与后台 session 一律显示，通过 Kind 列徽章区分，过滤器默认全选。
 
 ## 6. 相关文档
 

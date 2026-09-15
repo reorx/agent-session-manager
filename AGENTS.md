@@ -8,7 +8,9 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格形式列出本机所�
 
 ## 关键决策
 
-- UI 依赖 `gpui-kit = "=0.6.0"`（精确锁版，提交 Cargo.lock），不直接依赖 `gpui`；Zed 的 `ui` / `theme` crate 是 GPL 且未发布，只读源码不依赖
+- UI 依赖 `gpui-kit = "=0.6.1"`（精确锁版，提交 Cargo.lock），不直接依赖 `gpui`；Zed 的 `ui` / `theme` crate 是 GPL 且未发布，只读源码不依赖
+  - GPUI 本身是 Zed Industries 的（crates.io owner 为 zed-industries 团队），但官方 crates.io 版本停在 2025-10-22 的 0.2.2（平台层拆分之前），main 新增的 `gpui_platform` 等 crate 标记 `publish = false` 未发布。gpui-kit 走的是第三方 republish 的 `gpui-pre` 快照。三条路的对比与选择理由见 `kb/docs/gpui-framework-research.md` §1.1 / §1.3
+- bundle id `com.reorx.agent-session-manager`；SDK 与后台 session 不隐藏，用 Kind 列徽章区分
 - 数据层：SQLite（rusqlite bundled，WAL，单写线程）+ FTS5 trigram 只索引 user / assistant 文本（约 20MB）；正则模式用 grep-searcher 扫原始文件
 - 核心逻辑放独立 crate `crates/core`（无 gpui 依赖，带 `asm` CLI），UI 层 `crates/app` 保持薄
 - 开工前必须：rustup 最新 stable（Homebrew 1.91 编不过 gpui-pre）、`xcodebuild -downloadComponent MetalToolchain`（或 `runtime_shaders` feature）

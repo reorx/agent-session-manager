@@ -12,36 +12,59 @@ tags:
 
 调研日期 2026-09-08。目标：为 Agent Session Manager（以表格展示数千条 Claude Code session，带过滤、排序、搜索、详情面板）选定 GPUI 的使用方式，摸清与"数据展示类应用"相性最好的部分，并把坑提前列出来。
 
-信息来源：crates.io API、gpui.rs、docs.rs、Zed 仓库 main 分支（commit `3384317a`，2026-09-08）、longbridge/gpui-kit 仓库（HEAD `294ba34`）、context7、本机两次试编译。所有 API 签名以 main 分支 / gpui-kit 0.6.0 为准；与 crates.io `gpui 0.2.2` 有差异处会标注。
+信息来源：crates.io API、gpui.rs、docs.rs、Zed 仓库 main 分支（commit `3384317a`，2026-09-08）、longbridge/gpui-kit 仓库（HEAD `294ba34`）、context7、本机两次试编译。所有 API 签名以 main 分支 / gpui-kit 0.6.x 为准；与 crates.io `gpui 0.2.2` 有差异处会标注。
+
+> **2026-09-15 修订**：§1.1 原先对 GPUI 归属的表述容易被误读成"GPUI 由 Longbridge 掌握"，已按 crates.io owner 与 Zed 仓库配置逐条核实重写。版本号同步到 gpui-kit 0.6.1 / gpui-pre 0.3.5。
 
 ---
 
 ## 1. 现状与版本选择（最重要的决策）
 
-### 1.1 GPUI 本体的发布状态
+### 1.1 GPUI 归属与发布状态（容易被误解，逐条核实）
+
+**GPUI 是 Zed Industries 的，不属于任何第三方。** 证据：
+
+- `crates/gpui/Cargo.toml`：`publish = true`、`license = "Apache-2.0"`、`homepage = "https://gpui.rs"`、`repository = "zed-industries/zed"`、`authors = ["Nathan Sobo <nathan@zed.dev>"]`。
+- crates.io 上 `gpui` 的 owner 是 `maxbrunsfeld`、`mikayla-maki`、`MrSubidubi` 加 `github:zed-industries:crates-io` 团队。
+- Zed 为发布 gpui 专门把内部 crate 改名后一并发布：`collections`→`gpui_collections`、`refineable`→`gpui_refineable`、`http_client`→`gpui_http_client`，外加 `gpui_sum_tree`、`gpui_media`、`gpui_semantic_version`、`gpui_util`、`gpui_util_macros`，2025-10-22 同一天全部发到 0.2.2。仓库里还有 `script/bump-gpui-version` 这个专用发版脚本。
+
+**但自 2025-10-22 起再没发过新版**，这才是所有麻烦的根源：
 
 | 事实 | 说明 |
 |---|---|
-| crates.io `gpui` 最新 **0.2.2**（2025-10-22） | 已 11 个月无新版本；Apache-2.0；edition 2024 |
-| main 分支已大幅分化 | 平台层拆成 `gpui_platform`（macOS Metal / Linux wgpu / Windows / wasm），入口从 `Application::new()` 改为 `gpui_platform::application().run(..)`；`gpui_platform` **Zed 未发布到 crates.io** |
-| 2026-02 Zed 维护者公开声明 | "GPUI development is getting some major brakes put on it… pushing off anything that isn't directly related to Zed's use case"（HN 47003569）。GPUI 仍在 Zed 内部演进，但面向第三方的发版、文档被降优先级 |
+| crates.io `gpui` 停在 **0.2.2**（2025-10-22） | 近 11 个月无新版本 |
+| main 的 `crates/gpui/Cargo.toml` 仍写 `version = "0.2.2"` | 版本号一次都没抬过，说明发版流程处于停滞而非迭代中 |
+| main 已做平台层拆分 | 新增 `gpui_platform` / `gpui_macos` / `gpui_linux` / `gpui_windows` / `gpui_web` / `gpui_wgpu` / `gpui_apple` / `gpui_shared_string` / `gpui_tokio`；入口从 `Application::new()` 改为 `gpui_platform::application().run(..)` |
+| **这批新 crate 全部未发布** | `crates/gpui_platform/Cargo.toml` 写的是 `publish.workspace = true`，而 workspace 的 `[workspace.package]` 设的是 `publish = false`。crates.io 上查无 `gpui_platform` / `gpui-platform` / `gpui_macos` / `gpui_web` / `gpui_wgpu` |
+| 2026-02 Zed 维护者公开声明 | "GPUI development is getting some major brakes put on it… pushing off anything that isn't directly related to Zed's use case"（HN 47003569）。GPUI 仍在 Zed 内部演进，但面向第三方的发版与文档被降优先级 |
 | Zed 工具链 | Rust **1.97.1**、wgpu 29、taffy、smol 2、postage |
 
-因此拿到 main 分支 API 的现实途径：
+**关键后果**：[gpui.rs](https://gpui.rs) 与 `crates/gpui/README.md` 上那份 getting started 是按 main 源码写的，它给的
+
+```toml
+gpui = { version = "*" }
+gpui_platform = { version = "*", features = ["font-kit", "wayland", "x11"] }
+```
+
+**第二行现在装不上**——`gpui_platform` 不存在于 crates.io。而第一行能装到的 0.2.2 是拆分之前的代码，docs.rs 上它的入口仍是 `Application::new()`，与 README 的 `gpui_platform::application()` 对不上。这份 README 是写给一次尚未发生的发布的。
+
+因此，要用 main 分支 API 有以下途径：
 
 | 途径 | 维护者 | 说明 |
 |---|---|---|
-| **`gpui-pre` 0.3.4**（2026-09-07） | Longbridge（huacnlee） | "snapshot of zed@6916400"，纯快照不带行为补丁；配套 `gpui-pre-platform`、`gpui-pre-macros` 等 |
-| **`gpui-kit` 0.6.0**（2026-09-03） | Longbridge | 原 gpui-component，facade crate，重导出 gpui-pre + 组件库 + 资源 |
+| **git 依赖 zed 仓库** | Zed 官方 | `gpui = { git = "https://github.com/zed-industries/zed", rev = "…" }` + `gpui_platform` 同理。**完全可行**——`publish = false` 只阻止 `cargo publish`，不阻止 git 依赖。需最新 stable Rust，构建最慢，须自行 pin rev |
+| **`gpui-pre` 0.3.5**（2026-09-14） | huacnlee（Longbridge） | "snapshot of zed@d89e9c2"，把 main 源码改名后 republish 到 crates.io，纯快照不带行为补丁；配套 `gpui-pre-platform`、`gpui-pre-macros`、`gpui-pre-web` |
+| **`gpui-kit` 0.6.1**（2026-09-09） | Longbridge | 原 gpui-component，facade crate，重导出 gpui-pre + 组件库 + 资源 |
 | `gpui-ce` 0.3.3 | 社区 fork（1k star） | 落后 Zed main 数百 commit，"mostly API compatible, but this is changing" |
-| git 依赖 zed main | — | 需 Rust 1.97.1，构建最慢，锁文件受 Zed workspace 约束 |
+
+republish 不是 Longbridge 独有的行为，而是生态公认的绕路：GitHub 上还有 `feigeCode/gpui-pre`（"Self-maintained gpui-pre snapshot: Zed's gpui crates republished for Navop"）与 `resuite/gpui-pre` 在做同一件事。**所以"用 gpui-pre"= 用 Zed 的代码走第三方发布通道，不等于 GPUI 归第三方。**
 
 ### 1.2 本机试编译结论
 
 | 尝试 | 结果 |
 |---|---|
 | `gpui = "0.2.2"` hello world | 712 个包，70s 后在 gpui build script 失败：`cannot execute tool 'metal' due to missing Metal Toolchain` |
-| `gpui-pre = "0.3.4"` hello world | 667 个包，rustc 1.91 编译失败：`E0658 use of unstable library feature slice_as_array` |
+| `gpui-pre = "0.3.4"` hello world | 667 个包，rustc 1.91 编译失败：`E0658 use of unstable library feature slice_as_array`（说明 gpui-pre 需要比 1.91 新的 stable；crates.io 元数据里没有 `rust-version` 字段提前警告） |
 
 **开工前必须做的环境准备**：
 
@@ -52,23 +75,33 @@ xcodebuild -downloadComponent MetalToolchain
 #    或在 gpui-pre-platform / gpui-kit 上开启 runtime_shaders feature（运行时编译 MSL）
 ```
 
-### 1.3 决策：用 `gpui-kit = "=0.6.0"`，精确锁版
+### 1.3 决策：用 `gpui-kit = "=0.6.1"`，精确锁版（2026-09-15 确认）
 
-理由：
-- 唯一成熟、Apache-2.0、活跃维护（每天约 10 commit）的 GPUI 组件库；`DataTable`、`Input`、`Select`、`DatePicker`、`TabBar`、`h_resizable`、`TextView::markdown` 把本项目 UI 需求全覆盖。
-- 自带主题系统（20+ JSON 主题、暗色跟随系统），省掉自写 Theme。
+三条路都摆上桌评估过，**决策依据是"要不要组件库"，而不是"能不能拿到 main 的 API"**（后者 git 依赖也能拿到）：
+
+| 方案 | 结论 |
+|---|---|
+| **A. gpui-kit 0.6.1** ✅ 采用 | 直接拿到 `DataTable`（虚拟化/排序/列宽拖拽/键盘导航，仅 `state.rs` 就 2,568 行）、`Input`（含 IME，中文输入必需）、`Select`、`DatePicker`、`TextView`（Markdown）、`h_resizable`、主题、图标、通知层 |
+| B. git 依赖 zed main | 官方源码、与 gpui.rs 文档一一对应、无中间人。代价是自己写带 IME 的输入框（`examples/input.rs` 约 500 行可改）、日期范围选择器、Markdown 渲染、可搜索下拉、主题、表格交互，估计 +2~3 周。表格骨架反而不难：官方 `examples/data_table.rs` 约 200 行跑 10k 行 |
+| C. crates.io `gpui 0.2.2` + `gpui-component 0.5.1` | 全部来自 crates.io 且 gpui 是 Zed 官方发布版（0.5.1 确实 pin `gpui ^0.2.2`），可复现性最好；但 API 停在拆分前，组件层 2026-02 后被作者转向 0.6 弃坑，只有旧 `Table` 无 `DataTable`，11 个月上游修复拿不到 |
+
+选 A 的理由：
+- 真正省下来的不是表格，而是 **IME 输入框、日期范围选择器、Markdown 渲染**这三样硬骨头。
+- 唯一成熟、Apache-2.0、活跃维护（每天约 10 commit）的 GPUI 组件库；自带主题系统（20+ JSON 主题、暗色跟随系统）。
+- 0.6.1 新增 `gpui_kit::test` 无头 UI 测试（`test-support` feature），正好满足本项目"先写行为测试"的开发规范。
 - Zed 自己的 `crates/ui`、`crates/theme` 是 **GPL-3.0-or-later 且 `publish = false`**，vendor 进来会传染许可证并拖入 Zed 的 settings 体系，不可取（只读源码学模式）。
 
 代价与对策：
-- API 每个 minor 都有 breaking rename（`Dropdown→Select`、`Modal→Dialog`、`Table→DataTable`、`is_eof→has_more`、`gpui→gpui-pre`…），0.5.1 到 0.6.0 隔了 7 个月然后一次性大改。**对策：`=0.6.0` 精确锁定，提交 `Cargo.lock`，升级作为独立任务。**
-- Longbridge 单一供应商同时控制 kit 和 gpui-pre 快照。**对策：核心逻辑（解析、索引、搜索）放在不依赖 gpui 的独立 crate，UI 层薄。**
+- API 每个 minor 都有 breaking rename（`Dropdown→Select`、`Modal→Dialog`、`Table→DataTable`、`is_eof→has_more`、`gpui→gpui-pre`…），0.5.1 到 0.6.0 隔了 7 个月然后一次性大改。**对策：`=0.6.1` 精确锁定，提交 `Cargo.lock`，升级作为独立任务。**
+- 依赖 huacnlee 的 republish 节奏。**对策**：① 已发布版本在 crates.io 上不可变，即使作者停更也能一直编译；② gpui-pre 是 Apache-2.0 源码快照，必要时可照 `feigeCode/gpui-pre` 的做法自行 republish；③ 核心逻辑（解析、索引、搜索）放在不依赖 gpui 的独立 crate，UI 层薄，随时可退回方案 B。
 - `DataTable` 行高固定。**对策：见 §4.3。**
+- **观察点**：Zed 若恢复发版（`script/bump-gpui-version` 还在，`gpui_platform` 只差一个 `publish` 覆盖），官方路径就会变得可用，届时重新评估。
 
 `Cargo.toml` 模板（来自 gpui-kit 官方 installation.md，字面复制）：
 
 ```toml
 [dependencies]
-gpui-kit = "=0.6.0"        # default features = ["component", "assets"]
+gpui-kit = "=0.6.1"        # default features = ["component", "assets"]
 anyhow = "1.0"
 
 # 显著加快 debug 构建；必须写在根 Cargo.toml
@@ -84,7 +117,7 @@ taffy = { opt-level = 3 }
 ttf-parser = { opt-level = 3 }
 ```
 
-**不要自己再声明 `gpui` 依赖**，否则会出现两份 GPUI 导致类型不匹配。若某个辅助 crate 必须直接依赖，用 `gpui = { package = "gpui-pre", version = "=0.3.2" }` 与 gpui-kit 锁文件一致。gpui-kit 的 `lib.rs` 重导出：`pub use ::gpui::*; pub use ::gpui_base as base; pub use ::gpui_component as component; pub use ::gpui_kit_assets as assets;` 以及自己的 `actions!` 宏。
+**不要自己再声明 `gpui` 依赖**，否则会出现两份 GPUI 导致类型不匹配。若某个辅助 crate 必须直接依赖，用 `gpui = { package = "gpui-pre", version = "=<锁文件里的版本>" }`——gpui-kit 0.6.1 声明的是 `gpui-pre ^0.3.1`，今天解析到 0.3.5，务必以 `Cargo.lock` 实际解析结果为准，版本不一致会拖进两份 GPUI。gpui-kit 的 `lib.rs` 重导出：`pub use ::gpui::*; pub use ::gpui_base as base; pub use ::gpui_component as component; pub use ::gpui_kit_assets as assets;` 以及自己的 `actions!` 宏。
 
 参考数据：纯 gpui hello world 约 4MB release 二进制，加组件库约 12MB；首次干净构建数分钟，增量 debug 约 1s。
 
@@ -258,7 +291,9 @@ impl Render for DataTable {
 
 ---
 
-## 4. gpui-kit 0.6.0 组件库
+## 4. gpui-kit 0.6.x 组件库
+
+> 以下 API 依据 0.6.0 源码核实；0.6.1（2026-09-09）为增量发布，新增多光标编辑、括号自动配对、`gpui_kit::test` 无头 UI 测试，并改进 Markdown 渲染与文本选择，未见本节所述 API 的破坏性变更。
 
 ### 4.1 Crate 分层与初始化
 
@@ -569,4 +604,4 @@ Zed 仓库内最值得读的文件：`crates/gpui/examples/data_table.rs`、`exa
 - `/private/tmp/claude-501/-Users-reorx-Code-scripts/d06debd1-1cb5-4f48-8652-bcbdc6190edb/scratchpad/zed/crates/{gpui,gpui_platform,ui,theme,picker}`
 - `/private/tmp/claude-501/-Users-reorx-Code-scripts/d06debd1-1cb5-4f48-8652-bcbdc6190edb/scratchpad/gpui-kit`
 
-在线：[gpui.rs](https://gpui.rs) · [docs.rs/gpui](https://docs.rs/gpui/latest/gpui/) · [gpui-kit.com](https://gpui-kit.com) · [gpui-kit v0.6.0 release notes](https://github.com/longbridge/gpui-kit/releases/tag/v0.6.0) · [crates.io gpui-pre](https://crates.io/crates/gpui-pre) · [gpui-book](https://github.com/matinaniss/gpui-book) · Longbridge 提供的 agent skill：`npx skills add longbridge/gpui-kit`。
+在线：[gpui.rs](https://gpui.rs) · [docs.rs/gpui](https://docs.rs/gpui/latest/gpui/) · [gpui-kit.com](https://gpui-kit.com) · [gpui-kit v0.6.0](https://github.com/longbridge/gpui-kit/releases/tag/v0.6.0) / [v0.6.1 release notes](https://github.com/longbridge/gpui-kit/releases/tag/v0.6.1) · [crates.io gpui-pre](https://crates.io/crates/gpui-pre) · [gpui-book](https://github.com/matinaniss/gpui-book) · Longbridge 提供的 agent skill：`npx skills add longbridge/gpui-kit`。
