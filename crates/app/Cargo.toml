@@ -1,0 +1,14 @@
+[package]
+name = "agent-session-manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "macOS desktop app listing Claude Code sessions"
+default-run = "agent-session-manager"
+
+[dependencies]
+agent-session-core = { path = "../core" }
+anyhow.workspace = true
+chrono = "0.4.45"
+gpui-kit = "=0.6.1"

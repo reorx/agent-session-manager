@@ -232,7 +232,7 @@ agent-session-manager/            Cargo workspace
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **M0 环境与 spike**（0.5 天） | rustup 最新 stable、Metal Toolchain；`gpui-kit` hello world + `DataTable` 10k 假行；确认 `h_resizable` / `TabBar::segmented` / `DatePicker` 签名；记录构建时间 | 窗口能开、表格能滚、截图归档 |
+| **M0 环境与 spike**（0.5 天）✅ 2026-09-15 | rustup 最新 stable、Metal Toolchain；`gpui-kit` hello world + `DataTable` 10k 假行；确认 `h_resizable` / `TabBar::segmented` / `DatePicker` 签名；记录构建时间 | 窗口能开、表格能滚、截图归档（记录：`../notes/2026-09-15-m0-spike.md`） |
 | **M1 核心 crate**（2 天） | 解析器（fixture JSONL 覆盖全部记录类型）、SQLite schema 与索引器、增量逻辑、FTS 与 LIKE 搜索、正则扫描、`asm` CLI | BDD 测试：`asm list` 与 Python 脚本 `--list` 输出一致；`asm search` 命中数与脚本一致；全量索引本机 <3s |
 | **M2 表格 + 过滤 + 排序**（2 天） | R1 R2 R3 R5 R12，SessionStore 流式填充 | 冷启动可用、热启动 <300ms、过滤排序一帧内 |
 | **M3 搜索**（1.5 天） | R4 全部，高亮，Matches 列 | FTS <100ms、正则 <500ms、CJK 两字可搜 |

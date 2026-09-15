@@ -1,0 +1,10 @@
+[package]
+name = "agent-session-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Parsing, indexing and search for Claude Code sessions (no UI dependencies)"
+
+[dependencies]
+anyhow.workspace = true
