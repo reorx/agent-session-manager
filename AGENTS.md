@@ -48,6 +48,7 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格形式列出本机所�
 
 ## Documentation
 
+- `kb/docs/product-prd.md` — 面向产品视角的 PRD：产品定位、三段式界面架构、各功能的交互描述与当前实现状态（✅ / 🟡 / ⬜）；向他人介绍应用或核对功能状态时先读，每个里程碑完成后同步更新状态表
 - `kb/docs/claude-session-data-format.md` — 修改解析器、派生字段、history.jsonl 回退逻辑或遇到未知记录类型时先读；含 `~/.claude` 全部数据源与 JSONL 记录类型实测
 - `kb/docs/gpui-framework-research.md` — 写任何 GPUI / gpui-kit 代码前读；含 API 签名、DataTable delegate、异步加载模式、坑清单、依赖锁版策略
 - `kb/docs/data-layer-design.md` — 改动 SQLite schema、索引器、增量更新、搜索（FTS5 / LIKE / 正则）时读；含 DDL 与 serde 类型草案
