@@ -17,8 +17,9 @@ All common commands are in the `Makefile`. `make` or `make help` lists them.
 
 | Command | What it does |
 |---|---|
-| `make run` | Build and launch the app (debug) |
-| `make run-autoplay` | Same, but scroll / select / sort automatically after launch (`ASM_SPIKE_AUTOPLAY=1`) |
+| `make dev` (or `make dv`) | Build and launch the app: the usual dev loop |
+| `make dev-autoplay` | Same, but scroll / select / sort automatically after launch (`ASM_SPIKE_AUTOPLAY=1`) |
+| `make run` / `make run-autoplay` | Launch the existing binary without rebuilding |
 | `make build` / `make release` | Debug build of the workspace / release build of the app |
 | `make check` / `make clippy` / `make test` / `make fmt` | The usual cargo tasks across the workspace |
 | `make screenshot` | Wake the screen, launch the app and save three window screenshots to `tmp/<date>-screenshots/` (override with `SHOT_DIR=…`) |
@@ -30,6 +31,7 @@ Notes:
 - Build output does not go to `./target`. The global `~/.cargo/config.toml` points every project at `~/Library/Caches/cargo-target`; `make bin` shows the exact path.
 - First build takes about 1.5 minutes (GPUI + Metal shaders); incremental builds take a couple of seconds.
 - `make screenshot` needs `wake-screen` on `PATH` (the display must be awake, otherwise captures are black).
+- `run` kills any running instance first, so `make dev` always shows the build you just made.
 
 ## Layout
 

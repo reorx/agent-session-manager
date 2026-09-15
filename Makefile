@@ -17,11 +17,21 @@ setup: ## Install the Rust toolchain (mise) and the Metal Toolchain if missing
 build: ## Debug build of all crates
 	cargo build --workspace
 
-run: ## Launch the app (debug build)
-	cargo run -p $(APP)
+run: ## Launch the existing debug binary, replacing any running instance
+	@pkill -x $(APP) 2>/dev/null || true
+	@for i in $$(seq 1 20); do pgrep -qx $(APP) || break; sleep 0.1; done
+	@$(BIN)
 
-run-autoplay: ## Launch the app with scripted scroll / select / sort (for screenshots)
-	ASM_SPIKE_AUTOPLAY=1 cargo run -p $(APP)
+run-autoplay: ## Like run, but scroll / select / sort automatically after launch
+	@pkill -x $(APP) 2>/dev/null || true
+	@for i in $$(seq 1 20); do pgrep -qx $(APP) || break; sleep 0.1; done
+	@ASM_SPIKE_AUTOPLAY=1 $(BIN)
+
+dev: build run ## Build and launch the app (the usual dev loop)
+
+dv: dev ## Alias for dev
+
+dev-autoplay: build run-autoplay ## Build and launch with the scripted interaction
 
 release: ## Release build of the app
 	cargo build --release -p $(APP)
@@ -47,4 +57,4 @@ bin: ## Print the path of the debug binary
 clean: ## Remove this project's build artifacts only (the target dir is shared across projects)
 	cargo clean -p $(APP) -p $(CORE)
 
-.PHONY: help setup build run run-autoplay release check test clippy fmt screenshot bin clean
+.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot bin clean
