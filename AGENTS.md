@@ -4,14 +4,14 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格形式列出本机所�
 
 ## 当前状态
 
-2026-09-15：**M0 完成**（工具链 + gpui-kit spike，记录见 `kb/notes/2026-09-15-m0-spike.md`）。`crates/core` 是空壳，`crates/app` 是 10k 假行的 DataTable spike。下一步是 PRD 的 M1（核心 crate：解析器、SQLite 索引、搜索、`asm` CLI）。
+2026-09-16：**M0 完成**（工具链 + gpui-kit spike，`kb/notes/2026-09-15-m0-spike.md`），**界面已按 Claude Design 设计稿重构**（`kb/notes/2026-09-16-design-refactor.md`）：工具栏四个下拉 + 搜索框、7 列 36px 表格、580px 详情面板（Metadata / Conversation tab）、状态栏，项目 / 时间过滤与 Preview 切换已生效。`crates/app/src` 拆成 `main / style / model / fake / table / toolbar / detail`，数据仍是 `fake.rs` 的 10k 假行。`crates/core` 是空壳，下一步是 PRD 的 M1（核心 crate：解析器、SQLite 索引、搜索、`asm` CLI）。
 
 ## 开发命令
 
 常用命令都在 `Makefile`，`make help` 列出；README 有说明。要点：
 
 - `make dev`（别名 `make dv`）编译并启动 app，与其他 macOS 项目的 `dev: build run` 约定一致；`run` 会先 pkill 掉已有实例，所以看到的一定是刚编出来的版本
-- `make screenshot` 唤醒屏幕、带 `ASM_SPIKE_AUTOPLAY=1` 启动并按窗口 ID 截三张图到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）
+- `make screenshot` 唤醒屏幕、带 `ASM_SPIKE_AUTOPLAY=1` 启动并按窗口 ID 截三张图到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）；`make screenshot-clicks` 用 cliclick 真点击驱动下拉 / tab / 行展开，截 12 张（坐标写在 `scripts/screenshot-clicks.sh`，改布局后要校对）
 - 构建产物不在 `./target`：全局 `~/.cargo/config.toml` 把 target 指到 `~/Library/Caches/cargo-target`，`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒；首次 `cargo check` 单独要 40 秒
 - Rust 由 mise 管理（`mise.toml` 锁 1.98.1，gpui-pre 需要 ≥ 1.98）；Metal Toolchain 必须装（`make setup`）
 - 手动启动 app 做验证后必须 `kill` 掉进程；`pgrep -fl agent-session-manager` 检查（`make dev` 自带 pkill，手动起的不算）
@@ -31,7 +31,9 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格形式列出本机所�
 - 表格模式：delegate 持 `rows: Vec<Arc<Row>>` + `ix: Vec<usize>`（过滤 + 排序后的索引），`render_td` 只取预格式化好的 `SharedString`，不做任何计算；`perform_sort` 原地排 `ix`，同值按 updated 降序保证稳定
 - 几千行的过滤 / 排序直接在主线程做（10k 行排序 7ms），只有 SQLite 查询和文件扫描才走后台
 - `Task` drop 即取消：`cx.spawn` 的结果要 `.detach()` 或存进 `_task` 字段；`this.update(cx, ..)` 返回 Result，用 `.ok()` 不要 unwrap
-- 需要脚本化交互（截图、验收）时优先加环境变量驱动的 autoplay 逻辑，不要依赖 GUI 自动化
+- 需要脚本化交互（截图、验收）时优先加环境变量驱动的 autoplay 逻辑；弹出层（下拉菜单、popover）无法程序化打开，才用 `scripts/screenshot-clicks.sh` 的 cliclick 点击
+- 主题与密度：`style::install_theme` 把设计稿色值写进 gpui-kit `Theme`（rem = 12px，组件内部尺寸随之缩小），改 `colors` 后必须重建 `tokens` 并 `Theme::sync_base`；DataTable 选中行是盖在单元格上面的覆盖层，`table_active` 必须半透明
+- 设计稿色值集中在 `style.rs`，不要在别处写 hex；`impl IntoElement` 返回值带 `cx` 参数时用 `-> Div` / `AnyElement` / `+ use<>` 避免借用冲突
 
 ## 关键决策
 
@@ -53,4 +55,5 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格形式列出本机所�
 - `kb/docs/gpui-framework-research.md` — 写任何 GPUI / gpui-kit 代码前读；含 API 签名、DataTable delegate、异步加载模式、坑清单、依赖锁版策略
 - `kb/docs/data-layer-design.md` — 改动 SQLite schema、索引器、增量更新、搜索（FTS5 / LIKE / 正则）时读；含 DDL 与 serde 类型草案
 - `kb/notes/2026-09-15-m0-spike.md` — M0 实测：构建耗时、与调研文档的 API 差异、对 M1/M2 的影响（表格横向虚拟化裁列、程序化排序不更新表头）
+- `kb/notes/2026-09-16-design-refactor.md` — 界面重构：设计稿链接、`crates/app/src` 模块划分、gpui-kit 主题 / 下拉 / 选中覆盖层 / Preview 自适应列宽的做法、与设计稿的已知差异
 - `kb/plans/2026-09-08-agent-session-manager-prd.md` — 需求 R1–R13、架构、里程碑 M0–M5、风险与开放问题；开发任务的总入口

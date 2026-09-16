@@ -28,7 +28,7 @@ tags:
 
 ## 2. 实现状态
 
-截至 2026-09-15 完成 M0：技术栈验证与界面骨架。**当前 App 用 10,000 条生成的假数据运行，尚未读取真实 session。** 下表用三种状态标记各模块：
+截至 2026-09-16 完成 M0（技术栈验证）并按 Claude Design 设计稿重构了界面（见 `../notes/2026-09-16-design-refactor.md`）。**当前 App 用 10,000 条生成的假数据运行，尚未读取真实 session。** 下表用三种状态标记各模块：
 
 | 状态 | 含义 |
 |---|---|
@@ -38,18 +38,19 @@ tags:
 
 | 模块 | 状态 | 说明 |
 |---|---|---|
-| Session 表格 | ✅ | 11 列、虚拟滚动、行选中、表头排序 |
-| Preview 展示模式切换 | ✅ | 四种模式即时切换 |
-| 详情面板 | ✅ 摘要 / ⬜ 消息流 | 显示选中行的元信息；消息流未做 |
+| Session 表格 | ✅ | 7 列（Project / Preview / Started / Updated / Prompts / Size / Kind）、36px 两行、虚拟滚动、行选中、表头排序；Preview 列随窗口自适应 |
+| Preview 展示模式切换 | ✅ | 工具栏 Preview 下拉或 `cmd-1..4`，四种模式即时切换 |
+| 详情面板 | ✅ Metadata / ✅ Conversation（假数据） | 头部 + 两个 tab；Conversation 有角色 chip 过滤、thinking / 工具调用折叠展开、Expand all；消息正文尚无 Markdown 渲染 |
 | 分栏与折叠 | ✅ | 拖拽调宽，快捷键折叠 |
 | 状态栏 | ✅ | 显示行数与操作状态 |
-| 搜索范围切换 | 🟡 | 分段控件可切换，无搜索框与搜索逻辑 |
-| 时间范围过滤 | 🟡 | 日期选择器与预设可用，不过滤数据 |
-| 项目过滤、更多过滤 | ⬜ | |
+| 搜索框与范围切换 | 🟡 | 搜索框（`cmd-f` 聚焦、`esc` 清空）与 Scope 多选下拉都在，输入只显示在状态栏，无搜索逻辑 |
+| 时间范围过滤 | ✅ 预设 / ⬜ 自定义区间 | Updated 下拉：Today / 3 / 7 / 30 days / Any time，即时过滤 |
+| 项目过滤 | ✅ 单选 | Project 下拉列出项目与 session 数；多选、可搜索、worktree 聚合待做 |
+| 更多过滤 | ⬜ | |
 | 全文搜索、正则搜索 | ⬜ | |
 | 真实数据读取与索引 | ⬜ | 核心库为空壳 |
 | 实时更新 | ⬜ | |
-| 快捷键与菜单 | ✅ 部分 | 退出、折叠详情面板 |
+| 快捷键与菜单 | ✅ 部分 | 退出、折叠详情面板、`cmd-f`、`cmd-1..4` |
 | 设置与状态持久化 | ⬜ | |
 
 ## 3. 产品架构
@@ -82,11 +83,9 @@ tags:
 | Started / Updated | 首条消息时间 / 最后活动时间，`MM-DD HH:mm` | 是，Updated 为默认排序 |
 | Prompts | 用户消息数 | 是 |
 | Size | 记录文件大小 | 是 |
-| Cost | 花费，无数据时留空 | 是 |
-| Branch | git 分支 | 是 |
-| Tools | 工具调用次数 | 是 |
-| Kind | 来源徽章：普通 CLI 不标记；**SDK** / **BG**（后台）/ **History**（记录已被清理，仅剩历史 prompt） | 是 |
-| ID | session ID 前 8 位，等宽字体 | 否 |
+| Kind | 来源徽章：普通 CLI 不标记；**SDK** / **BG**（后台）/ **HIST**（记录已被清理，仅剩历史 prompt） | 是 |
+
+Cost、Branch、Tools、ID 不再作为列，只在详情面板的 Metadata 里显示（设计稿把表格收敛到 7 列）。Preview 列第一行是 `#序号 标题`，第二行按展示模式显示灰色预览。
 
 **交互**：单击选中并刷新详情面板；双击展开详情面板；表头点击三态排序（升 / 降 / 恢复默认），同值按更新时间倒序保持稳定；列宽可拖拽；键盘上下、Home / End、翻页导航。
 
@@ -94,42 +93,46 @@ tags:
 
 ### 4.2 Preview 展示模式 ✅
 
-工具栏右侧分段控件，决定 Preview 列第二行显示什么：**Title** / **First prompt**（默认）/ **Last prompt** / **Last message**（最后一条助手回复）。切换即时生效，不重新查询。
+工具栏右侧「Preview ▾」下拉（`cmd-1..4`），决定 Preview 列第二行显示什么：**Title** / **First prompt**（默认）/ **Last prompt** / **Last message**（最后一条助手回复）。切换即时生效，不重新查询。
 
 标题的取值优先级：用户自定义标题 > agent 名称 > AI 生成标题 > 首条 prompt 首行。
 
 待补充（⬜）：行密度（单行 / 两行）、相对时间显示、列顺序拖拽，以上均需持久化。
 
-### 4.3 过滤 🟡
+### 4.3 过滤 ✅ 项目单选 + 时间预设 / ⬜ 其余
 
-工具栏左侧，多个条件叠加生效，结果实时更新。
+工具栏左侧，多个条件叠加生效，结果实时更新（10k 行约 1ms，状态栏显示耗时）。
 
-- **时间范围**：预设（今天 / 3 天 / 7 天 / 30 天）+ 自定义日期区间，可清除；默认作用于 Updated，可切换为 Started。当前控件可用但不过滤数据。
-- **项目**（⬜）：可搜索的多选下拉，按最近活动排序并显示每项目 session 数；同一仓库的 worktree 目录聚合显示。
+- **时间范围**：「Updated ▾」下拉，预设 Today / 3 days / 7 days / 30 days / Any time，已过滤数据。自定义日期区间、切换为 Started 待做。
+- **项目**：「Project ▾」下拉，列出所有项目与各自 session 数，单选。待做：可搜索（真实数据约 85 个项目）、多选、按最近活动排序、worktree 聚合。
 - **更多过滤**（⬜）：折叠面板，含 Kind 多选（默认全选，不隐藏任何来源）、最少 prompt 数（默认 ≥1 以过滤空 session）、使用过的工具、有 PR、有 subagent。
 - 生效条件以 chip 展示可逐个移除，"Reset" 清空；条件持久化到下次启动（⬜）。
 
 ### 4.4 搜索 ⬜（范围控件 🟡）
 
 - 工具栏搜索框，`cmd-f` 聚焦，`esc` 清空。
-- **范围**分段控件已就位：User / Assistant / Both（默认）/ Tools。Tools 指工具调用的输入与输出，仅正则模式可用。
+- **范围**：「Scope ▾」多选下拉，User / Assistant / Tools 三个复选项，默认 User + Assistant（显示为 Both）。Tools 指工具调用的输入与输出，仅正则模式可用。
 - **模式**：文本（默认，不区分大小写，多词为 AND）/ 正则。正则模式额外支持标签过滤，如只搜 Bash 调用或 thinking 内容。
 - **结果呈现**：表格只保留有命中的 session，新增 Matches 列显示命中数并可排序；Preview 列改为显示第一个命中片段并高亮；详情面板内高亮命中，可上一个 / 下一个跳转。
 - 搜索与过滤条件叠加；结果上限 200 个 session，超出提示；耗时显示在状态栏。
 
-### 4.5 详情面板 ✅ 摘要 / ⬜ 消息流
+### 4.5 详情面板 ✅ Metadata / ✅ Conversation（假数据）
 
-右侧分栏，默认约 40% 宽，可拖拽，`cmd-\` 折叠；未选中时显示"Select a session"。
+右侧分栏，默认 580px，可拖拽，`cmd-\` 折叠；未选中时显示"Select a session"。
 
-**已实现**：标题、Project、ID、Started / Updated、Prompts、Size、Cost、Branch、Tools，以及 First prompt 与 Last message 全文。
+**头部**：标题、`id · project · branch · Kind 徽章`、Metadata / Conversation 分段 tab、右侧 `N prompts · N tools · size`。
+
+**Metadata tab**：Project、Branch、ID、Started、Updated、Prompts、Tools、Size、Cost、Kind、Resume 命令，以及 First prompt / Last prompt / Last message 全文。
+
+**Conversation tab**：顶部 User / Assistant / Tools / Thinking 四个带计数的 chip 可切换显示，右侧 Expand all / Collapse all。user 消息浅蓝底带 `USER #n` 与时间；assistant 消息 `ASST`；thinking 与工具调用默认收成 22px 单行（时间 · ▶ · 工具名 · 参数 · 结果摘要），点击展开 input / output 或 thinking 全文。History 类 session 只显示 user prompt。
 
 **待补充**：
 
 - 头部增加 token 用量、时长、模型、权限模式、PR 链接、修改过的文件列表（折叠）
 - 操作按钮：复制 `claude --resume <id>`、在终端打开、在 Finder 显示记录文件、打开项目目录、导出 Markdown
-- 消息流：按时间顺序展示 user / assistant 消息，助手正文 Markdown 渲染，长消息默认折叠 5 行；工具调用显示为可折叠卡片（工具名 + 描述 + 命令）；工具输出默认折叠只显示前 3 行；thinking 默认隐藏；顶部角色过滤 chip
+- 消息流接真实数据；助手正文 Markdown 渲染，长消息默认折叠 5 行；连续工具调用分组（设计稿 `groupTools`）
 - subagent 列表，点击切换查看其消息流
-- History 类 session 显示历史 prompt 列表并提示记录已被清理
+- History 类 session 提示记录已被清理
 
 ### 4.6 索引与实时更新 ⬜
 
@@ -142,13 +145,13 @@ tags:
 
 ### 4.7 快捷键与菜单 ✅ 部分
 
-已实现：`cmd-q` 退出、`cmd-\` 折叠 / 展开详情面板，对应 App 菜单与 View 菜单。
+已实现：`cmd-q` 退出、`cmd-\` 折叠 / 展开详情面板、`cmd-f` 聚焦搜索框、`cmd-1..4` 切换展示模式，对应 App 菜单与 View 菜单。
 
-待补充：`cmd-f` 搜索、`enter` 打开详情、`cmd-c` 复制 ID、`cmd-shift-c` 复制 resume 命令、`cmd-r` 在终端 resume、`cmd-1..4` 切换展示模式、`cmd-,` 设置、`cmd-shift-r` 重建索引。
+待补充：`enter` 打开详情、`cmd-c` 复制 ID、`cmd-shift-c` 复制 resume 命令、`cmd-r` 在终端 resume、`cmd-,` 设置、`cmd-shift-r` 重建索引。
 
 ### 4.8 状态栏 ✅ 部分
 
-左：当前显示 N / 总 M 个 session；中：最近一次操作状态；右：表格构建耗时。待补充：索引进度、搜索耗时、生效过滤 chip。
+22px 等宽字体。左：当前显示 N / 总 M 个 session；中：最近一次操作状态（选中 `#num · project`、过滤耗时）；右：表格构建耗时。待补充：索引进度、搜索耗时、生效过滤 chip。
 
 ### 4.9 设置 ⬜
 
@@ -183,5 +186,5 @@ tags:
 ## 8. 相关文档
 
 - 原始 PRD（含实现方案与里程碑）：`../plans/2026-09-08-agent-session-manager-prd.md`
-- M0 验证记录与截图说明：`../notes/2026-09-15-m0-spike.md`
+- M0 验证记录与截图说明：`../notes/2026-09-15-m0-spike.md`；界面重构记录（设计稿、模块划分、gpui-kit 坑、与设计稿差异）：`../notes/2026-09-16-design-refactor.md`
 - 数据格式：`claude-session-data-format.md`；数据层设计：`data-layer-design.md`；UI 框架：`gpui-framework-research.md`
