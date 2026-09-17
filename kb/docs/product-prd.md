@@ -28,7 +28,7 @@ tags:
 
 ## 2. 实现状态
 
-截至 2026-09-16 完成 M0（技术栈验证）并按 Claude Design 设计稿重构了界面（见 `../notes/2026-09-16-design-refactor.md`）。**当前 App 用 10,000 条生成的假数据运行，尚未读取真实 session。** 下表用三种状态标记各模块：
+截至 2026-09-17 完成 M0（技术栈验证）、界面重构（见 `../notes/2026-09-16-design-refactor.md`）和 M1（核心数据层与 `asm` 命令行，见 `../notes/2026-09-17-m1-core-crate.md`）。**App 界面仍用 10,000 条生成的假数据运行；真实 session 的解析、索引与搜索已在核心库和 `asm` 命令行里可用，M2 接入界面。** 下表用三种状态标记各模块：
 
 | 状态 | 含义 |
 |---|---|
@@ -47,8 +47,8 @@ tags:
 | 时间范围过滤 | ✅ 预设 / ⬜ 自定义区间 | Updated 下拉：Today / 3 / 7 / 30 days / Any time，即时过滤 |
 | 项目过滤 | ✅ 单选 | Project 下拉列出项目与 session 数；多选、可搜索、worktree 聚合待做 |
 | 更多过滤 | ⬜ | |
-| 全文搜索、正则搜索 | ⬜ | |
-| 真实数据读取与索引 | ⬜ | 核心库为空壳 |
+| 全文搜索、正则搜索 | ✅ 核心库 / ⬜ 界面 | `asm search`（正则扫描，与旧脚本逐字一致）与 `asm search --index`（FTS5，3–11ms）可用；界面未接 |
+| 真实数据读取与索引 | ✅ 核心库 / ⬜ 界面 | 解析器、增量 SQLite 索引、history.jsonl 补位、损坏自动重建；本机 1.1GB 全量 2.1–2.4s，增量 0.14s |
 | 实时更新 | ⬜ | |
 | 快捷键与菜单 | ✅ 部分 | 退出、折叠详情面板、`cmd-f`、`cmd-1..4` |
 | 设置与状态持久化 | ⬜ | |
@@ -134,7 +134,7 @@ Cost、Branch、Tools、ID 不再作为列，只在详情面板的 Metadata 里�
 - subagent 列表，点击切换查看其消息流
 - History 类 session 提示记录已被清理
 
-### 4.6 索引与实时更新 ⬜
+### 4.6 索引与实时更新 ✅ 核心库 / ⬜ 界面与监听
 
 - 首次启动全量索引，状态栏显示进度，表格随索引流式填充
 - 之后启动增量更新，通常 100ms 内完成
@@ -186,5 +186,5 @@ Cost、Branch、Tools、ID 不再作为列，只在详情面板的 Metadata 里�
 ## 8. 相关文档
 
 - 原始 PRD（含实现方案与里程碑）：`../plans/2026-09-08-agent-session-manager-prd.md`
-- M0 验证记录与截图说明：`../notes/2026-09-15-m0-spike.md`；界面重构记录（设计稿、模块划分、gpui-kit 坑、与设计稿差异）：`../notes/2026-09-16-design-refactor.md`
+- M0 验证记录与截图说明：`../notes/2026-09-15-m0-spike.md`；界面重构记录（设计稿、模块划分、gpui-kit 坑、与设计稿差异）：`../notes/2026-09-16-design-refactor.md`；M1 核心库记录（模块、实测、与旧脚本的比对）：`../notes/2026-09-17-m1-core-crate.md`
 - 数据格式：`claude-session-data-format.md`；数据层设计：`data-layer-design.md`；UI 框架：`gpui-framework-research.md`

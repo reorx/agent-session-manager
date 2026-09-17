@@ -6,5 +6,28 @@ rust-version.workspace = true
 license.workspace = true
 description = "Parsing, indexing and search for Claude Code sessions (no UI dependencies)"
 
+[lib]
+name = "agent_session_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "asm"
+path = "src/bin/asm.rs"
+
 [dependencies]
 anyhow.workspace = true
+chrono = "0.4.45"
+clap = { version = "4.6", features = ["derive", "env"] }
+directories = "6.0"
+memchr = "2.8"
+memmap2 = "0.9"
+rayon = "1.12"
+regex = "1.13"
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["raw_value", "preserve_order"] }
+
+[dev-dependencies]
+assert_cmd = "2.2"
+predicates = "3.1"
+tempfile = "3.27"

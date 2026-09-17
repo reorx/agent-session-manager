@@ -13,6 +13,8 @@ tags:
 
 调研日期 2026-09-08。本文给出解析、索引、搜索、增量更新的技术选型与数据模型，是 `kb/docs/claude-session-data-format.md`（数据格式）的下游。所有数字均在本机（M4，macOS 26.6，Claude Code 2.1.260）实测。
 
+> **实现状态（2026-09-17）**：M1 已按本文实现，代码在 `crates/core`。与本文的差异（未用 grep-searcher、chrono 代替 jiff、暂无 `history_prompts` 表、subagent 只计数、`messages_session_ts` 改按 byte_offset）、字节预过滤的最终规则和真实数据实测见 `../notes/2026-09-17-m1-core-crate.md`；改 schema 时以 `crates/core/src/index/schema.sql` 为准。
+
 ## 1. 决定设计的关键实测
 
 | 指标 | 值 |

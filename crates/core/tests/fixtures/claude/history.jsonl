@@ -1,0 +1,14 @@
+{"display":"design a plagiarism checker","pastedContents":{},"timestamp":1748736000000,"project":"/Users/me/Code/beta"}
+{"display":"use chroma as the vector db","pastedContents":{},"timestamp":1748737800000,"project":"/Users/me/Code/beta"}
+{"display":"/clear","pastedContents":{},"timestamp":1748755800000,"project":"/Users/me/Code/beta"}
+{"display":"now add a CLI","pastedContents":{},"timestamp":1748755860000,"project":"/Users/me/Code/beta"}
+{"display":"/model opus","pastedContents":{},"timestamp":1787187600000,"project":"/Users/me/Code/alpha","sessionId":"44444444-aaaa-4bbb-8ccc-000000000004"}
+{"display":"Fix the flaky test\n\n[Pasted text #1 +3 lines]","pastedContents":{"1":{"id":1,"type":"text","content":"line1\nline2\nline3"}},"timestamp":1787187660000,"project":"/Users/me/Code/alpha","sessionId":"44444444-aaaa-4bbb-8ccc-000000000004"}
+{"display":"[Pasted text #2 +2 lines] and explain","pastedContents":{"2":{"id":2,"type":"text","contentHash":"deadbeef01234567"}},"timestamp":1787191200000,"project":"/Users/me/Code/alpha","sessionId":"44444444-aaaa-4bbb-8ccc-000000000004"}
+{"display":"[Pasted text #3 +9 lines]","pastedContents":{"3":{"id":3,"type":"text","contentHash":"0000missinghash0"}},"timestamp":1787193000000,"project":"/Users/me/Code/alpha","sessionId":"44444444-aaaa-4bbb-8ccc-000000000004"}
+{"display":"/init --force","pastedContents":{},"timestamp":1788249601000,"project":"/Users/me/Code/alpha","sessionId":"11111111-aaaa-4bbb-8ccc-000000000001"}
+{"display":"Please refactor the parser to handle nested arrays","pastedContents":{},"timestamp":1788255000000,"project":"/Users/me/Code/alpha","sessionId":"11111111-aaaa-4bbb-8ccc-000000000001"}
+{"display":"What is in this screenshot?","pastedContents":{},"timestamp":1788256800000,"project":"/Users/me/Code/alpha","sessionId":"11111111-aaaa-4bbb-8ccc-000000000001"}
+{"display":"hello gamma","pastedContents":{},"timestamp":1789171200000,"project":"/Users/me/Code/gamma","sessionId":"66666666-aaaa-4bbb-8ccc-000000000006"}
+{"display":"no project field","timestamp":1789171260000}
+not json at all

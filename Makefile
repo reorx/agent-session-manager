@@ -57,7 +57,15 @@ screenshot-clicks: build ## Like screenshot, but drive dropdowns / tabs / rows w
 bin: ## Print the path of the debug binary
 	@echo "$(BIN)"
 
+asm: ## Run the asm CLI (release build), e.g. make asm ARGS="list -d 7"
+	@cargo build --release -p $(CORE) --bin asm -q
+	@$(TARGET_DIR)/release/asm $(ARGS)
+
+parity: ## Diff asm against the Python reference script on the real ~/.claude (outputs in tmp/<date>-python-parity)
+	@cargo build --release -p $(CORE) --bin asm -q
+	scripts/compare-with-python.sh "$(TARGET_DIR)/release/asm"
+
 clean: ## Remove this project's build artifacts only (the target dir is shared across projects)
 	cargo clean -p $(APP) -p $(CORE)
 
-.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks bin clean
+.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks bin asm parity clean
