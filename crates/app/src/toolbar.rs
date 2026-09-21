@@ -78,6 +78,7 @@ impl AppRoot {
         self.table.read(cx).delegate().filter().clone()
     }
 
+    /// `project` is a `project_key`.
     pub fn set_project(&mut self, project: Option<SharedString>, cx: &mut Context<Self>) {
         let mut filter = self.current_filter(cx);
         filter.project = project;
@@ -91,6 +92,12 @@ impl AppRoot {
         self.apply_filter(filter, cx);
     }
 
+    pub fn toggle_empty_sessions(&mut self, cx: &mut Context<Self>) {
+        let mut filter = self.current_filter(cx);
+        filter.show_empty = !filter.show_empty;
+        self.apply_filter(filter, cx);
+    }
+
     fn apply_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
         let (changed, ms, shown) = self.table.update(cx, |table, cx| {
             let changed = table.delegate_mut().set_filter(filter);
@@ -101,7 +108,10 @@ impl AppRoot {
             (changed, table.delegate().last_filter_ms, table.delegate().ix.len())
         });
         if changed {
+            println!("filter + sort: {shown} rows in {ms}ms");
             self.status = format!("filtered {shown} sessions in {ms}ms").into();
+            self.after_rows_changed(cx);
+            self.persist(cx);
         }
         cx.notify();
     }
@@ -111,13 +121,14 @@ impl AppRoot {
             table.delegate_mut().mode = mode;
             cx.notify();
         });
+        self.persist(cx);
         cx.notify();
     }
 
     fn project_menu(&self, cx: &Context<Self>) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
         let this = cx.entity().downgrade();
         let current = self.current_filter(cx).project;
-        let total = self.table.read(cx).delegate().rows.len();
+        let total: usize = self.projects.iter().map(|p| p.count).sum();
         let projects = self.projects.clone();
         move |menu, _, _| {
             let this_all = this.clone();
@@ -130,14 +141,14 @@ impl AppRoot {
                     this_all.update(cx, |app, cx| app.set_project(None, cx)).ok();
                 },
             ));
-            for (name, count) in &projects {
+            for project in &projects {
                 let this = this.clone();
-                let pick = name.clone();
+                let pick = project.key.clone();
                 menu = menu.item(menu_item(
-                    name.clone(),
-                    count.to_string().into(),
+                    project.name.clone(),
+                    project.count.to_string().into(),
                     true,
-                    current.as_ref() == Some(name),
+                    current.as_ref() == Some(&project.key),
                     move |cx| {
                         let pick = pick.clone();
                         this.update(cx, |app, cx| app.set_project(Some(pick), cx)).ok();
@@ -199,7 +210,10 @@ impl AppRoot {
 
     pub fn render_toolbar(&self, cx: &mut Context<Self>) -> Div {
         let filter = self.current_filter(cx);
-        let project_label: SharedString = filter.project.clone().unwrap_or_else(|| "All".into());
+        let project_label: SharedString = match &filter.project {
+            Some(key) => self.projects.iter().find(|p| p.key == *key).map_or_else(|| key.clone(), |p| p.name.clone()),
+            None => "All".into(),
+        };
         let mode = self.table.read(cx).delegate().mode;
 
         h_flex()

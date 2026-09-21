@@ -28,6 +28,14 @@ pub struct Progress {
     pub phase: &'static str,
 }
 
+/// What a scan reports while it runs: progress ticks, plus every session row it writes (read
+/// back from the index, so it equals `Db::session`). The UI fills its table from these.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScanEvent {
+    Progress(Progress),
+    Session(SessionSummary),
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScanReport {
     pub files_seen: usize,
@@ -75,6 +83,15 @@ impl Indexer {
 
     /// Bring the index up to date with the files on disk.
     pub fn scan(&self, db: &mut Db, progress: &mut dyn FnMut(&Progress)) -> Result<ScanReport> {
+        self.scan_streaming(db, &mut |ev| {
+            if let ScanEvent::Progress(p) = ev {
+                progress(&p);
+            }
+        })
+    }
+
+    /// Like `scan`, but also hands out each session row as soon as it is written.
+    pub fn scan_streaming(&self, db: &mut Db, emit: &mut dyn FnMut(ScanEvent)) -> Result<ScanReport> {
         let started = Instant::now();
         let mut report = ScanReport::default();
         let files = discover_transcripts(&self.claude)?;
@@ -83,7 +100,7 @@ impl Indexer {
         let planned: Vec<(TranscriptFile, Plan)> =
             files.into_iter().map(|f| { let plan = plan_for(&f, states.get(&f.path)); (f, plan) }).collect();
         report.files_unchanged = planned.iter().filter(|(_, p)| *p == Plan::Unchanged).count();
-        progress(&Progress { done: report.files_unchanged, total: report.files_seen, phase: "scanning" });
+        emit(ScanEvent::Progress(Progress { done: report.files_unchanged, total: report.files_seen, phase: "scanning" }));
 
         let to_parse: Vec<(TranscriptFile, Plan)> = planned.into_iter().filter(|(_, p)| *p != Plan::Unchanged).collect();
         let t = Instant::now();
@@ -95,6 +112,7 @@ impl Indexer {
         db.transaction(|db| {
             for p in &parsed {
                 write_parsed(db, p)?;
+                emit_session(db, &p.file.session_id, emit)?;
                 match p.plan {
                     Plan::Full => report.files_parsed += 1,
                     Plan::Append(_) => report.files_appended += 1,
@@ -103,17 +121,21 @@ impl Indexer {
                 }
                 report.bytes_parsed += p.bytes_parsed;
                 done += 1;
-                progress(&Progress { done, total: report.files_seen, phase: "indexing" });
+                emit(ScanEvent::Progress(Progress { done, total: report.files_seen, phase: "indexing" }));
             }
             let on_disk: std::collections::HashSet<&PathBuf> = parsed.iter().map(|p| &p.file.path).collect();
-            report.files_missing = mark_missing(db, &states, &on_disk, report.files_unchanged)?;
+            let missing = mark_missing(db, &states, &on_disk)?;
+            report.files_missing = missing.len();
+            for id in &missing {
+                emit_session(db, id, emit)?;
+            }
             report.elapsed_write = t.elapsed();
             let t = Instant::now();
-            report.history_sessions = self.import_history(db)?;
+            report.history_sessions = self.import_history(db, emit)?;
             report.elapsed_history = t.elapsed();
             Ok(())
         })?;
-        progress(&Progress { done: report.files_seen, total: report.files_seen, phase: "done" });
+        emit(ScanEvent::Progress(Progress { done: report.files_seen, total: report.files_seen, phase: "done" }));
         report.elapsed = started.elapsed();
         Ok(report)
     }
@@ -124,8 +146,9 @@ impl Indexer {
         self.scan(db, progress)
     }
 
-    /// Sessions that exist only in history.jsonl (transcript gone or never indexed).
-    fn import_history(&self, db: &Db) -> Result<usize> {
+    /// Sessions that exist only in history.jsonl (transcript gone or never indexed). Rows that
+    /// are already indexed unchanged are left alone, so rescans stay quiet.
+    fn import_history(&self, db: &Db, emit: &mut dyn FnMut(ScanEvent)) -> Result<usize> {
         let by_project = load_history(&self.claude.history_file())?;
         let cache = self.claude.paste_cache_dir();
         let sources = db.session_sources()?;
@@ -136,7 +159,11 @@ impl Indexer {
                 if sources.get(&s.id) == Some(&Source::Transcript) {
                     continue;
                 }
+                if sources.contains_key(&s.id) && db.session(&s.id)?.as_ref() == Some(&s) {
+                    continue;
+                }
                 db.upsert_session(&s, project_id)?;
+                emit_session(db, &s.id, emit)?;
                 written += 1;
             }
         }
@@ -212,15 +239,21 @@ fn write_parsed(db: &Db, p: &Parsed) -> Result<()> {
     Ok(())
 }
 
+fn emit_session(db: &Db, id: &str, emit: &mut dyn FnMut(ScanEvent)) -> Result<()> {
+    if let Some(s) = db.session(id)? {
+        emit(ScanEvent::Session(s));
+    }
+    Ok(())
+}
+
 /// Files that were indexed before but are gone now: keep the session row, flag it, drop the
-/// messages. Returns how many were newly marked.
+/// messages. Returns the session ids that were newly marked.
 fn mark_missing(
     db: &Db,
     states: &HashMap<PathBuf, IndexState>,
     parsed_now: &std::collections::HashSet<&PathBuf>,
-    _unchanged: usize,
-) -> Result<usize> {
-    let mut missing = 0;
+) -> Result<Vec<String>> {
+    let mut missing = Vec::new();
     for (path, state) in states {
         if parsed_now.contains(path) || path.is_file() {
             continue;
@@ -228,7 +261,7 @@ fn mark_missing(
         db.mark_transcript_missing(&state.session_id)?;
         db.delete_messages(&state.session_id)?;
         db.delete_index_state(path)?;
-        missing += 1;
+        missing.push(state.session_id.clone());
     }
     Ok(missing)
 }

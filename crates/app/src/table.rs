@@ -2,11 +2,12 @@
 //! index vector. Filtering and sorting run on the main thread (10k rows ≈ 7ms).
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
-use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::component::v_flex;
 use gpui_kit::*;
 
 use crate::model::{DisplayMode, Filter, SessionRow};
@@ -24,9 +25,12 @@ pub const PREVIEW_MIN_W: f32 = 240.;
 pub const ROW_H: f32 = 36.;
 
 const PREVIEW_COL: usize = 1;
+const DEFAULT_SORT_KEY: &str = "updated";
 
 pub struct SessionTableDelegate {
     pub rows: Vec<Arc<SessionRow>>,
+    /// Session id → position in `rows`.
+    by_id: HashMap<SharedString, usize>,
     /// Indices into `rows` after filter + sort.
     pub ix: Vec<usize>,
     columns: Vec<Column>,
@@ -41,7 +45,7 @@ fn col(key: &'static str, name: &'static str, width: f32) -> Column {
 }
 
 impl SessionTableDelegate {
-    pub fn new(rows: Vec<Arc<SessionRow>>) -> Self {
+    pub fn new() -> Self {
         let columns = vec![
             col("project", "Project", PROJECT_W).sortable(),
             col("preview", "Preview", 460.).resizable(false),
@@ -51,21 +55,71 @@ impl SessionTableDelegate {
             col("size", "Size", SIZE_W).text_right().sortable(),
             col("kind", "Kind", KIND_W).sortable(),
         ];
-        let mut this = Self {
-            ix: (0..rows.len()).collect(),
-            rows,
+        Self {
+            rows: Vec::new(),
+            by_id: HashMap::new(),
+            ix: Vec::new(),
             columns,
             mode: DisplayMode::FirstPrompt,
             filter: Filter::default(),
             sort: None,
             last_filter_ms: 0,
-        };
-        this.sort_by_updated_desc();
-        this
+        }
     }
 
     pub fn row(&self, row_ix: usize) -> &Arc<SessionRow> {
         &self.rows[self.ix[row_ix]]
+    }
+
+    /// Replace every row (a load from the index).
+    pub fn set_rows(&mut self, rows: Vec<Arc<SessionRow>>) {
+        self.by_id = rows.iter().enumerate().map(|(i, r)| (r.id.clone(), i)).collect();
+        self.rows = rows;
+        self.recompute();
+    }
+
+    /// Add new sessions and replace changed ones by id (rows streamed by a scan).
+    pub fn upsert(&mut self, rows: Vec<Arc<SessionRow>>) {
+        for row in rows {
+            match self.by_id.get(&row.id) {
+                Some(&i) => self.rows[i] = row,
+                None => {
+                    self.by_id.insert(row.id.clone(), self.rows.len());
+                    self.rows.push(row);
+                }
+            }
+        }
+        self.recompute();
+    }
+
+    /// Where a session currently sits in the filtered + sorted view.
+    pub fn position_of(&self, id: &str) -> Option<usize> {
+        let i = *self.by_id.get(id)?;
+        self.ix.iter().position(|x| *x == i)
+    }
+
+    /// Current sort as (column key, direction); `None` is the default order.
+    pub fn sort_state(&self) -> Option<(SharedString, ColumnSort)> {
+        self.sort.clone()
+    }
+
+    /// Sort programmatically (restoring a saved state). The caller must `TableState::refresh`
+    /// afterwards so the header arrows follow.
+    pub fn set_sort(&mut self, key: &str, sort: ColumnSort) {
+        if !self.columns.iter().any(|c| c.key == key && c.sort.is_some()) {
+            return;
+        }
+        self.sort(key, sort);
+    }
+
+    fn recompute(&mut self) {
+        let t = Instant::now();
+        self.ix = (0..self.rows.len()).filter(|i| self.filter.matches(&self.rows[*i])).collect();
+        match self.sort.clone() {
+            Some((key, sort)) => self.sort(&key, sort),
+            None => self.sort_by_updated_desc(),
+        }
+        self.last_filter_ms = t.elapsed().as_millis();
     }
 
     pub fn preview_width(&self) -> Pixels {
@@ -86,13 +140,7 @@ impl SessionTableDelegate {
             return false;
         }
         self.filter = filter;
-        let t = Instant::now();
-        self.ix = (0..self.rows.len()).filter(|i| self.filter.matches(&self.rows[*i])).collect();
-        match self.sort.clone() {
-            Some((key, sort)) => self.sort(&key, sort),
-            None => self.sort_by_updated_desc(),
-        }
-        self.last_filter_ms = t.elapsed().as_millis();
+        self.recompute();
         true
     }
 
@@ -113,13 +161,27 @@ impl SessionTableDelegate {
         }
     }
 
+    /// Header arrows live in `Column::sort`; keep them in step with `self.sort` so a later
+    /// `TableState::refresh` (the Preview column is re-measured on every resize) does not reset them.
+    fn sync_column_arrows(&mut self) {
+        let (active, dir) = match &self.sort {
+            Some((key, dir)) => (key.clone(), *dir),
+            None => (DEFAULT_SORT_KEY.into(), ColumnSort::Descending),
+        };
+        for column in self.columns.iter_mut().filter(|c| c.sort.is_some()) {
+            column.sort = Some(if column.key == active { dir } else { ColumnSort::Default });
+        }
+    }
+
     fn sort(&mut self, key: &str, sort: ColumnSort) {
         if sort == ColumnSort::Default {
             self.sort = None;
+            self.sync_column_arrows();
             self.sort_by_updated_desc();
             return;
         }
         self.sort = Some((key.to_string().into(), sort));
+        self.sync_column_arrows();
         let rows = &self.rows;
         self.ix.sort_by(|a, b| {
             let (ra, rb) = (&rows[*a], &rows[*b]);
@@ -149,15 +211,13 @@ impl TableDelegate for SessionTableDelegate {
 
     fn perform_sort(&mut self, col_ix: usize, sort: ColumnSort, _: &mut Window, cx: &mut Context<TableState<Self>>) {
         let key = self.columns[col_ix].key.clone();
-        let t = Instant::now();
         self.sort(&key, sort);
-        println!("sort {key} {sort:?}: {:?}", t.elapsed());
         cx.notify();
     }
 
     fn render_th(&mut self, col_ix: usize, _: &mut Window, _: &mut Context<TableState<Self>>) -> impl IntoElement {
         let column = &self.columns[col_ix];
-        let is_sorted = self.sort.as_ref().map(|(k, _)| *k == column.key).unwrap_or(col_ix == 3 && self.sort.is_none());
+        let is_sorted = self.sort.as_ref().map(|(k, _)| *k == column.key).unwrap_or(column.key == DEFAULT_SORT_KEY);
         div()
             .size_full()
             .flex()
@@ -178,21 +238,7 @@ impl TableDelegate for SessionTableDelegate {
                     .h(px(ROW_H))
                     .justify_center()
                     .overflow_hidden()
-                    .child(
-                        h_flex()
-                            .gap(px(4.))
-                            .line_height(px(15.))
-                            .overflow_hidden()
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .font_family(style::mono(cx))
-                                    .text_size(px(11.))
-                                    .text_color(style::muted())
-                                    .child(row.num_fmt.clone()),
-                            )
-                            .child(div().truncate().child(row.title.clone())),
-                    )
+                    .child(div().truncate().line_height(px(15.)).child(row.title.clone()))
                     .child(div().truncate().text_size(px(11.)).line_height(px(14.)).text_color(style::muted()).child(sub))
                     .into_any_element()
             }
@@ -206,5 +252,81 @@ impl TableDelegate for SessionTableDelegate {
             },
             _ => div().into_any_element(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // `gpui_kit::*` exports gpui's own `test` attribute; name the standard one explicitly.
+    use core::prelude::v1::test;
+
+    use super::*;
+    use crate::model::tests::{row, summary};
+
+    fn ids(d: &SessionTableDelegate) -> Vec<&str> {
+        (0..d.ix.len()).map(|i| d.row(i).id.as_ref()).collect()
+    }
+
+    fn with_prompts(id: &str, project: &str, updated_at: i64, prompts: u32) -> Arc<SessionRow> {
+        let mut s = summary(id, project, updated_at);
+        s.user_msg_count = prompts;
+        Arc::new(SessionRow::from_summary(&s))
+    }
+
+    #[test]
+    fn rows_show_newest_first_by_default() {
+        let mut d = SessionTableDelegate::new();
+        d.set_rows(vec![row("a", "/p/x", 100), row("c", "/p/x", 300), row("b", "/p/y", 200)]);
+        assert_eq!(ids(&d), ["c", "b", "a"]);
+        assert_eq!(d.position_of("b"), Some(1));
+        assert_eq!(d.position_of("zzz"), None);
+    }
+
+    #[test]
+    fn streamed_rows_are_inserted_in_order_and_changed_rows_replace_the_old_ones() {
+        let mut d = SessionTableDelegate::new();
+        d.set_rows(vec![row("a", "/p/x", 100), row("b", "/p/x", 200)]);
+        d.upsert(vec![row("c", "/p/x", 150), row("a", "/p/x", 400)]);
+        assert_eq!(ids(&d), ["a", "b", "c"], "a moved to the top after its update, the new c is the oldest");
+        assert_eq!(d.rows.len(), 3, "a was replaced, not duplicated");
+    }
+
+    #[test]
+    fn the_filter_and_the_sort_survive_new_data() {
+        let mut d = SessionTableDelegate::new();
+        d.set_rows(vec![with_prompts("a", "/p/x", 100, 5), with_prompts("b", "/p/y", 200, 9), with_prompts("c", "/p/x", 300, 1)]);
+        d.set_filter(Filter { project: Some("-p-x".into()), ..Default::default() });
+        d.set_sort("prompts", ColumnSort::Descending);
+        assert_eq!(ids(&d), ["a", "c"]);
+        d.upsert(vec![with_prompts("d", "/p/x", 50, 7), with_prompts("e", "/p/y", 500, 99)]);
+        assert_eq!(ids(&d), ["d", "a", "c"], "still project x, still by prompts");
+        assert_eq!(d.position_of("e"), None, "filtered out rows have no position");
+        d.set_rows(vec![with_prompts("z", "/p/x", 1, 3)]);
+        assert_eq!(ids(&d), ["z"]);
+    }
+
+    #[test]
+    fn equal_sort_values_fall_back_to_newest_first() {
+        let mut d = SessionTableDelegate::new();
+        d.set_rows(vec![with_prompts("old", "/p/x", 100, 2), with_prompts("new", "/p/x", 300, 2), with_prompts("top", "/p/x", 200, 8)]);
+        d.set_sort("prompts", ColumnSort::Ascending);
+        assert_eq!(ids(&d), ["new", "old", "top"]);
+    }
+
+    #[test]
+    fn header_arrows_follow_the_sort_state() {
+        let arrows = |d: &SessionTableDelegate| -> Vec<(String, ColumnSort)> {
+            d.columns.iter().filter_map(|c| c.sort.map(|s| (c.key.to_string(), s))).filter(|(_, s)| *s != ColumnSort::Default).collect()
+        };
+        let mut d = SessionTableDelegate::new();
+        assert_eq!(arrows(&d), [("updated".to_string(), ColumnSort::Descending)]);
+        d.set_sort("size", ColumnSort::Ascending);
+        assert_eq!(arrows(&d), [("size".to_string(), ColumnSort::Ascending)]);
+        assert_eq!(d.sort_state(), Some(("size".into(), ColumnSort::Ascending)));
+        d.set_sort("size", ColumnSort::Default);
+        assert_eq!(arrows(&d), [("updated".to_string(), ColumnSort::Descending)], "back to the default order");
+        assert_eq!(d.sort_state(), None);
+        d.set_sort("preview", ColumnSort::Ascending);
+        assert_eq!(d.sort_state(), None, "Preview is not sortable");
     }
 }

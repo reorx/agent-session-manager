@@ -2,7 +2,7 @@
 
 A macOS desktop app (Rust + [GPUI](https://gpui.rs/) via [gpui-kit](https://gpui-kit.com)) that lists every local Claude Code session in a fast, filterable, sortable, searchable table with a detail pane.
 
-Status: M1 done (2026-09-17). The core crate parses, indexes (SQLite + FTS5) and searches real sessions, and the `asm` CLI replaces `claude_session_search.py` with byte-identical output; the GUI still renders 10,000 fake rows until M2 wires it to the core. See `AGENTS.md` and `kb/plans/2026-09-08-agent-session-manager-prd.md`.
+Status: M2 done (2026-09-21). The GUI runs on real data: it loads the SQLite index on launch (~200ms to a usable table of 5.5k sessions), then scans incrementally in the background and streams new rows in; a cold index of ~1.3GB takes about 4s with the table filling as it goes. Project / time filters, header sorting, preview modes and the selection persist across launches. The core crate parses, indexes (SQLite + FTS5) and searches sessions, and the `asm` CLI replaces `claude_session_search.py` with byte-identical output. Search in the GUI is next (M3). See `AGENTS.md` and `kb/plans/2026-09-08-agent-session-manager-prd.md`.
 
 ## `asm` CLI
 

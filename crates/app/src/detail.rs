@@ -8,7 +8,7 @@ use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use gpui_kit::*;
 
-use crate::model::{Conversation, Message, MessageKind, SessionRow};
+use crate::model::{CONVERSATION_CAP, Conversation, Kind, Message, MessageKind, SessionRow};
 use crate::style::{self, FluentBuilder};
 use crate::AppRoot;
 
@@ -49,6 +49,8 @@ pub struct DetailState {
     expanded: HashMap<usize, bool>,
     force_all: Option<bool>,
     pub conversation: Conversation,
+    /// Indexed messages of the session, including the ones beyond `CONVERSATION_CAP`.
+    total_messages: usize,
 }
 
 impl Default for DetailState {
@@ -59,13 +61,15 @@ impl Default for DetailState {
             expanded: HashMap::new(),
             force_all: None,
             conversation: Vec::new(),
+            total_messages: 0,
         }
     }
 }
 
 impl DetailState {
-    pub fn set_conversation(&mut self, conversation: Conversation) {
+    pub fn set_conversation(&mut self, conversation: Conversation, total_messages: usize) {
         self.conversation = conversation;
+        self.total_messages = total_messages;
         self.expanded.clear();
         self.force_all = None;
     }
@@ -153,7 +157,7 @@ impl AppRoot {
             .child(self.render_detail_header(&row, cx))
             .child(match self.detail.tab {
                 DetailTab::Metadata => self.render_metadata(&row, cx).into_any_element(),
-                DetailTab::Conversation => self.render_conversation(cx).into_any_element(),
+                DetailTab::Conversation => self.render_conversation(&row, cx).into_any_element(),
             })
             .into_any_element()
     }
@@ -172,7 +176,7 @@ impl AppRoot {
             .pb(px(8.))
             .border_b_1()
             .border_color(style::border_soft())
-            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).line_height(px(18.)).child(row.title.clone()))
+            .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).line_height(px(18.)).child(row.title.clone()))
             .child(
                 h_flex()
                     .mt(px(3.))
@@ -210,7 +214,6 @@ impl AppRoot {
     }
 
     fn render_metadata(&self, row: &Arc<SessionRow>, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let resume: SharedString = format!("claude --resume {}", row.short_id).into();
         let pair_row = |a, b| h_flex().w_full().gap(px(8.)).child(a).child(b);
         div()
             .id("metadata")
@@ -226,7 +229,8 @@ impl AppRoot {
                         meta_pair("Project", div().child(row.project.clone()).into_any_element()),
                         meta_pair("Branch", mono_value(row.branch.clone(), cx).into_any_element()),
                     ))
-                    .child(meta_pair("ID", mono_value(row.uuid.clone(), cx).into_any_element()))
+                    .child(meta_pair("Path", mono_value(row.project_path.clone(), cx).into_any_element()))
+                    .child(meta_pair("ID", mono_value(row.id.clone(), cx).into_any_element()))
                     .child(pair_row(
                         meta_pair("Started", mono_value(row.started_full.clone(), cx).into_any_element()),
                         meta_pair("Updated", mono_value(row.updated_full.clone(), cx).into_any_element()),
@@ -240,12 +244,24 @@ impl AppRoot {
                         meta_pair("Cost", mono_value(row.cost_fmt.clone(), cx).into_any_element()),
                     ))
                     .child(pair_row(
-                        meta_pair("Kind", div().child(row.kind.label()).into_any_element()),
-                        meta_pair("Resume", mono_value(resume, cx).text_color(style::text_secondary()).into_any_element()),
+                        meta_pair("Messages", mono_value(row.messages_fmt.clone(), cx).into_any_element()),
+                        meta_pair("Duration", mono_value(row.duration_fmt.clone(), cx).into_any_element()),
                     ))
-                    .child(section("First prompt", row.first_prompt.clone()))
-                    .child(section("Last prompt", row.last_prompt.clone()))
-                    .child(section("Last message", row.last_message.clone())),
+                    .child(pair_row(
+                        meta_pair("Kind", div().child(row.kind.label()).into_any_element()),
+                        meta_pair("Subagents", mono_value(row.subagents_fmt.clone(), cx).into_any_element()),
+                    ))
+                    .child(pair_row(
+                        meta_pair("Mode", mono_value(row.permission_mode.clone(), cx).into_any_element()),
+                        meta_pair("Version", mono_value(row.version.clone(), cx).into_any_element()),
+                    ))
+                    .child(meta_pair("Models", mono_value(row.models.clone(), cx).into_any_element()))
+                    .child(meta_pair("Top tools", mono_value(row.top_tools.clone(), cx).into_any_element()))
+                    .child(meta_pair("PR", mono_value(row.pr_url.clone(), cx).into_any_element()))
+                    .child(meta_pair("Resume", mono_value(row.resume.clone(), cx).text_color(style::text_secondary()).into_any_element()))
+                    .child(section("First prompt", row.first_prompt_full.clone()))
+                    .child(section("Last prompt", row.last_prompt_full.clone()))
+                    .child(section("Last message", row.last_message_full.clone())),
             )
     }
 
@@ -300,7 +316,19 @@ impl AppRoot {
             )
     }
 
-    fn render_conversation(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// Footer under the messages: what this view cannot show yet.
+    fn conversation_note(&self, row: &SessionRow) -> SharedString {
+        if row.kind == Kind::History {
+            return "The transcript was cleaned up by Claude Code; only the prompts kept in history.jsonl remain (see Metadata).".into();
+        }
+        if self.detail.total_messages > CONVERSATION_CAP {
+            return format!("Showing the first {CONVERSATION_CAP} of {} indexed messages. Tool calls and thinking are not shown yet.", self.detail.total_messages).into();
+        }
+        "Indexed user / assistant text only. Tool calls and thinking are not shown yet.".into()
+    }
+
+    fn render_conversation(&self, row: &SessionRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let note = self.conversation_note(row);
         let mut items: Vec<AnyElement> = Vec::new();
         let mut turn = 0;
         for (ix, m) in self.detail.visible() {
@@ -319,7 +347,9 @@ impl AppRoot {
             .flex_1()
             .min_h_0()
             .child(self.render_chip_bar(cx))
-            .child(div().id("conversation").flex_1().min_h_0().overflow_y_scrollbar().child(v_flex().children(items).child(div().h(px(16.)))))
+            .child(div().id("conversation").flex_1().min_h_0().overflow_y_scrollbar().child(
+                v_flex().children(items).child(div().px(px(12.)).py(px(10.)).text_size(px(11.)).text_color(style::muted_light()).child(note)),
+            ))
     }
 
     fn render_user(&self, m: &Arc<Message>, turn: usize, gap_top: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {

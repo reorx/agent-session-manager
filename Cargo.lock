@@ -135,8 +135,12 @@ version = "0.1.0"
 dependencies = [
  "agent-session-core",
  "anyhow",
+ "async-channel",
  "chrono",
  "gpui-kit",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

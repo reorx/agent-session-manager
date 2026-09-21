@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Launch the app with ASM_SPIKE_AUTOPLAY and capture its window three times
-# (initial, after auto-scroll, after auto-sort). Usage: screenshot.sh <binary> <out-dir>
+# (initial, after auto-scroll, after auto-filter + sort). Runs on the real index but with a
+# throwaway view state, so every run starts from the defaults. Usage: screenshot.sh <binary> <out-dir>
 set -euo pipefail
 
 BIN=$1
@@ -17,6 +18,8 @@ fi
 # Screenshots of a sleeping display are black; wake-screen exits non-zero if it cannot wake it.
 wake-screen
 
+export ASM_STATE="$OUT/state.json"
+rm -f "$ASM_STATE"
 ASM_SPIKE_AUTOPLAY=1 "$BIN" > "$OUT/app.log" 2>&1 &
 PID=$!
 trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null || true' EXIT

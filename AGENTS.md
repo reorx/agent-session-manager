@@ -6,18 +6,18 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格形式列出本机所�
 
 2026-09-17：**M1 完成**（核心 crate，`kb/notes/2026-09-17-m1-core-crate.md`）。`crates/core` 现在是完整数据层：字节预过滤 + 借用式 serde 的 JSONL 解析器、增量 SQLite 索引（`index_state` 状态机、history.jsonl 补位、损坏 / 版本不符自动重建）、FTS5 trigram 搜索（<3 字 token 走 LIKE）、对齐 Python 脚本的正则扫描，以及 `asm` CLI。61 个 BDD 场景 + 真实数据上与 `claude_session_search.py` 21 组逐字比对全部通过；本机 1.1GB 全量索引 2.1–2.4s（其中 FTS 建索引 1.6s），增量扫描 0.14s，正则扫全量 0.4s，FTS 查询 3–11ms。
 
-界面（2026-09-16 按 Claude Design 设计稿重构，`kb/notes/2026-09-16-design-refactor.md`）**仍跑在 `crates/app/src/fake.rs` 的 10k 假行上**，尚未接入 core。下一步是 PRD 的 M2：用 `Db::list_sessions` 填 `SessionStore`、流式索引进度、真实的过滤 / 排序。
+2026-09-21：**M2 完成**（界面接入真实数据，`kb/notes/2026-09-21-m2-real-data.md`）。`crates/app/src/store.rs` 的后台线程独占 `Db`：先 `list_sessions` 出表（热启动 5488 行约 200ms 上屏），再 `Indexer::scan_streaming` 增量扫描并把写入的 session 逐条流回界面（冷启动 1.27GB 约 3.6–4.0s，首批行约 1s 出现），扫描有改动时再整表 reload 一次。项目 / 时间过滤、表头排序、Preview 模式、详情面板开合、选中行持久化到 `state.json`；状态栏显示行数、索引进度、消息数与 DB 大小。`fake.rs` 已删除，Conversation tab 暂时显示索引里的 user / assistant 文本（前 300 条，无工具调用 / thinking，M4 改为直接读 transcript）。下一步是 M3 搜索。
 
 ## 开发命令
 
 常用命令都在 `Makefile`，`make help` 列出；README 有说明。要点：
 
 - `make dev`（别名 `make dv`）编译并启动 app，与其他 macOS 项目的 `dev: build run` 约定一致；`run` 会先 pkill 掉已有实例，所以看到的一定是刚编出来的版本
-- `make screenshot` 唤醒屏幕、带 `ASM_SPIKE_AUTOPLAY=1` 启动并按窗口 ID 截三张图到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）；`make screenshot-clicks` 用 cliclick 真点击驱动下拉 / tab / 行展开，截 12 张（坐标写在 `scripts/screenshot-clicks.sh`，改布局后要校对）
+- `make screenshot` 唤醒屏幕、带 `ASM_SPIKE_AUTOPLAY=1` 启动并按窗口 ID 截三张图到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）；`make screenshot-clicks` 用 cliclick 真点击驱动下拉 / 行选中 / chip / tab，截 10 张（坐标写在 `scripts/screenshot-clicks.sh`，改布局后要校对）。两者都跑在真实索引上，但用 `$SHOT_DIR/state.json` 作一次性视图状态，保证每次从默认状态开始
 - 构建产物不在 `./target`：全局 `~/.cargo/config.toml` 把 target 指到 `~/Library/Caches/cargo-target`，`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒；首次 `cargo check` 单独要 40 秒
 - Rust 由 mise 管理（`mise.toml` 锁 1.98.1，gpui-pre 需要 ≥ 1.98）；Metal Toolchain 必须装（`make setup`）
 - 手动启动 app 做验证后必须 `kill` 掉进程；`pgrep -fl agent-session-manager` 检查（`make dev` 自带 pkill，手动起的不算）
-- `asm` CLI（`cargo run -p agent-session-core --bin asm -- …` 或 `make asm ARGS="…"`）：`index [--rebuild]`、`list [PATH|SUBSTR] [-d DAYS] [-n N] [--full]`、`session ID`、`search QUERY [-d 7] [-p SUBSTR] [-r user|assistant|tool]… [-l LABEL]… [--case-sensitive] [-C 80] [-n 200] [--index]`、`stats`。环境变量 `ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（默认 `~/Library/Application Support/AgentSessionManager/index.sqlite`）、`NO_COLOR`。`list` / `session` / `search --index` 会先做一次增量扫描（`--no-scan` 跳过）
+- `asm` CLI（`cargo run -p agent-session-core --bin asm -- …` 或 `make asm ARGS="…"`）：`index [--rebuild]`、`list [PATH|SUBSTR] [-d DAYS] [-n N] [--full]`、`session ID`、`search QUERY [-d 7] [-p SUBSTR] [-r user|assistant|tool]… [-l LABEL]… [--case-sensitive] [-C 80] [-n 200] [--index]`、`stats`。环境变量 `ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（默认 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`）、`NO_COLOR`。app 读同样的 `ASM_CLAUDE_DIR` / `ASM_DB`，另有 `ASM_STATE`（默认与索引同目录的 `state.json`）；验收时把 `ASM_DB` / `ASM_STATE` 指到 `tmp/` 可以反复测冷启动而不动真实索引。`list` / `session` / `search --index` 会先做一次增量扫描（`--no-scan` 跳过）
 - `make parity` 在真实 `~/.claude` 上把 `asm` 与 Python 脚本逐字比对（`scripts/compare-with-python.sh`，索引写到 `tmp/<date>-python-parity/`）；改动解析器、清理逻辑或输出格式后必须跑
 - core 的测试：`cargo test -p agent-session-core`（1 秒内）；fixture 改动要重跑 `uv run crates/core/tests/fixtures/gen_fixtures.py` 并提交生成结果
 
@@ -44,7 +44,11 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格形式列出本机所�
 - **API 以本地源码为准**，调研文档和 docs.rs 都有偏差。查签名直接 grep registry 源码：
   `~/.cargo/registry/src/index.crates.io-*/{gpui-component-0.6.1,gpui-base-0.6.1,gpui-pre-0.3.5}/src`，例如 `grep -n "pub fn " .../gpui-component-0.6.1/src/table/state.rs`。已核实过的差异记在 `kb/notes/2026-09-15-m0-spike.md`
 - 表格模式：delegate 持 `rows: Vec<Arc<Row>>` + `ix: Vec<usize>`（过滤 + 排序后的索引），`render_td` 只取预格式化好的 `SharedString`，不做任何计算；`perform_sort` 原地排 `ix`，同值按 updated 降序保证稳定
-- 几千行的过滤 / 排序直接在主线程做（10k 行排序 7ms），只有 SQLite 查询和文件扫描才走后台
+- 几千行的过滤 / 排序直接在主线程做（10k 行排序 7ms，真实 5488 行 filter + sort 0–1ms），只有 SQLite 查询和文件扫描才走后台
+- 数据只经 `store.rs` 进出：UI 发 `StoreRequest`，后台线程回 `StoreEvent`；前台 pump 把积压事件攒成一批、只 recompute 一次。`SessionRow::from_summary` 是 core 类型到界面行的唯一转换点
+- 选中行按 session id 保持（`AppRoot::after_rows_changed`）：数据或过滤变化后重新定位；扫描流式进行时不自动选中首行，否则 `set_selected_row` 会让表格一直滚动去追它
+- `use gpui_kit::*` 会带进 gpui 自己的 `test` 属性宏；测试模块里要写 `use core::prelude::v1::test;`，否则 `#[test]` 展开递归超限
+- 排序状态以 delegate 的 `self.sort` 为准并同步到 `Column::sort`（`sync_column_arrows`），因为每次 resize 都会 `table.refresh` 重新读列；程序化排序用 `delegate_mut().set_sort(..)` + `table.refresh(cx)`
 - `Task` drop 即取消：`cx.spawn` 的结果要 `.detach()` 或存进 `_task` 字段；`this.update(cx, ..)` 返回 Result，用 `.ok()` 不要 unwrap
 - 需要脚本化交互（截图、验收）时优先加环境变量驱动的 autoplay 逻辑；弹出层（下拉菜单、popover）无法程序化打开，才用 `scripts/screenshot-clicks.sh` 的 cliclick 点击
 - 主题与密度：`style::install_theme` 把设计稿色值写进 gpui-kit `Theme`（rem = 12px，组件内部尺寸随之缩小），改 `colors` 后必须重建 `tokens` 并 `Theme::sync_base`；DataTable 选中行是盖在单元格上面的覆盖层，`table_active` 必须半透明
@@ -71,5 +75,6 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格形式列出本机所�
 - `kb/docs/data-layer-design.md` — 改动 SQLite schema、索引器、增量更新、搜索（FTS5 / LIKE / 正则）时读；含 DDL 与 serde 类型草案
 - `kb/notes/2026-09-15-m0-spike.md` — M0 实测：构建耗时、与调研文档的 API 差异、对 M1/M2 的影响（表格横向虚拟化裁列、程序化排序不更新表头）
 - `kb/notes/2026-09-17-m1-core-crate.md` — M1 记录：core 模块划分、字节预过滤规则、增量状态机、与设计文档的差异（无 grep-searcher、chrono 代替 jiff、subagent 只计数）、真实数据实测、Python 比对方法与已知行为边界；改 core 前读
+- `kb/notes/2026-09-21-m2-real-data.md` — M2 记录：store 线程与事件流、流式扫描的时序（项目路径滞后 → 扫描后 reload）、选中保持、视图状态持久化、实测数字、相对 PRD 未做的条目；改 `store.rs` / `main.rs` 数据流前读
 - `kb/notes/2026-09-16-design-refactor.md` — 界面重构：设计稿链接、`crates/app/src` 模块划分、gpui-kit 主题 / 下拉 / 选中覆盖层 / Preview 自适应列宽的做法、与设计稿的已知差异
 - `kb/plans/2026-09-08-agent-session-manager-prd.md` — 需求 R1–R13、架构、里程碑 M0–M5、风险与开放问题；开发任务的总入口

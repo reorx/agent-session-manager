@@ -1,62 +1,108 @@
 //! Agent Session Manager — macOS desktop app listing Claude Code sessions.
 //!
 //! Layout follows the Claude Design mockup: toolbar (dropdown filters + search), session table,
-//! detail panel with Metadata / Conversation tabs, status bar. Data is still fake (PRD M1 adds
-//! the real parser); set `ASM_SPIKE_AUTOPLAY=1` to scroll / select / filter / sort automatically
-//! after launch (used by `make screenshot`).
+//! detail panel with Metadata / Conversation tabs, status bar. Sessions come from `crates/core`
+//! through `store` (index load, then a streaming incremental scan). Set `ASM_SPIKE_AUTOPLAY=1`
+//! to scroll / select / filter / sort automatically after launch (used by `make screenshot`);
+//! `ASM_CLAUDE_DIR`, `ASM_DB` and `ASM_STATE` point the app at other data.
 
 mod detail;
-mod fake;
 mod model;
+mod settings;
+mod store;
 mod style;
 mod table;
 mod toolbar;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use agent_session_core::claude::paths::{ClaudeDir, default_db_path};
+use agent_session_core::format::human_size;
+use agent_session_core::index::ScanReport;
+
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::table::{ColumnSort, DataTable, TableDelegate, TableEvent, TableState};
+use gpui_kit::component::table::{ColumnSort, DataTable, TableEvent, TableState};
 use gpui_kit::component::{ResizableState, Root, Sizable, h_resizable, resizable_panel, v_flex};
 use gpui_kit::*;
 
 use crate::detail::{DETAIL_W, DetailState, DetailTab};
-use crate::model::{DisplayMode, RangePreset, ScopeSet, SessionRow};
+use crate::model::{DisplayMode, Filter, ProjectEntry, RangePreset, ScopeSet, SessionRow, conversation_from, project_entries};
+use crate::settings::{SortDir, ViewState, default_state_path};
+use crate::store::{Store, StoreEvent, StoreRequest};
 use crate::table::{FIXED_COLS_W, PREVIEW_MIN_W, ROW_H, SessionTableDelegate};
 
-gpui_kit::actions!(app, [Quit, ToggleDetail, FocusSearch, Preview1, Preview2, Preview3, Preview4]);
+gpui_kit::actions!(
+    app,
+    [Quit, ToggleDetail, FocusSearch, Preview1, Preview2, Preview3, Preview4, Rescan, RebuildIndex, ToggleEmptySessions]
+);
 
 const WINDOW_W: f32 = 1440.;
 const WINDOW_H: f32 = 900.;
 /// Space the table needs besides its columns: trailing empty column + vertical scrollbar.
 const TABLE_CHROME_W: f32 = 16.;
 
+/// What the index is doing, shown in the middle of the status bar.
+#[derive(Clone, PartialEq)]
+enum IndexStatus {
+    Loading,
+    Scanning { done: usize, total: usize },
+    Idle(SharedString),
+    Failed(SharedString),
+}
+
 pub struct AppRoot {
     table: Entity<TableState<SessionTableDelegate>>,
     search: Entity<InputState>,
     resizable: Entity<ResizableState>,
-    projects: Vec<(SharedString, usize)>,
+    store: Store,
+    projects: Vec<ProjectEntry>,
     scope: ScopeSet,
     range: RangePreset,
     selected: Option<Arc<SessionRow>>,
+    /// Selection to restore once its row shows up (saved state, or a row filtered away and back).
+    wanted_id: Option<SharedString>,
     detail: DetailState,
     detail_visible: bool,
     status: SharedString,
-    build_ms: u128,
+    index_status: IndexStatus,
+    db_info: SharedString,
+    launched: Instant,
+    first_rows_ms: Option<u128>,
+    state_path: PathBuf,
+    saved: ViewState,
     _subscriptions: Vec<Subscription>,
+    _events: Task<()>,
     _autoplay: Option<Task<()>>,
+}
+
+fn scan_summary(report: &ScanReport) -> SharedString {
+    let changed = report.files_parsed + report.files_appended + report.files_rebuilt;
+    let secs = report.elapsed.as_secs_f64();
+    if changed == 0 && report.files_missing == 0 && report.history_sessions == 0 {
+        format!("index up to date · {} files checked in {secs:.2}s", report.files_seen).into()
+    } else {
+        format!("indexed {changed} of {} files in {secs:.2}s", report.files_seen).into()
+    }
 }
 
 impl AppRoot {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let t = Instant::now();
-        let rows = fake::generate_rows(fake::ROW_COUNT);
-        let projects = fake::project_counts(&rows);
-        let gen_ms = t.elapsed().as_millis();
-        let table = cx.new(|cx| TableState::new(SessionTableDelegate::new(rows), window, cx));
-        let build_ms = t.elapsed().as_millis();
-        println!("generated {} rows in {gen_ms}ms, table ready in {build_ms}ms", fake::ROW_COUNT);
+        let state_path = default_state_path();
+        let saved = ViewState::load(&state_path);
+        let mut delegate = SessionTableDelegate::new();
+        delegate.mode = saved.mode;
+        delegate.set_filter(Filter {
+            project: saved.project_key.clone().map(Into::into),
+            since_ms: saved.range.since_ms(),
+            show_empty: saved.show_empty,
+        });
+        if let Some((key, dir)) = &saved.sort {
+            delegate.set_sort(key, dir.to_column());
+        }
+        let table = cx.new(|cx| TableState::new(delegate, window, cx));
 
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions").clean_on_escape());
         let resizable = cx.new(|_| ResizableState::default());
@@ -66,32 +112,122 @@ impl AppRoot {
             cx.subscribe_in(&search, window, |this, state, ev: &InputEvent, _, cx| {
                 if let InputEvent::Change = ev {
                     let query = state.read(cx).value();
-                    this.status = if query.is_empty() { "idle".into() } else { format!("search: {query}").into() };
+                    this.status = if query.is_empty() { "".into() } else { format!("search: {query}").into() };
                     cx.notify();
                 }
             }),
+            // header clicks sort inside the table; persist whatever changed once it settles
+            cx.observe(&table, |this, _, cx| this.persist(cx)),
         ];
+
+        let (store, events) = Store::spawn(ClaudeDir::from_env(), default_db_path());
+        let pump = cx.spawn(async move |this, cx| {
+            while let Ok(first) = events.recv().await {
+                let mut batch = vec![first];
+                while let Ok(ev) = events.try_recv() {
+                    batch.push(ev);
+                }
+                if this.update(cx, |this, cx| this.on_store_events(batch, cx)).is_err() {
+                    break;
+                }
+            }
+        });
 
         let mut this = Self {
             table,
             search,
             resizable,
-            projects,
+            store,
+            projects: Vec::new(),
             scope: ScopeSet::default(),
-            range: RangePreset::Any,
+            range: saved.range,
             selected: None,
+            wanted_id: saved.selected_id.clone().map(Into::into),
             detail: DetailState::default(),
-            detail_visible: true,
-            status: "idle".into(),
-            build_ms,
+            detail_visible: saved.detail_visible,
+            status: "".into(),
+            index_status: IndexStatus::Loading,
+            db_info: "".into(),
+            launched: Instant::now(),
+            first_rows_ms: None,
+            state_path,
+            saved,
             _subscriptions: subscriptions,
+            _events: pump,
             _autoplay: None,
         };
-        this.select_row(0, cx);
         if std::env::var_os("ASM_SPIKE_AUTOPLAY").is_some() {
             this._autoplay = Some(this.autoplay(window, cx));
         }
         this
+    }
+
+    /// Apply a batch of store events with a single table recompute.
+    fn on_store_events(&mut self, batch: Vec<StoreEvent>, cx: &mut Context<Self>) {
+        let mut streamed = Vec::new();
+        let mut data_changed = false;
+        for ev in batch {
+            match ev {
+                StoreEvent::Loaded { sessions, elapsed } => {
+                    let rows: Vec<Arc<SessionRow>> = sessions.iter().map(|s| Arc::new(SessionRow::from_summary(s))).collect();
+                    streamed.clear();
+                    if !rows.is_empty() && self.first_rows_ms.is_none() {
+                        self.first_rows_ms = Some(self.launched.elapsed().as_millis());
+                        println!("{} sessions on screen {}ms after launch (index read {elapsed:?})", rows.len(), self.launched.elapsed().as_millis());
+                    }
+                    self.table.update(cx, |table, _| table.delegate_mut().set_rows(rows));
+                    data_changed = true;
+                }
+                StoreEvent::Session(s) => streamed.push(Arc::new(SessionRow::from_summary(&s))),
+                StoreEvent::Progress(p) if p.done < p.total => self.index_status = IndexStatus::Scanning { done: p.done, total: p.total },
+                StoreEvent::Progress(_) => {}
+                StoreEvent::ScanDone { report, stats } => {
+                    println!("scan: {report:?}");
+                    self.index_status = IndexStatus::Idle(scan_summary(&report));
+                    self.db_info = format!("{} messages · DB {}", stats.messages, human_size(stats.db_bytes)).into();
+                    data_changed = true;
+                }
+                StoreEvent::Messages { session_id, messages } => {
+                    if self.selected.as_ref().is_some_and(|row| row.id == session_id) {
+                        self.detail.set_conversation(conversation_from(&messages), messages.len());
+                    }
+                }
+                StoreEvent::Failed(message) => {
+                    eprintln!("store: {message}");
+                    self.index_status = IndexStatus::Failed(message.into());
+                }
+            }
+        }
+        if !streamed.is_empty() {
+            self.first_rows_ms.get_or_insert(self.launched.elapsed().as_millis());
+            self.table.update(cx, |table, _| table.delegate_mut().upsert(streamed));
+            data_changed = true;
+        }
+        if data_changed {
+            self.after_rows_changed(cx);
+        }
+        cx.notify();
+    }
+
+    /// Rows or the filter changed: refresh the project list and keep the selection on its session.
+    pub(crate) fn after_rows_changed(&mut self, cx: &mut Context<Self>) {
+        let delegate = self.table.read(cx).delegate();
+        let show_empty = delegate.filter().show_empty;
+        self.projects = project_entries(delegate.rows.iter().filter(|r| show_empty || r.prompts > 0));
+        let wanted = self.wanted_id.clone().or_else(|| self.selected.as_ref().map(|r| r.id.clone()));
+        let position = wanted.as_ref().and_then(|id| delegate.position_of(id));
+        let has_rows = !delegate.ix.is_empty();
+        // While a scan streams rows in, the top row keeps changing (and a selection restored from
+        // the saved state may still be on its way): pick a default only once things settle.
+        let scanning = matches!(self.index_status, IndexStatus::Scanning { .. });
+        let waiting = self.selected.is_none() && (scanning || (self.wanted_id.is_some() && self.index_status == IndexStatus::Loading));
+        match position {
+            Some(row_ix) => self.select_row(row_ix, cx),
+            None if waiting => {}
+            None if has_rows => self.select_row(0, cx),
+            None => self.clear_selection(cx),
+        }
+        self.table.update(cx, |_, cx| cx.notify());
     }
 
     fn select_row(&mut self, row_ix: usize, cx: &mut Context<Self>) {
@@ -103,10 +239,53 @@ impl AppRoot {
             row
         });
         if let Some(row) = row {
-            self.detail.set_conversation(fake::conversation_for(&row));
-            self.status = format!("selected #{} · {}", row.num, row.project).into();
+            let same_session = self.selected.as_ref().is_some_and(|old| old.id == row.id);
+            if !same_session {
+                self.detail.set_conversation(Vec::new(), 0);
+                self.store.request(StoreRequest::Messages(row.id.to_string()));
+            }
+            self.wanted_id = None;
             self.selected = Some(row);
+            self.persist(cx);
         }
+        cx.notify();
+    }
+
+    fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.table.update(cx, |table, cx| table.clear_selection(cx));
+        self.selected = None;
+        self.wanted_id = None;
+        self.detail.set_conversation(Vec::new(), 0);
+    }
+
+    /// Snapshot of everything worth restoring on the next launch.
+    fn view_state(&self, cx: &App) -> ViewState {
+        let delegate = self.table.read(cx).delegate();
+        ViewState {
+            mode: delegate.mode,
+            sort: delegate.sort_state().and_then(|(key, sort)| Some((key.to_string(), SortDir::from_column(sort)?))),
+            project_key: delegate.filter().project.as_ref().map(|p| p.to_string()),
+            range: self.range,
+            show_empty: delegate.filter().show_empty,
+            detail_visible: self.detail_visible,
+            selected_id: self.selected.as_ref().map(|r| r.id.to_string()).or_else(|| self.wanted_id.as_ref().map(|id| id.to_string())),
+        }
+    }
+
+    pub(crate) fn persist(&mut self, cx: &App) {
+        let state = self.view_state(cx);
+        if state == self.saved {
+            return;
+        }
+        if let Err(e) = state.save(&self.state_path) {
+            eprintln!("cannot save {}: {e:#}", self.state_path.display());
+        }
+        self.saved = state;
+    }
+
+    fn rescan(&mut self, rebuild: bool, cx: &mut Context<Self>) {
+        self.index_status = IndexStatus::Loading;
+        self.store.request(if rebuild { StoreRequest::Rebuild } else { StoreRequest::Scan });
         cx.notify();
     }
 
@@ -126,23 +305,30 @@ impl AppRoot {
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(3)).await;
             this.update_in(cx, |this, _, cx| {
-                this.table.update(cx, |table, cx| table.scroll_to_row(5_000, cx));
-                this.select_row(5_000, cx);
-                this.status = "autoplay: scrolled to row 5000".into();
+                let target = this.table.read(cx).delegate().ix.len() / 2;
+                this.table.update(cx, |table, cx| table.scroll_to_row(target, cx));
+                this.select_row(target, cx);
+                this.status = format!("autoplay: scrolled to row {target}").into();
                 cx.notify();
             })
             .ok();
             cx.background_executor().timer(Duration::from_secs(3)).await;
-            this.update_in(cx, |this, window, cx| {
-                this.set_project(Some("scripts".into()), cx);
+            this.update_in(cx, |this, _, cx| {
+                this.set_project(None, cx);
                 this.set_range(RangePreset::Days30, cx);
+                let delegate = this.table.read(cx).delegate();
+                let visible = (0..delegate.ix.len()).map(|i| delegate.row(i));
+                let busiest = project_entries(visible).into_iter().max_by_key(|p| p.count);
+                let name = busiest.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+                this.set_project(busiest.map(|p| p.key), cx);
                 this.table.update(cx, |table, cx| {
-                    table.delegate_mut().perform_sort(4, ColumnSort::Descending, window, cx);
+                    table.delegate_mut().set_sort("prompts", ColumnSort::Descending);
+                    table.refresh(cx);
                     table.scroll_to_row(0, cx);
                 });
                 this.select_row(0, cx);
                 this.set_detail_tab(DetailTab::Metadata, cx);
-                this.status = "autoplay: scripts · 30 days · sorted by Prompts desc".into();
+                this.status = format!("autoplay: {name} · 30 days · sorted by Prompts desc").into();
                 cx.notify();
             })
             .ok();
@@ -176,6 +362,14 @@ impl AppRoot {
     fn render_status_bar(&self, cx: &mut Context<Self>) -> StatusBar {
         let delegate = self.table.read(cx).delegate();
         let (shown, total) = (delegate.ix.len(), delegate.rows.len());
+        let index = match &self.index_status {
+            IndexStatus::Loading => "loading index…".into(),
+            IndexStatus::Scanning { done, total } => format!("indexing {done} / {total} files").into(),
+            IndexStatus::Idle(summary) => summary.clone(),
+            IndexStatus::Failed(message) => format!("index error: {message}").into(),
+        };
+        let center: SharedString = if self.status.is_empty() { index } else { format!("{} · {index}", self.status).into() };
+        let first_rows = self.first_rows_ms.map(|ms| format!(" · first rows in {ms}ms")).unwrap_or_default();
         StatusBar::new()
             .h(px(22.))
             .py_0()
@@ -184,8 +378,8 @@ impl AppRoot {
             .text_size(px(11.))
             .text_color(style::head_fg())
             .left(format!("{shown} / {total} sessions"))
-            .child(self.status.clone())
-            .right(format!("table built in {}ms", self.build_ms))
+            .child(center)
+            .right(format!("{}{first_rows}", self.db_info))
     }
 }
 
@@ -200,8 +394,12 @@ impl Render for AppRoot {
             .line_height(px(16.))
             .on_action(cx.listener(|this, _: &ToggleDetail, _, cx| {
                 this.detail_visible = !this.detail_visible;
+                this.persist(cx);
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &Rescan, _, cx| this.rescan(false, cx)))
+            .on_action(cx.listener(|this, _: &RebuildIndex, _, cx| this.rescan(true, cx)))
+            .on_action(cx.listener(|this, _: &ToggleEmptySessions, _, cx| this.toggle_empty_sessions(cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)))
             .on_action(cx.listener(|this, _: &Preview1, _, cx| this.set_mode(DisplayMode::Title, cx)))
             .on_action(cx.listener(|this, _: &Preview2, _, cx| this.set_mode(DisplayMode::FirstPrompt, cx)))
@@ -255,6 +453,7 @@ fn main() {
             KeyBinding::new("cmd-2", Preview2, None),
             KeyBinding::new("cmd-3", Preview3, None),
             KeyBinding::new("cmd-4", Preview4, None),
+            KeyBinding::new("cmd-shift-r", RebuildIndex, None),
         ]);
         cx.set_menus([
             Menu::new("Agent Session Manager").items(vec![MenuItem::action("Quit", Quit)]),
@@ -266,6 +465,12 @@ fn main() {
                 MenuItem::action("Preview: First Prompt", Preview2),
                 MenuItem::action("Preview: Last Prompt", Preview3),
                 MenuItem::action("Preview: Last Message", Preview4),
+                MenuItem::separator(),
+                MenuItem::action("Show / Hide Sessions Without Prompts", ToggleEmptySessions),
+            ]),
+            Menu::new("Index").items(vec![
+                MenuItem::action("Scan for Changes", Rescan),
+                MenuItem::action("Rebuild Index", RebuildIndex),
             ]),
         ]);
 

@@ -3,8 +3,8 @@
 
 mod common;
 
-use agent_session_core::index::{Db, Indexer, ListFilter, Order};
-use agent_session_core::model::{Role, Source};
+use agent_session_core::index::{Db, Indexer, ListFilter, Order, ScanEvent};
+use agent_session_core::model::{Role, SessionSummary, Source};
 use common::*;
 
 fn ms(iso: &str) -> i64 {
@@ -265,4 +265,74 @@ fn progress_is_reported_while_scanning() {
     assert!(!seen.is_empty());
     assert_eq!(seen.last().unwrap(), &(4, 4));
     assert!(seen.windows(2).all(|w| w[0].0 <= w[1].0));
+}
+
+/// Scan and collect every session streamed out while the index is being written.
+fn scan_streaming(sb: &Sandbox, db: &mut Db) -> Vec<SessionSummary> {
+    let mut streamed = Vec::new();
+    Indexer::new(sb.claude.clone())
+        .scan_streaming(db, &mut |ev| {
+            if let ScanEvent::Session(s) = ev {
+                streamed.push(s);
+            }
+        })
+        .unwrap();
+    streamed
+}
+
+#[test]
+fn a_cold_scan_streams_every_session_exactly_as_the_index_stores_it() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    let streamed = scan_streaming(&sb, &mut db);
+    assert_eq!(streamed.len(), 8, "4 transcripts + 4 history-only sessions");
+    for s in &streamed {
+        let mut indexed = db.session(&s.id).unwrap().unwrap();
+        if s.project_path.is_none() {
+            // S5 has no cwd: its project's real path is only learned from a session written later
+            indexed.project_path = None;
+        }
+        assert_eq!(s, &indexed, "streamed row for {} matches the index", s.id);
+    }
+    let s1 = streamed.iter().find(|s| s.id == S1).unwrap();
+    assert_eq!(s1.project_path.as_deref(), Some("/Users/me/Code/alpha"), "rows are usable by the UI without a reload");
+}
+
+#[test]
+fn a_rescan_streams_only_the_sessions_that_changed() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan_streaming(&sb, &mut db);
+    assert!(scan_streaming(&sb, &mut db).is_empty(), "nothing changed on disk, history included");
+
+    let path = sb.transcript(ALPHA, S2);
+    append(&path, concat!(
+        r#"{"parentUuid":"x","isSidechain":false,"type":"user","message":{"role":"user","content":"And now in French"},"uuid":"u-new","timestamp":"2026-09-06T00:00:00.000Z","sessionId":"22222222-aaaa-4bbb-8ccc-000000000002","cwd":"/Users/me/Code/alpha","gitBranch":"main","entrypoint":"sdk-cli","version":"2.1.261"}"#, "\n",
+    ));
+    set_mtime(&path, MTIME_S2 + 60_000);
+    let streamed = scan_streaming(&sb, &mut db);
+    assert_eq!(streamed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [S2]);
+    assert_eq!(streamed[0].last_prompt.as_deref(), Some("And now in French"));
+    assert_eq!(streamed[0].updated_at, MTIME_S2 + 60_000);
+
+    std::fs::remove_file(sb.transcript(ALPHA, S1)).unwrap();
+    let streamed = scan_streaming(&sb, &mut db);
+    assert_eq!(streamed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [S1]);
+    assert!(streamed[0].transcript_missing, "the UI learns that the row turned history-only");
+}
+
+#[test]
+fn a_new_history_row_is_streamed_once() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan_streaming(&sb, &mut db);
+    let new_id = "88888888-aaaa-4bbb-8ccc-000000000008";
+    append(&sb.claude.history_file(), &format!(
+        "{{\"display\":\"late history row\",\"pastedContents\":{{}},\"timestamp\":{},\"project\":\"/Users/me/Code/delta\",\"sessionId\":\"{new_id}\"}}\n",
+        ms("2026-09-16T00:00:00Z")
+    ));
+    let streamed = scan_streaming(&sb, &mut db);
+    assert_eq!(streamed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [new_id]);
+    assert_eq!(streamed[0].source, Source::History);
+    assert!(scan_streaming(&sb, &mut db).is_empty());
 }
