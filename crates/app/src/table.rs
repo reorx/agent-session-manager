@@ -262,6 +262,7 @@ mod tests {
 
     use super::*;
     use crate::model::tests::{row, summary};
+    use crate::model::{Kind, KindSet};
 
     fn ids(d: &SessionTableDelegate) -> Vec<&str> {
         (0..d.ix.len()).map(|i| d.row(i).id.as_ref()).collect()
@@ -303,6 +304,28 @@ mod tests {
         assert_eq!(d.position_of("e"), None, "filtered out rows have no position");
         d.set_rows(vec![with_prompts("z", "/p/x", 1, 3)]);
         assert_eq!(ids(&d), ["z"]);
+    }
+
+    fn history(id: &str, project: &str, updated_at: i64) -> Arc<SessionRow> {
+        let mut s = summary(id, project, updated_at);
+        s.transcript_missing = true;
+        Arc::new(SessionRow::from_summary(&s))
+    }
+
+    #[test]
+    fn the_kind_filter_survives_new_data() {
+        let mut d = SessionTableDelegate::new();
+        d.set_rows(vec![row("a", "/p/x", 100), history("h1", "/p/x", 200), row("b", "/p/y", 300)]);
+        let mut kinds = KindSet::default();
+        kinds.toggle(Kind::History);
+        assert!(d.set_filter(Filter { kinds, ..Default::default() }));
+        assert_eq!(ids(&d), ["b", "a"]);
+        d.upsert(vec![history("h2", "/p/y", 900), row("c", "/p/x", 400), history("a", "/p/x", 500)]);
+        assert_eq!(ids(&d), ["c", "b"], "new history rows stay hidden, and a turned into history so it left");
+        assert_eq!(d.position_of("h2"), None);
+        assert_eq!(d.rows.len(), 5, "hidden rows are still kept");
+        assert!(d.set_filter(Filter::default()));
+        assert_eq!(ids(&d), ["h2", "a", "c", "b", "h1"]);
     }
 
     #[test]

@@ -234,7 +234,7 @@ agent-session-manager/            Cargo workspace
 |---|---|---|
 | **M0 环境与 spike**（0.5 天）✅ 2026-09-15 | rustup 最新 stable、Metal Toolchain；`gpui-kit` hello world + `DataTable` 10k 假行；确认 `h_resizable` / `TabBar::segmented` / `DatePicker` 签名；记录构建时间 | 窗口能开、表格能滚、截图归档（记录：`../notes/2026-09-15-m0-spike.md`） |
 | **M1 核心 crate**（2 天）✅ 2026-09-17 | 解析器（fixture JSONL 覆盖全部记录类型）、SQLite schema 与索引器、增量逻辑、FTS 与 LIKE 搜索、正则扫描、`asm` CLI | BDD 测试：`asm list` 与 Python 脚本 `--list` 输出一致；`asm search` 命中数与脚本一致；全量索引本机 <3s（记录：`../notes/2026-09-17-m1-core-crate.md`，61 个场景 + 21 组真实数据逐字比对通过，全量 2.1–2.4s） |
-| **M2 表格 + 过滤 + 排序**（2 天）✅ 2026-09-21 | R1 R2 R3 R5 R12，SessionStore 流式填充 | 冷启动可用、热启动 <300ms、过滤排序一帧内（记录：`../notes/2026-09-21-m2-real-data.md`；热启动 ~200ms 上屏 5488 行、冷索引 3.6–4.0s 流式填充、filter + sort 0–1ms。R1 右键菜单 / 列显隐、R2 多选 / 可搜索 / 自定义区间 / 更多过滤、R5 行密度 / 相对时间未做，见笔记"未做"一节） |
+| **M2 表格 + 过滤 + 排序**（2 天）✅ 2026-09-21 | R1 R2 R3 R5 R12，SessionStore 流式填充 | 冷启动可用、热启动 <300ms、过滤排序一帧内（记录：`../notes/2026-09-21-m2-real-data.md`；热启动 ~200ms 上屏 5488 行、冷索引 3.6–4.0s 流式填充、filter + sort 0–1ms。R1 右键菜单 / 列显隐、R2 多选 / 可搜索 / 自定义区间 / 更多过滤（其中 Kind 多选已于同日补上）、R5 行密度 / 相对时间未做，见笔记"未做"一节） |
 | **M3 搜索**（1.5 天） | R4 全部，高亮，Matches 列 | FTS <100ms、正则 <500ms、CJK 两字可搜 |
 | **M4 详情面板**（2 天） | R6，Markdown、折叠、subagent、导出 | 30MB session 打开 <200ms |
 | **M5 实时与打磨**（1.5 天） | R7 watcher、R8 history、R9、R10、R11、菜单、cargo-bundle、图标 | 新 session 5s 内出现；`.app` 可双击运行 |

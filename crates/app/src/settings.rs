@@ -8,7 +8,7 @@ use anyhow::Result;
 use gpui_kit::component::table::ColumnSort;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{DisplayMode, RangePreset};
+use crate::model::{DisplayMode, KindSet, RangePreset};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum SortDir {
@@ -42,6 +42,7 @@ pub struct ViewState {
     pub project_key: Option<String>,
     pub range: RangePreset,
     pub show_empty: bool,
+    pub kinds: KindSet,
     pub detail_visible: bool,
     pub selected_id: Option<String>,
 }
@@ -54,6 +55,7 @@ impl Default for ViewState {
             project_key: None,
             range: RangePreset::default(),
             show_empty: false,
+            kinds: KindSet::default(),
             detail_visible: true,
             selected_id: None,
         }
@@ -85,22 +87,27 @@ impl ViewState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Kind;
 
     #[test]
     fn a_saved_state_comes_back_unchanged() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested/state.json");
+        let mut kinds = KindSet::default();
+        kinds.toggle(Kind::History);
         let state = ViewState {
             mode: DisplayMode::LastMessage,
             sort: Some(("prompts".into(), SortDir::Desc)),
             project_key: Some("-Users-me-Code-alpha".into()),
             range: RangePreset::Days7,
             show_empty: true,
+            kinds,
             detail_visible: false,
             selected_id: Some("11111111-aaaa-4bbb-8ccc-000000000001".into()),
         };
         state.save(&path).unwrap();
         assert_eq!(ViewState::load(&path), state);
+        assert!(!ViewState::load(&path).kinds.contains(Kind::History));
     }
 
     #[test]
@@ -121,6 +128,16 @@ mod tests {
         assert_eq!(state.mode, DisplayMode::Title);
         assert!(state.detail_visible);
         assert_eq!(state.range, RangePreset::Any);
+        assert_eq!(state.kinds, KindSet::default(), "a file written before the Kind filter shows every kind");
+        assert_eq!(state.kinds.label(), "All");
+    }
+
+    #[test]
+    fn a_kind_the_file_does_not_mention_stays_selected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, r#"{"kinds":{"history":false}}"#).unwrap();
+        assert_eq!(ViewState::load(&path).kinds.label(), "CLI, SDK, BG");
     }
 
     #[test]

@@ -29,7 +29,7 @@ use gpui_kit::component::{ResizableState, Root, Sizable, h_resizable, resizable_
 use gpui_kit::*;
 
 use crate::detail::{DETAIL_W, DetailState, DetailTab};
-use crate::model::{DisplayMode, Filter, ProjectEntry, RangePreset, ScopeSet, SessionRow, conversation_from, project_entries};
+use crate::model::{DisplayMode, Filter, Kind, ProjectEntry, RangePreset, ScopeSet, SessionRow, conversation_from, kind_counts, project_entries};
 use crate::settings::{SortDir, ViewState, default_state_path};
 use crate::store::{Store, StoreEvent, StoreRequest};
 use crate::table::{FIXED_COLS_W, PREVIEW_MIN_W, ROW_H, SessionTableDelegate};
@@ -59,6 +59,8 @@ pub struct AppRoot {
     resizable: Entity<ResizableState>,
     store: Store,
     projects: Vec<ProjectEntry>,
+    /// Sessions per kind (`Kind as usize`), shown in the Kind dropdown.
+    kind_counts: [usize; Kind::ALL.len()],
     scope: ScopeSet,
     range: RangePreset,
     selected: Option<Arc<SessionRow>>,
@@ -98,6 +100,7 @@ impl AppRoot {
             project: saved.project_key.clone().map(Into::into),
             since_ms: saved.range.since_ms(),
             show_empty: saved.show_empty,
+            kinds: saved.kinds,
         });
         if let Some((key, dir)) = &saved.sort {
             delegate.set_sort(key, dir.to_column());
@@ -139,6 +142,7 @@ impl AppRoot {
             resizable,
             store,
             projects: Vec::new(),
+            kind_counts: [0; Kind::ALL.len()],
             scope: ScopeSet::default(),
             range: saved.range,
             selected: None,
@@ -209,11 +213,13 @@ impl AppRoot {
         cx.notify();
     }
 
-    /// Rows or the filter changed: refresh the project list and keep the selection on its session.
+    /// Rows or the filter changed: refresh the dropdown counts and keep the selection on its session.
     pub(crate) fn after_rows_changed(&mut self, cx: &mut Context<Self>) {
         let delegate = self.table.read(cx).delegate();
         let show_empty = delegate.filter().show_empty;
-        self.projects = project_entries(delegate.rows.iter().filter(|r| show_empty || r.prompts > 0));
+        let listed = || delegate.rows.iter().filter(|r| show_empty || r.prompts > 0);
+        self.projects = project_entries(listed());
+        self.kind_counts = kind_counts(listed());
         let wanted = self.wanted_id.clone().or_else(|| self.selected.as_ref().map(|r| r.id.clone()));
         let position = wanted.as_ref().and_then(|id| delegate.position_of(id));
         let has_rows = !delegate.ix.is_empty();
@@ -267,6 +273,7 @@ impl AppRoot {
             project_key: delegate.filter().project.as_ref().map(|p| p.to_string()),
             range: self.range,
             show_empty: delegate.filter().show_empty,
+            kinds: delegate.filter().kinds,
             detail_visible: self.detail_visible,
             selected_id: self.selected.as_ref().map(|r| r.id.to_string()).or_else(|| self.wanted_id.as_ref().map(|id| id.to_string())),
         }

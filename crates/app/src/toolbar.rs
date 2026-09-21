@@ -1,4 +1,4 @@
-//! Toolbar: `Label value ▾` dropdowns (Project / Scope / Updated / Preview) and the search box.
+//! Toolbar: `Label value ▾` dropdowns (Project / Scope / Updated / Kind / Preview) and the search box.
 
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::Input;
@@ -6,7 +6,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex};
 use gpui_kit::*;
 
-use crate::model::{DisplayMode, Filter, RangePreset, ScopeSet};
+use crate::model::{DisplayMode, Filter, Kind, RangePreset, ScopeSet};
 use crate::style::{self, FluentBuilder};
 use crate::AppRoot;
 
@@ -89,6 +89,12 @@ impl AppRoot {
         self.range = range;
         let mut filter = self.current_filter(cx);
         filter.since_ms = range.since_ms();
+        self.apply_filter(filter, cx);
+    }
+
+    pub fn toggle_kind(&mut self, kind: Kind, cx: &mut Context<Self>) {
+        let mut filter = self.current_filter(cx);
+        filter.kinds.toggle(kind);
         self.apply_filter(filter, cx);
     }
 
@@ -193,6 +199,23 @@ impl AppRoot {
         }
     }
 
+    fn kind_menu(&self, cx: &Context<Self>) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let this = cx.entity().downgrade();
+        let kinds = self.current_filter(cx).kinds;
+        let counts = self.kind_counts;
+        move |menu, _, _| {
+            let mut menu = menu.min_w(px(160.));
+            for kind in Kind::ALL {
+                let this = this.clone();
+                let count = counts[kind as usize].to_string();
+                menu = menu.item(menu_item(kind.short().into(), count.into(), true, kinds.contains(kind), move |cx| {
+                    this.update(cx, |app, cx| app.toggle_kind(kind, cx)).ok();
+                }));
+            }
+            menu
+        }
+    }
+
     fn preview_menu(&self, cx: &Context<Self>) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
         let this = cx.entity().downgrade();
         let current = self.table.read(cx).delegate().mode;
@@ -229,6 +252,7 @@ impl AppRoot {
             .child(trigger("project", "Project", project_label, cx).dropdown_menu(self.project_menu(cx)))
             .child(trigger("scope", "Scope", self.scope.label().into(), cx).dropdown_menu(self.scope_menu(cx)))
             .child(trigger("range", "Updated", self.range.label().into(), cx).dropdown_menu(self.range_menu(cx)))
+            .child(trigger("kind", "Kind", filter.kinds.label().into(), cx).dropdown_menu(self.kind_menu(cx)))
             .child(
                 div().ml(px(4.)).w(px(220.)).child(
                     Input::new(&self.search)

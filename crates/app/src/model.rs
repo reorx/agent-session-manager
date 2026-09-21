@@ -20,6 +20,18 @@ pub enum Kind {
 }
 
 impl Kind {
+    pub const ALL: [Kind; 4] = [Kind::Cli, Kind::Sdk, Kind::Background, Kind::History];
+
+    /// Short name for the Kind filter (button value and menu rows).
+    pub fn short(self) -> &'static str {
+        match self {
+            Kind::Cli => "CLI",
+            Kind::Sdk => "SDK",
+            Kind::Background => "BG",
+            Kind::History => "History",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Kind::Cli => "CLI",
@@ -295,6 +307,61 @@ impl ScopeSet {
     }
 }
 
+/// Which session kinds the table shows. Every kind is on by default, and a kind a saved file
+/// does not mention stays on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KindSet {
+    pub cli: bool,
+    pub sdk: bool,
+    pub bg: bool,
+    pub history: bool,
+}
+
+impl Default for KindSet {
+    fn default() -> Self {
+        Self { cli: true, sdk: true, bg: true, history: true }
+    }
+}
+
+impl KindSet {
+    pub fn contains(&self, kind: Kind) -> bool {
+        match kind {
+            Kind::Cli => self.cli,
+            Kind::Sdk => self.sdk,
+            Kind::Background => self.bg,
+            Kind::History => self.history,
+        }
+    }
+
+    pub fn toggle(&mut self, kind: Kind) {
+        match kind {
+            Kind::Cli => self.cli = !self.cli,
+            Kind::Sdk => self.sdk = !self.sdk,
+            Kind::Background => self.bg = !self.bg,
+            Kind::History => self.history = !self.history,
+        }
+    }
+
+    pub fn label(&self) -> String {
+        let on: Vec<&str> = Kind::ALL.iter().filter(|k| self.contains(**k)).map(|k| k.short()).collect();
+        match on.len() {
+            0 => "None".into(),
+            n if n == Kind::ALL.len() => "All".into(),
+            _ => on.join(", "),
+        }
+    }
+}
+
+/// Sessions per kind, indexed by `Kind as usize`.
+pub fn kind_counts<'a>(rows: impl Iterator<Item = &'a Arc<SessionRow>>) -> [usize; Kind::ALL.len()] {
+    let mut counts = [0; Kind::ALL.len()];
+    for row in rows {
+        counts[row.kind as usize] += 1;
+    }
+    counts
+}
+
 /// Updated-time filter presets.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum RangePreset {
@@ -344,13 +411,14 @@ pub struct Filter {
     pub since_ms: Option<i64>,
     /// Sessions that never got a human prompt are hidden unless this is set.
     pub show_empty: bool,
+    pub kinds: KindSet,
 }
 
 impl Filter {
     pub fn matches(&self, row: &SessionRow) -> bool {
         let project_ok = self.project.as_ref().is_none_or(|p| row.project_key == *p);
         let since_ok = self.since_ms.is_none_or(|since| row.updated_at >= since);
-        project_ok && since_ok && (self.show_empty || row.prompts > 0)
+        project_ok && since_ok && (self.show_empty || row.prompts > 0) && self.kinds.contains(row.kind)
     }
 }
 
@@ -576,6 +644,74 @@ pub mod tests {
         assert!(alpha.matches(&a) && !alpha.matches(&b));
         let recent = Filter { since_ms: Some(15_000), ..Default::default() };
         assert!(!recent.matches(&a) && recent.matches(&b));
+    }
+
+    fn no_kinds() -> KindSet {
+        KindSet { cli: false, sdk: false, bg: false, history: false }
+    }
+
+    fn kind_row(id: &str, kind: Kind) -> Arc<SessionRow> {
+        let mut s = summary(id, "/p/alpha", 10_000);
+        match kind {
+            Kind::Cli => {}
+            Kind::Sdk => s.entrypoint = Some("sdk-cli".into()),
+            Kind::Background => s.is_background = true,
+            Kind::History => s.transcript_missing = true,
+        }
+        let row = SessionRow::from_summary(&s);
+        assert_eq!(row.kind, kind);
+        Arc::new(row)
+    }
+
+    #[test]
+    fn the_filter_shows_every_kind_by_default_and_only_the_picked_ones_after_that() {
+        let rows: Vec<Arc<SessionRow>> = Kind::ALL.iter().map(|k| kind_row(k.short(), *k)).collect();
+        let all = Filter::default();
+        assert!(rows.iter().all(|r| all.matches(r)), "no source is hidden by default");
+
+        let mut kinds = KindSet::default();
+        kinds.toggle(Kind::History);
+        let no_history = Filter { kinds, ..Default::default() };
+        let shown: Vec<&str> = rows.iter().filter(|r| no_history.matches(r)).map(|r| r.id.as_ref()).collect();
+        assert_eq!(shown, ["CLI", "SDK", "BG"]);
+
+        let none = Filter { kinds: no_kinds(), ..Default::default() };
+        assert!(!rows.iter().any(|r| none.matches(r)), "nothing picked, nothing shown");
+    }
+
+    #[test]
+    fn the_kind_filter_stacks_with_project_time_and_empty_sessions() {
+        let mut kinds = no_kinds();
+        kinds.toggle(Kind::Cli);
+        let cli_alpha = Filter { kinds, project: Some("-p-alpha".into()), since_ms: Some(5_000), ..Default::default() };
+        assert!(cli_alpha.matches(&kind_row("a", Kind::Cli)));
+        assert!(!cli_alpha.matches(&kind_row("s", Kind::Sdk)), "wrong kind");
+        assert!(!cli_alpha.matches(&row("b", "/p/beta", 10_000)), "right kind, wrong project");
+        assert!(!cli_alpha.matches(&row("old", "/p/alpha", 1_000)), "right kind, too old");
+        let mut empty = summary("e", "/p/alpha", 10_000);
+        empty.user_msg_count = 0;
+        assert!(!cli_alpha.matches(&SessionRow::from_summary(&empty)), "right kind, no prompt");
+    }
+
+    #[test]
+    fn the_kind_button_reads_all_none_or_the_short_names() {
+        let mut kinds = KindSet::default();
+        assert_eq!(kinds.label(), "All");
+        kinds.toggle(Kind::Background);
+        kinds.toggle(Kind::History);
+        assert_eq!(kinds.label(), "CLI, SDK");
+        assert!(kinds.contains(Kind::Sdk) && !kinds.contains(Kind::History));
+        kinds.toggle(Kind::History);
+        assert_eq!(kinds.label(), "CLI, SDK, History");
+        assert_eq!(no_kinds().label(), "None");
+    }
+
+    #[test]
+    fn kinds_are_counted_per_kind() {
+        let rows = vec![kind_row("a", Kind::Cli), kind_row("b", Kind::History), kind_row("c", Kind::History), kind_row("d", Kind::Sdk)];
+        let counts = kind_counts(rows.iter());
+        let got: Vec<(&str, usize)> = Kind::ALL.iter().map(|k| (k.short(), counts[*k as usize])).collect();
+        assert_eq!(got, [("CLI", 1), ("SDK", 1), ("BG", 0), ("History", 2)]);
     }
 
     #[test]

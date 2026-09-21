@@ -6,14 +6,14 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格形式列出本机所�
 
 2026-09-17：**M1 完成**（核心 crate，`kb/notes/2026-09-17-m1-core-crate.md`）。`crates/core` 现在是完整数据层：字节预过滤 + 借用式 serde 的 JSONL 解析器、增量 SQLite 索引（`index_state` 状态机、history.jsonl 补位、损坏 / 版本不符自动重建）、FTS5 trigram 搜索（<3 字 token 走 LIKE）、对齐 Python 脚本的正则扫描，以及 `asm` CLI。61 个 BDD 场景 + 真实数据上与 `claude_session_search.py` 21 组逐字比对全部通过；本机 1.1GB 全量索引 2.1–2.4s（其中 FTS 建索引 1.6s），增量扫描 0.14s，正则扫全量 0.4s，FTS 查询 3–11ms。
 
-2026-09-21：**M2 完成**（界面接入真实数据，`kb/notes/2026-09-21-m2-real-data.md`）。`crates/app/src/store.rs` 的后台线程独占 `Db`：先 `list_sessions` 出表（热启动 5488 行约 200ms 上屏），再 `Indexer::scan_streaming` 增量扫描并把写入的 session 逐条流回界面（冷启动 1.27GB 约 3.6–4.0s，首批行约 1s 出现），扫描有改动时再整表 reload 一次。项目 / 时间过滤、表头排序、Preview 模式、详情面板开合、选中行持久化到 `state.json`；状态栏显示行数、索引进度、消息数与 DB 大小。`fake.rs` 已删除，Conversation tab 暂时显示索引里的 user / assistant 文本（前 300 条，无工具调用 / thinking，M4 改为直接读 transcript）。下一步是 M3 搜索。
+2026-09-21：**M2 完成**（界面接入真实数据，`kb/notes/2026-09-21-m2-real-data.md`）。`crates/app/src/store.rs` 的后台线程独占 `Db`：先 `list_sessions` 出表（热启动 5488 行约 200ms 上屏），再 `Indexer::scan_streaming` 增量扫描并把写入的 session 逐条流回界面（冷启动 1.27GB 约 3.6–4.0s，首批行约 1s 出现），扫描有改动时再整表 reload 一次。项目 / 时间 / Kind 过滤、表头排序、Preview 模式、详情面板开合、选中行持久化到 `state.json`；状态栏显示行数、索引进度、消息数与 DB 大小。`fake.rs` 已删除，Conversation tab 暂时显示索引里的 user / assistant 文本（前 300 条，无工具调用 / thinking，M4 改为直接读 transcript）。下一步是 M3 搜索。
 
 ## 开发命令
 
 常用命令都在 `Makefile`，`make help` 列出；README 有说明。要点：
 
 - `make dev`（别名 `make dv`）编译并启动 app，与其他 macOS 项目的 `dev: build run` 约定一致；`run` 会先 pkill 掉已有实例，所以看到的一定是刚编出来的版本
-- `make screenshot` 唤醒屏幕、带 `ASM_SPIKE_AUTOPLAY=1` 启动并按窗口 ID 截三张图到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）；`make screenshot-clicks` 用 cliclick 真点击驱动下拉 / 行选中 / chip / tab，截 10 张（坐标写在 `scripts/screenshot-clicks.sh`，改布局后要校对）。两者都跑在真实索引上，但用 `$SHOT_DIR/state.json` 作一次性视图状态，保证每次从默认状态开始
+- `make screenshot` 唤醒屏幕、带 `ASM_SPIKE_AUTOPLAY=1` 启动并按窗口 ID 截三张图到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）；`make screenshot-clicks` 用 cliclick 真点击驱动下拉（含 Kind 过滤）/ 行选中 / chip / tab，截 12 张（坐标写在 `scripts/screenshot-clicks.sh`，改布局后要校对）。两者都跑在真实索引上，但用 `$SHOT_DIR/state.json` 作一次性视图状态，保证每次从默认状态开始
 - 构建产物不在 `./target`：全局 `~/.cargo/config.toml` 把 target 指到 `~/Library/Caches/cargo-target`，`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒；首次 `cargo check` 单独要 40 秒
 - Rust 由 mise 管理（`mise.toml` 锁 1.98.1，gpui-pre 需要 ≥ 1.98）；Metal Toolchain 必须装（`make setup`）
 - 手动启动 app 做验证后必须 `kill` 掉进程；`pgrep -fl agent-session-manager` 检查（`make dev` 自带 pkill，手动起的不算）
