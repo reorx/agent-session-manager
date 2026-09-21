@@ -329,6 +329,19 @@ mod tests {
     }
 
     #[test]
+    fn a_hidden_project_stays_hidden_when_new_sessions_of_it_arrive() {
+        let mut d = SessionTableDelegate::new();
+        d.set_rows(vec![row("a", "/p/x", 100), row("p1", "/p/probe", 200)]);
+        let mut filter = Filter::default();
+        filter.hide_project("-p-probe".into());
+        assert!(d.set_filter(filter));
+        assert_eq!(ids(&d), ["a"]);
+        d.upsert(vec![row("p2", "/p/probe", 900), row("b", "/p/y", 300)]);
+        assert_eq!(ids(&d), ["b", "a"]);
+        assert_eq!(d.position_of("p2"), None);
+    }
+
+    #[test]
     fn equal_sort_values_fall_back_to_newest_first() {
         let mut d = SessionTableDelegate::new();
         d.set_rows(vec![with_prompts("old", "/p/x", 100, 2), with_prompts("new", "/p/x", 300, 2), with_prompts("top", "/p/x", 200, 8)]);

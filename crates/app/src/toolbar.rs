@@ -85,6 +85,25 @@ impl AppRoot {
         self.apply_filter(filter, cx);
     }
 
+    /// Hidden projects never show, whatever else is picked; the Project dropdown lists them apart.
+    pub fn hide_project(&mut self, key: SharedString, cx: &mut Context<Self>) {
+        let mut filter = self.current_filter(cx);
+        filter.hide_project(key);
+        self.apply_filter(filter, cx);
+    }
+
+    pub fn show_project(&mut self, key: &str, cx: &mut Context<Self>) {
+        let mut filter = self.current_filter(cx);
+        filter.show_project(key);
+        self.apply_filter(filter, cx);
+    }
+
+    pub fn hide_selected_project(&mut self, cx: &mut Context<Self>) {
+        if let Some(key) = self.selected.as_ref().map(|row| row.project_key.clone()) {
+            self.hide_project(key, cx);
+        }
+    }
+
     pub fn set_range(&mut self, range: RangePreset, cx: &mut Context<Self>) {
         self.range = range;
         let mut filter = self.current_filter(cx);
@@ -136,6 +155,8 @@ impl AppRoot {
         let current = self.current_filter(cx).project;
         let total: usize = self.projects.iter().map(|p| p.count).sum();
         let projects = self.projects.clone();
+        let hidden = self.hidden_projects.clone();
+        let picked = current.as_ref().and_then(|key| projects.iter().find(|p| p.key == *key)).cloned();
         move |menu, _, _| {
             let this_all = this.clone();
             let mut menu = menu.min_w(px(248.)).max_h(px(420.)).scrollable(true).item(menu_item(
@@ -147,6 +168,28 @@ impl AppRoot {
                     this_all.update(cx, |app, cx| app.set_project(None, cx)).ok();
                 },
             ));
+            // extra rows only show up once a project is picked or hidden, so the default list keeps its layout
+            if let Some(picked) = &picked {
+                let this = this.clone();
+                let key = picked.key.clone();
+                menu = menu.item(menu_item(format!("Hide “{}”", picked.name).into(), "".into(), false, false, move |cx| {
+                    let key = key.clone();
+                    this.update(cx, |app, cx| app.hide_project(key, cx)).ok();
+                }));
+            }
+            if !hidden.is_empty() {
+                menu = menu.separator().label("Hidden · click to show again");
+            }
+            for project in &hidden {
+                let this = this.clone();
+                let key = project.key.clone();
+                menu = menu.item(menu_item(project.name.clone(), project.count.to_string().into(), true, false, move |cx| {
+                    this.update(cx, |app, cx| app.show_project(&key, cx)).ok();
+                }));
+            }
+            if picked.is_some() || !hidden.is_empty() {
+                menu = menu.separator();
+            }
             for project in &projects {
                 let this = this.clone();
                 let pick = project.key.clone();
@@ -233,9 +276,10 @@ impl AppRoot {
 
     pub fn render_toolbar(&self, cx: &mut Context<Self>) -> Div {
         let filter = self.current_filter(cx);
-        let project_label: SharedString = match &filter.project {
-            Some(key) => self.projects.iter().find(|p| p.key == *key).map_or_else(|| key.clone(), |p| p.name.clone()),
-            None => "All".into(),
+        let project_label: SharedString = match (&filter.project, filter.hidden_projects.len()) {
+            (Some(key), _) => self.projects.iter().find(|p| p.key == *key).map_or_else(|| key.clone(), |p| p.name.clone()),
+            (None, 0) => "All".into(),
+            (None, hidden) => format!("All · {hidden} hidden").into(),
         };
         let mode = self.table.read(cx).delegate().mode;
 

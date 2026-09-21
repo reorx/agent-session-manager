@@ -1,7 +1,7 @@
 //! View-model types for the UI. Everything the table renders is pre-formatted into
 //! `SharedString`s so `render_td` never allocates.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -412,13 +412,28 @@ pub struct Filter {
     /// Sessions that never got a human prompt are hidden unless this is set.
     pub show_empty: bool,
     pub kinds: KindSet,
+    /// `project_key`s whose sessions never show (noise such as a probe tool's directory).
+    pub hidden_projects: BTreeSet<SharedString>,
 }
 
 impl Filter {
     pub fn matches(&self, row: &SessionRow) -> bool {
         let project_ok = self.project.as_ref().is_none_or(|p| row.project_key == *p);
         let since_ok = self.since_ms.is_none_or(|since| row.updated_at >= since);
-        project_ok && since_ok && (self.show_empty || row.prompts > 0) && self.kinds.contains(row.kind)
+        let shown = (self.show_empty || row.prompts > 0) && !self.hidden_projects.contains(&row.project_key);
+        project_ok && since_ok && shown && self.kinds.contains(row.kind)
+    }
+
+    /// Hide a project; when it is the picked one the filter goes back to all projects.
+    pub fn hide_project(&mut self, key: SharedString) {
+        if self.project.as_ref() == Some(&key) {
+            self.project = None;
+        }
+        self.hidden_projects.insert(key);
+    }
+
+    pub fn show_project(&mut self, key: &str) {
+        self.hidden_projects.remove(key);
     }
 }
 
@@ -451,6 +466,18 @@ pub fn project_entries<'a>(rows: impl Iterator<Item = &'a Arc<SessionRow>>) -> V
     let mut out: Vec<ProjectEntry> = by_key.into_values().collect();
     out.sort_by(|a, b| b.last_updated.cmp(&a.last_updated).then_with(|| a.name.cmp(&b.name)));
     out
+}
+
+/// Split the project list into the projects the dropdown offers and the hidden ones. A hidden
+/// key without any session left is still listed (by its key), so it can be shown again.
+pub fn split_hidden(entries: Vec<ProjectEntry>, hidden: &BTreeSet<SharedString>) -> (Vec<ProjectEntry>, Vec<ProjectEntry>) {
+    let (mut hidden_entries, listed): (Vec<_>, Vec<_>) = entries.into_iter().partition(|e| hidden.contains(&e.key));
+    for key in hidden {
+        if !hidden_entries.iter().any(|e| e.key == *key) {
+            hidden_entries.push(ProjectEntry { key: key.clone(), name: key.clone(), count: 0, last_updated: i64::MIN });
+        }
+    }
+    (listed, hidden_entries)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -712,6 +739,41 @@ pub mod tests {
         let counts = kind_counts(rows.iter());
         let got: Vec<(&str, usize)> = Kind::ALL.iter().map(|k| (k.short(), counts[*k as usize])).collect();
         assert_eq!(got, [("CLI", 1), ("SDK", 1), ("BG", 0), ("History", 2)]);
+    }
+
+    #[test]
+    fn rows_of_a_hidden_project_are_filtered_out_whatever_else_matches() {
+        let (a, b) = (row("a", "/p/alpha", 10_000), row("b", "/p/beta", 20_000));
+        let mut filter = Filter::default();
+        filter.hide_project("-p-beta".into());
+        assert!(filter.matches(&a) && !filter.matches(&b));
+        assert!(!Filter { show_empty: true, since_ms: Some(1), ..filter.clone() }.matches(&b), "still hidden");
+        filter.show_project("-p-beta");
+        assert_eq!(filter, Filter::default(), "showing it again leaves no trace");
+    }
+
+    #[test]
+    fn hiding_the_picked_project_goes_back_to_all_projects() {
+        let mut filter = Filter { project: Some("-p-beta".into()), ..Default::default() };
+        filter.hide_project("-p-alpha".into());
+        assert_eq!(filter.project.as_deref(), Some("-p-beta"), "another project stays picked");
+        filter.hide_project("-p-beta".into());
+        assert_eq!(filter.project, None, "otherwise the table would be stuck on an empty project");
+        assert!(filter.matches(&row("g", "/p/gamma", 1)));
+    }
+
+    #[test]
+    fn hidden_projects_leave_the_project_list_and_are_listed_apart() {
+        let rows = vec![row("a", "/p/alpha", 10_000), row("b", "/p/beta", 20_000), row("c", "/p/alpha", 30_000)];
+        let hidden: BTreeSet<SharedString> = ["-p-alpha".into(), "-p-gone".into()].into();
+        let (listed, hidden) = split_hidden(project_entries(rows.iter()), &hidden);
+        let names = |entries: &[ProjectEntry]| -> Vec<(String, usize)> { entries.iter().map(|e| (e.name.to_string(), e.count)).collect() };
+        assert_eq!(names(&listed), [("beta".to_string(), 1)]);
+        assert_eq!(
+            names(&hidden),
+            [("alpha".to_string(), 2), ("-p-gone".to_string(), 0)],
+            "a hidden project without any session left is still listed, so it can be shown again"
+        );
     }
 
     #[test]

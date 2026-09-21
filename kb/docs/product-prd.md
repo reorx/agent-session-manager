@@ -45,7 +45,7 @@ tags:
 | 状态栏 | ✅ | 左：显示数 / 总数；中：操作状态 + 索引状态（loading / indexing n / m / 完成摘要 / 错误）；右：消息数、DB 大小、首批行上屏耗时 |
 | 搜索框与范围切换 | 🟡 | 搜索框（`cmd-f` 聚焦、`esc` 清空）与 Scope 多选下拉都在，输入只显示在状态栏，无搜索逻辑 |
 | 时间范围过滤 | ✅ 预设 / ⬜ 自定义区间 | Updated 下拉：Today / 3 / 7 / 30 days / Any time，即时过滤 |
-| 项目过滤 | ✅ 单选 | Project 下拉按最近活动列出真实项目与 session 数；多选、可搜索、worktree 聚合待做 |
+| 项目过滤 | ✅ 单选 + 隐藏项目 | Project 下拉按最近活动列出真实项目与 session 数；可把噪音项目（如 CodexBar 的 `ClaudeProbe`）整个隐藏并随时恢复；多选、可搜索、worktree 聚合待做 |
 | Kind 过滤 | ✅ | Kind 多选下拉（CLI / SDK / BG / History，各带 session 数），默认全选，选择持久化 |
 | 更多过滤 | ⬜ | 最少 prompt 数的界面控件、使用过的工具、有 PR、有 subagent |
 | 全文搜索、正则搜索 | ✅ 核心库 / ⬜ 界面 | `asm search`（正则扫描，与旧脚本逐字一致）与 `asm search --index`（FTS5，3–11ms）可用；界面未接 |
@@ -100,12 +100,13 @@ Cost、Branch、Tools、ID 不再作为列，只在详情面板的 Metadata 里�
 
 待补充（⬜）：行密度（单行 / 两行）、相对时间显示、列顺序拖拽，以上均需持久化。
 
-### 4.3 过滤 ✅ 项目单选 + 时间预设 + Kind 多选 / ⬜ 其余
+### 4.3 过滤 ✅ 项目单选 + 隐藏项目 + 时间预设 + Kind 多选 / ⬜ 其余
 
 工具栏左侧，多个条件叠加生效，结果实时更新（真实 5488 行 0–1ms，状态栏显示耗时）。过滤后保持原选中行，若它被滤掉则选中第一行。
 
 - **时间范围**：「Updated ▾」下拉，预设 Today / 3 days / 7 days / 30 days / Any time，已过滤数据。自定义日期区间、切换为 Started 待做。
 - **项目**：「Project ▾」下拉，按最近活动列出所有项目与各自 session 数，单选。待做：可搜索（真实数据上百个项目，目前靠滚动）、多选、worktree 聚合。
+- **隐藏项目**（✅）：把整个项目从表格里排除，用于探针 / 监控工具产生的噪音目录（真实数据里 CodexBar 的 `ClaudeProbe` 一个目录就有 2571 条 History，隐藏后 5484 行降到 2913 行）。两个入口：选中某项目后 Project 下拉顶部出现 `Hide “<项目>”`（隐藏后项目筛选自动回到 All）；或选中一行后用 View 菜单的 "Hide Project of Selected Session"——噪音项目往往不活跃、在下拉里排得很靠后（ClaudeProbe 排第 82），从表格行直接隐藏更快。已隐藏的项目列在 Project 下拉顶部的 Hidden 区，点一下恢复；按钮显示 `All · 1 hidden` 提示有行被排除。隐藏是全局排除（与"显示空 session"同级）：Project 总数与 Kind 计数都不含隐藏项目。持久化到 `state.json`。
 - **Kind**（✅）：「Kind ▾」下拉，位于 Updated 之后，多选 CLI / SDK / BG / History，每项右侧是该 Kind 的 session 数（口径与 Project 下拉一致：遵循"显示空 session"开关，不受项目 / 时间过滤影响）。按钮显示 `All`、选中项短名（如 `CLI, SDK, BG`）或 `None`（表格为空）。默认全选，不隐藏任何来源；真实数据里 History 占 83%，取消它后 5479 行降到 932 行。
 - **更多过滤**（⬜）：折叠面板，含最少 prompt 数（默认 ≥1 以过滤空 session，目前由 View 菜单开关控制）、使用过的工具、有 PR、有 subagent。
 - 条件持久化到下次启动（✅）；生效条件以 chip 展示可逐个移除、"Reset" 清空（⬜）。

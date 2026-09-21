@@ -29,14 +29,14 @@ use gpui_kit::component::{ResizableState, Root, Sizable, h_resizable, resizable_
 use gpui_kit::*;
 
 use crate::detail::{DETAIL_W, DetailState, DetailTab};
-use crate::model::{DisplayMode, Filter, Kind, ProjectEntry, RangePreset, ScopeSet, SessionRow, conversation_from, kind_counts, project_entries};
+use crate::model::{DisplayMode, Filter, Kind, ProjectEntry, RangePreset, ScopeSet, SessionRow, conversation_from, kind_counts, project_entries, split_hidden};
 use crate::settings::{SortDir, ViewState, default_state_path};
 use crate::store::{Store, StoreEvent, StoreRequest};
 use crate::table::{FIXED_COLS_W, PREVIEW_MIN_W, ROW_H, SessionTableDelegate};
 
 gpui_kit::actions!(
     app,
-    [Quit, ToggleDetail, FocusSearch, Preview1, Preview2, Preview3, Preview4, Rescan, RebuildIndex, ToggleEmptySessions]
+    [Quit, ToggleDetail, FocusSearch, Preview1, Preview2, Preview3, Preview4, Rescan, RebuildIndex, ToggleEmptySessions, HideSelectedProject]
 );
 
 const WINDOW_W: f32 = 1440.;
@@ -59,6 +59,8 @@ pub struct AppRoot {
     resizable: Entity<ResizableState>,
     store: Store,
     projects: Vec<ProjectEntry>,
+    /// Hidden projects, listed apart in the Project dropdown so they can be shown again.
+    hidden_projects: Vec<ProjectEntry>,
     /// Sessions per kind (`Kind as usize`), shown in the Kind dropdown.
     kind_counts: [usize; Kind::ALL.len()],
     scope: ScopeSet,
@@ -101,6 +103,7 @@ impl AppRoot {
             since_ms: saved.range.since_ms(),
             show_empty: saved.show_empty,
             kinds: saved.kinds,
+            hidden_projects: saved.hidden_projects.iter().cloned().map(Into::into).collect(),
         });
         if let Some((key, dir)) = &saved.sort {
             delegate.set_sort(key, dir.to_column());
@@ -142,6 +145,7 @@ impl AppRoot {
             resizable,
             store,
             projects: Vec::new(),
+            hidden_projects: Vec::new(),
             kind_counts: [0; Kind::ALL.len()],
             scope: ScopeSet::default(),
             range: saved.range,
@@ -216,10 +220,10 @@ impl AppRoot {
     /// Rows or the filter changed: refresh the dropdown counts and keep the selection on its session.
     pub(crate) fn after_rows_changed(&mut self, cx: &mut Context<Self>) {
         let delegate = self.table.read(cx).delegate();
-        let show_empty = delegate.filter().show_empty;
+        let (show_empty, hidden) = (delegate.filter().show_empty, &delegate.filter().hidden_projects);
         let listed = || delegate.rows.iter().filter(|r| show_empty || r.prompts > 0);
-        self.projects = project_entries(listed());
-        self.kind_counts = kind_counts(listed());
+        (self.projects, self.hidden_projects) = split_hidden(project_entries(listed()), hidden);
+        self.kind_counts = kind_counts(listed().filter(|r| !hidden.contains(&r.project_key)));
         let wanted = self.wanted_id.clone().or_else(|| self.selected.as_ref().map(|r| r.id.clone()));
         let position = wanted.as_ref().and_then(|id| delegate.position_of(id));
         let has_rows = !delegate.ix.is_empty();
@@ -274,6 +278,7 @@ impl AppRoot {
             range: self.range,
             show_empty: delegate.filter().show_empty,
             kinds: delegate.filter().kinds,
+            hidden_projects: delegate.filter().hidden_projects.iter().map(|p| p.to_string()).collect(),
             detail_visible: self.detail_visible,
             selected_id: self.selected.as_ref().map(|r| r.id.to_string()).or_else(|| self.wanted_id.as_ref().map(|id| id.to_string())),
         }
@@ -407,6 +412,7 @@ impl Render for AppRoot {
             .on_action(cx.listener(|this, _: &Rescan, _, cx| this.rescan(false, cx)))
             .on_action(cx.listener(|this, _: &RebuildIndex, _, cx| this.rescan(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleEmptySessions, _, cx| this.toggle_empty_sessions(cx)))
+            .on_action(cx.listener(|this, _: &HideSelectedProject, _, cx| this.hide_selected_project(cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)))
             .on_action(cx.listener(|this, _: &Preview1, _, cx| this.set_mode(DisplayMode::Title, cx)))
             .on_action(cx.listener(|this, _: &Preview2, _, cx| this.set_mode(DisplayMode::FirstPrompt, cx)))
@@ -474,6 +480,7 @@ fn main() {
                 MenuItem::action("Preview: Last Message", Preview4),
                 MenuItem::separator(),
                 MenuItem::action("Show / Hide Sessions Without Prompts", ToggleEmptySessions),
+                MenuItem::action("Hide Project of Selected Session", HideSelectedProject),
             ]),
             Menu::new("Index").items(vec![
                 MenuItem::action("Scan for Changes", Rescan),

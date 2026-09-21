@@ -43,6 +43,8 @@ pub struct ViewState {
     pub range: RangePreset,
     pub show_empty: bool,
     pub kinds: KindSet,
+    /// `project_key`s hidden from the table.
+    pub hidden_projects: Vec<String>,
     pub detail_visible: bool,
     pub selected_id: Option<String>,
 }
@@ -56,6 +58,7 @@ impl Default for ViewState {
             range: RangePreset::default(),
             show_empty: false,
             kinds: KindSet::default(),
+            hidden_projects: Vec::new(),
             detail_visible: true,
             selected_id: None,
         }
@@ -102,6 +105,7 @@ mod tests {
             range: RangePreset::Days7,
             show_empty: true,
             kinds,
+            hidden_projects: vec!["-Users-me-Code-probe".into()],
             detail_visible: false,
             selected_id: Some("11111111-aaaa-4bbb-8ccc-000000000001".into()),
         };
@@ -130,6 +134,7 @@ mod tests {
         assert_eq!(state.range, RangePreset::Any);
         assert_eq!(state.kinds, KindSet::default(), "a file written before the Kind filter shows every kind");
         assert_eq!(state.kinds.label(), "All");
+        assert!(state.hidden_projects.is_empty(), "a file written before projects could be hidden hides none");
     }
 
     #[test]
