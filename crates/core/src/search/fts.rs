@@ -1,12 +1,12 @@
 //! Text search over the index: FTS5 trigram (case-insensitive substring match, every word must
 //! appear) with a `LIKE` fallback for words shorter than a trigram (two-character CJK queries).
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use anyhow::Result;
 use rusqlite::types::Value as SqlValue;
 
-use super::Highlighted;
+use super::{Highlighted, Matcher};
 use crate::index::Db;
 use crate::model::Role;
 
@@ -30,6 +30,8 @@ pub struct FtsQuery {
     pub project: Option<String>,
     /// Only messages with `ts >= since_ms`.
     pub since_ms: Option<i64>,
+    /// Only these sessions (`None` = all of them).
+    pub sessions: Option<HashSet<String>>,
     /// Maximum number of sessions returned.
     pub limit: usize,
 }
@@ -44,6 +46,14 @@ pub struct SessionHit {
     pub first_role: Role,
     pub first_ts: i64,
     pub updated_at: i64,
+}
+
+/// The newest `limit` sessions with hits, plus what the whole query matched.
+#[derive(Clone, Debug, Default)]
+pub struct FtsOutcome {
+    pub hits: Vec<SessionHit>,
+    pub total_sessions: usize,
+    pub total_matches: usize,
 }
 
 /// Normalise user input into FTS5 phrases: every whitespace-separated word becomes a quoted
@@ -61,10 +71,41 @@ pub fn needs_like(input: &str) -> bool {
     input.split_whitespace().any(|w| w.chars().count() < 3)
 }
 
-const SNIPPET_CONTEXT_CHARS: usize = 40;
+/// Characters shown before the first matched word / from its start.
+const SNIPPET_BEFORE: usize = 40;
+const SNIPPET_AFTER: usize = 80;
 
 /// Search messages and group the hits per session, most recently updated session first.
 pub fn search_sessions(db: &Db, q: &FtsQuery) -> Result<Vec<SessionHit>> {
+    Ok(search(db, q)?.hits)
+}
+
+/// Two steps: SQL only counts the hits per session (FTS5's own `snippet()` re-tokenizes every
+/// matching message, 50x the cost of the query), then the first matching message of each
+/// session that is kept gets its snippet here.
+pub fn search(db: &Db, q: &FtsQuery) -> Result<FtsOutcome> {
+    let Some(matcher) = Matcher::words(&q.text) else { return Ok(FtsOutcome::default()) };
+    let mut hits = count_per_session(db, q)?;
+    if let Some(sessions) = &q.sessions {
+        hits.retain(|(hit, _)| sessions.contains(&hit.session_id));
+    }
+    let total_sessions = hits.len();
+    let total_matches = hits.iter().map(|(hit, _)| hit.count as usize).sum();
+    hits.sort_by(|(a, _), (b, _)| b.updated_at.cmp(&a.updated_at).then_with(|| a.session_id.cmp(&b.session_id)));
+    hits.truncate(q.limit);
+
+    let mut text_of = db.conn().prepare_cached("SELECT text FROM messages WHERE id = ?1")?;
+    let mut out = Vec::with_capacity(hits.len());
+    for (mut hit, message_id) in hits {
+        let text: String = text_of.query_row([message_id], |r| r.get(0))?;
+        hit.first = matcher.snippet(&text, SNIPPET_BEFORE, SNIPPET_AFTER);
+        out.push(hit);
+    }
+    Ok(FtsOutcome { hits: out, total_sessions, total_matches })
+}
+
+/// Every session with hits (snippet still empty) and the id of its first matching message.
+fn count_per_session(db: &Db, q: &FtsQuery) -> Result<Vec<(SessionHit, i64)>> {
     let words: Vec<&str> = q.text.split_whitespace().collect();
     let roles: Vec<&str> =
         [(q.roles.user, "user"), (q.roles.assistant, "assistant")].iter().filter(|(on, _)| *on).map(|(_, r)| *r).collect();
@@ -72,15 +113,10 @@ pub fn search_sessions(db: &Db, q: &FtsQuery) -> Result<Vec<SessionHit>> {
         return Ok(Vec::new());
     }
     let like = needs_like(&q.text);
-    let mut sql = String::from(
-        "SELECT m.session_id, p.encoded_dir, m.role, m.ts, s.updated_at, ",
-    );
+    // min() makes the bare columns (id, role, ts) come from the first message in conversation order
+    let mut sql = String::from("SELECT m.session_id, p.encoded_dir, s.updated_at, count(*), min(m.byte_offset), m.id, m.role, m.ts FROM ");
     let mut args: Vec<SqlValue> = Vec::new();
-    if like {
-        sql.push_str("m.text FROM messages m");
-    } else {
-        sql.push_str("snippet(messages_fts, 0, char(1), char(2), '…', 64) FROM messages_fts JOIN messages m ON m.id = messages_fts.rowid");
-    }
+    sql.push_str(if like { "messages m" } else { "messages_fts JOIN messages m ON m.id = messages_fts.rowid" });
     sql.push_str(" JOIN sessions s ON s.id = m.session_id JOIN projects p ON p.id = s.project_id WHERE ");
     if like {
         sql.push_str("m.is_meta = 0");
@@ -102,96 +138,24 @@ pub fn search_sessions(db: &Db, q: &FtsQuery) -> Result<Vec<SessionHit>> {
         args.push(project.to_lowercase().into());
         sql.push_str(&format!(" AND instr(lower(p.encoded_dir), ?{}) > 0", args.len()));
     }
-    sql.push_str(" ORDER BY m.session_id, m.byte_offset");
+    sql.push_str(" GROUP BY m.session_id");
 
     let mut stmt = db.conn().prepare_cached(&sql)?;
-    let mut hits: HashMap<String, SessionHit> = HashMap::new();
     let rows = stmt.query_map(rusqlite::params_from_iter(args), |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, i64>(3)?,
-            r.get::<_, i64>(4)?,
-            r.get::<_, String>(5)?,
-        ))
+        let hit = SessionHit {
+            session_id: r.get(0)?,
+            project_key: r.get(1)?,
+            updated_at: r.get(2)?,
+            count: r.get(3)?,
+            first: Highlighted::default(),
+            first_role: Role::parse(&r.get::<_, String>(6)?).unwrap_or(Role::User),
+            first_ts: r.get(7)?,
+        };
+        Ok((hit, r.get::<_, i64>(5)?))
     })?;
-    for row in rows {
-        let (session_id, project_key, role, ts, updated_at, text) = row?;
-        match hits.get_mut(&session_id) {
-            Some(hit) => hit.count += 1,
-            None => {
-                let first = if like { like_snippet(&text, &words) } else { parse_markers(&text) };
-                hits.insert(
-                    session_id.clone(),
-                    SessionHit {
-                        session_id,
-                        project_key,
-                        count: 1,
-                        first,
-                        first_role: Role::parse(&role).unwrap_or(Role::User),
-                        first_ts: ts,
-                        updated_at,
-                    },
-                );
-            }
-        }
-    }
-    let mut out: Vec<SessionHit> = hits.into_values().collect();
-    out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.session_id.cmp(&b.session_id)));
-    out.truncate(q.limit);
-    Ok(out)
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 fn escape_like(w: &str) -> String {
     w.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
-}
-
-/// Turn FTS5's `char(1)` / `char(2)` markers into highlight ranges.
-fn parse_markers(marked: &str) -> Highlighted {
-    let mut out = Highlighted::default();
-    let mut open: Option<usize> = None;
-    for c in marked.chars() {
-        match c {
-            '\u{1}' => open = Some(out.text.len()),
-            '\u{2}' => {
-                if let Some(start) = open.take() {
-                    out.ranges.push(start..out.text.len());
-                }
-            }
-            c => out.text.push(c),
-        }
-    }
-    out
-}
-
-/// Snippet for the LIKE path: context around the first word, every word occurrence highlighted.
-/// SQLite's LIKE folds ASCII case only, so the same rule is used here.
-fn like_snippet(text: &str, words: &[&str]) -> Highlighted {
-    let lower = text.to_ascii_lowercase();
-    let first = words.iter().filter_map(|w| lower.find(&w.to_ascii_lowercase())).min().unwrap_or(0);
-    let start = text[..first].char_indices().rev().nth(SNIPPET_CONTEXT_CHARS - 1).map(|(i, _)| i).unwrap_or(0);
-    let end = text[first..].char_indices().nth(SNIPPET_CONTEXT_CHARS * 2).map(|(i, _)| first + i).unwrap_or(text.len());
-    let mut out = Highlighted::default();
-    if start > 0 {
-        out.text.push('…');
-    }
-    let base = out.text.len();
-    let shown = text[start..end].replace('\n', "⏎");
-    let shown_lower = shown.to_ascii_lowercase();
-    for w in words {
-        let wl = w.to_ascii_lowercase();
-        let mut pos = 0;
-        while let Some(i) = shown_lower[pos..].find(&wl) {
-            out.ranges.push(base + pos + i..base + pos + i + wl.len());
-            pos += i + wl.len();
-        }
-    }
-    out.text.push_str(&shown);
-    out.ranges.sort_by_key(|r| r.start);
-    out.ranges.dedup();
-    if end < text.len() {
-        out.text.push('…');
-    }
-    out
 }

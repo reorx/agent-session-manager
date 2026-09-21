@@ -7,10 +7,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
-use gpui_kit::component::v_flex;
+use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::*;
 
 use crate::model::{DisplayMode, Filter, SessionRow};
+use crate::search::{RowHit, SearchTarget};
 use crate::style::{self, FluentBuilder};
 
 /// Fixed widths from the mockup; Preview takes whatever is left.
@@ -20,11 +21,15 @@ pub const UPDATED_W: f32 = 88.;
 pub const PROMPTS_W: f32 = 58.;
 pub const SIZE_W: f32 = 60.;
 pub const KIND_W: f32 = 46.;
-pub const FIXED_COLS_W: f32 = PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + SIZE_W + KIND_W;
+/// Only there while a search is active.
+pub const MATCHES_W: f32 = 64.;
+const FIXED_COLS_W: f32 = PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + SIZE_W + KIND_W;
 pub const PREVIEW_MIN_W: f32 = 240.;
 pub const ROW_H: f32 = 36.;
 
 const PREVIEW_COL: usize = 1;
+const MATCHES_COL: usize = 2;
+const MATCHES_KEY: &str = "matches";
 const DEFAULT_SORT_KEY: &str = "updated";
 
 pub struct SessionTableDelegate {
@@ -36,6 +41,8 @@ pub struct SessionTableDelegate {
     columns: Vec<Column>,
     pub mode: DisplayMode,
     filter: Filter,
+    /// Hits of the active search by session id; only these sessions are shown while it is `Some`.
+    search: Option<HashMap<SharedString, Arc<RowHit>>>,
     sort: Option<(SharedString, ColumnSort)>,
     pub last_filter_ms: u128,
 }
@@ -62,6 +69,7 @@ impl SessionTableDelegate {
             columns,
             mode: DisplayMode::FirstPrompt,
             filter: Filter::default(),
+            search: None,
             sort: None,
             last_filter_ms: 0,
         }
@@ -112,9 +120,65 @@ impl SessionTableDelegate {
         self.sort(key, sort);
     }
 
+    pub fn search_active(&self) -> bool {
+        self.search.is_some()
+    }
+
+    pub fn hit(&self, id: &str) -> Option<&Arc<RowHit>> {
+        self.search.as_ref()?.get(id)
+    }
+
+    /// Enter search mode with no hits yet (`true`), or leave it (`false`). The Matches column
+    /// comes and goes with it, so the caller must `TableState::refresh` afterwards.
+    pub fn set_search(&mut self, active: bool) {
+        if active != self.columns.iter().any(|c| c.key == MATCHES_KEY) {
+            match active {
+                true => self.columns.insert(MATCHES_COL, col(MATCHES_KEY, "Matches", MATCHES_W).text_right().sortable()),
+                false => drop(self.columns.remove(MATCHES_COL)),
+            }
+        }
+        if !active && self.sort.as_ref().is_some_and(|(key, _)| key == MATCHES_KEY) {
+            self.sort = None;
+        }
+        self.search = active.then(HashMap::new);
+        self.sync_column_arrows();
+        self.recompute();
+    }
+
+    /// Hits of the running search, batch by batch.
+    pub fn add_hits(&mut self, hits: Vec<(SharedString, Arc<RowHit>)>) {
+        if let Some(search) = &mut self.search {
+            search.extend(hits);
+            self.recompute();
+        }
+    }
+
+    /// The sessions a search should look into: whatever passes the filters, newest first.
+    pub fn search_targets(&self) -> Vec<SearchTarget> {
+        let mut rows: Vec<&Arc<SessionRow>> = self.rows.iter().filter(|r| self.filter.matches(r)).collect();
+        rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        rows.iter()
+            .map(|r| SearchTarget {
+                session_id: r.id.to_string(),
+                project_key: r.project_key.to_string(),
+                path: r.transcript_path.clone(),
+                updated_at: r.updated_at,
+            })
+            .collect()
+    }
+
+    /// Width of every column but Preview.
+    pub fn fixed_cols_width(&self) -> f32 {
+        if self.search_active() { FIXED_COLS_W + MATCHES_W } else { FIXED_COLS_W }
+    }
+
+    fn shows(&self, row: &SessionRow) -> bool {
+        self.filter.matches(row) && self.search.as_ref().is_none_or(|hits| hits.contains_key(&row.id))
+    }
+
     fn recompute(&mut self) {
         let t = Instant::now();
-        self.ix = (0..self.rows.len()).filter(|i| self.filter.matches(&self.rows[*i])).collect();
+        self.ix = (0..self.rows.len()).filter(|i| self.shows(&self.rows[*i])).collect();
         match self.sort.clone() {
             Some((key, sort)) => self.sort(&key, sort),
             None => self.sort_by_updated_desc(),
@@ -149,8 +213,13 @@ impl SessionTableDelegate {
         self.ix.sort_by(|a, b| rows[*b].updated_at.cmp(&rows[*a].updated_at));
     }
 
-    fn compare(a: &SessionRow, b: &SessionRow, key: &str) -> Ordering {
+    fn matches_of(&self, row: &SessionRow) -> u32 {
+        self.hit(&row.id).map_or(0, |hit| hit.count)
+    }
+
+    fn compare(&self, a: &SessionRow, b: &SessionRow, key: &str) -> Ordering {
         match key {
+            MATCHES_KEY => self.matches_of(a).cmp(&self.matches_of(b)),
             "project" => a.project.cmp(&b.project),
             "started" => a.started_at.cmp(&b.started_at),
             "updated" => a.updated_at.cmp(&b.updated_at),
@@ -182,13 +251,25 @@ impl SessionTableDelegate {
         }
         self.sort = Some((key.to_string().into(), sort));
         self.sync_column_arrows();
-        let rows = &self.rows;
-        self.ix.sort_by(|a, b| {
-            let (ra, rb) = (&rows[*a], &rows[*b]);
-            let ord = Self::compare(ra, rb, key);
+        let mut ix = std::mem::take(&mut self.ix);
+        ix.sort_by(|a, b| {
+            let (ra, rb) = (&self.rows[*a], &self.rows[*b]);
+            let ord = self.compare(ra, rb, key);
             let ord = if sort == ColumnSort::Descending { ord.reverse() } else { ord };
             ord.then_with(|| rb.updated_at.cmp(&ra.updated_at))
         });
+        self.ix = ix;
+    }
+
+    /// Second Preview line while searching: where the first match is, then its snippet.
+    fn hit_line(&self, hit: &RowHit, cx: &App) -> Div {
+        let marks = hit.ranges.iter().map(|r| (r.clone(), style::hit_highlight()));
+        h_flex()
+            .gap(px(5.))
+            .text_size(px(11.))
+            .line_height(px(14.))
+            .child(div().flex_none().font_family(style::mono(cx)).text_size(px(10.)).text_color(style::muted_light()).child(hit.label.clone()))
+            .child(div().flex_1().min_w_0().truncate().text_color(style::text_secondary()).child(StyledText::new(hit.snippet.clone()).with_highlights(marks)))
     }
 
     fn mono_cell(&self, text: SharedString, color: Hsla, cx: &App) -> AnyElement {
@@ -232,15 +313,22 @@ impl TableDelegate for SessionTableDelegate {
         match self.columns[col_ix].key.as_ref() {
             "project" => div().truncate().child(row.project.clone()).into_any_element(),
             "preview" => {
-                let sub = self.mode.preview(&row);
+                let sub = match self.hit(&row.id) {
+                    Some(hit) => self.hit_line(hit, cx),
+                    None => div().truncate().text_size(px(11.)).line_height(px(14.)).text_color(style::muted()).child(self.mode.preview(&row)),
+                };
                 v_flex()
                     .w_full()
                     .h(px(ROW_H))
                     .justify_center()
                     .overflow_hidden()
                     .child(div().truncate().line_height(px(15.)).child(row.title.clone()))
-                    .child(div().truncate().text_size(px(11.)).line_height(px(14.)).text_color(style::muted()).child(sub))
+                    .child(sub)
                     .into_any_element()
+            }
+            MATCHES_KEY => {
+                let count = self.matches_of(&row).to_string();
+                self.mono_cell(count.into(), style::text(), cx)
             }
             "started" => self.mono_cell(row.started_fmt.clone(), style::text_secondary(), cx),
             "updated" => self.mono_cell(row.updated_fmt.clone(), style::text(), cx),
@@ -326,6 +414,64 @@ mod tests {
         assert_eq!(d.rows.len(), 5, "hidden rows are still kept");
         assert!(d.set_filter(Filter::default()));
         assert_eq!(ids(&d), ["h2", "a", "c", "b", "h1"]);
+    }
+
+    fn hit(count: u32) -> Arc<RowHit> {
+        Arc::new(RowHit { count, label: "user".into(), snippet: "…".into(), ranges: Vec::new() })
+    }
+
+    fn keys(d: &SessionTableDelegate) -> Vec<String> {
+        d.columns.iter().map(|c| c.key.to_string()).collect()
+    }
+
+    #[test]
+    fn a_search_shows_only_the_sessions_with_hits_and_stacks_with_the_filters() {
+        let mut d = SessionTableDelegate::new();
+        d.set_rows(vec![row("a", "/p/x", 100), row("b", "/p/y", 200), row("c", "/p/x", 300)]);
+        d.set_search(true);
+        assert!(ids(&d).is_empty(), "a search that found nothing (yet) shows nothing");
+        d.add_hits(vec![("a".into(), hit(2)), ("b".into(), hit(7))]);
+        d.add_hits(vec![("c".into(), hit(1))]);
+        assert_eq!(ids(&d), ["c", "b", "a"], "batches add up; newest first as always");
+        d.set_filter(Filter { project: Some("-p-x".into()), ..Default::default() });
+        assert_eq!(ids(&d), ["c", "a"], "the project filter still applies");
+        d.set_search(false);
+        d.set_filter(Filter::default());
+        assert_eq!(ids(&d), ["c", "b", "a"]);
+        assert!(d.hit("a").is_none());
+    }
+
+    #[test]
+    fn the_matches_column_exists_only_while_searching_and_sorts_by_hit_count() {
+        let mut d = SessionTableDelegate::new();
+        let before = keys(&d);
+        d.set_rows(vec![row("a", "/p/x", 100), row("b", "/p/y", 200), row("c", "/p/x", 300)]);
+        d.set_search(true);
+        assert_eq!(keys(&d)[..3], ["project", "preview", "matches"]);
+        assert_eq!(d.fixed_cols_width(), FIXED_COLS_W + MATCHES_W, "Preview gives up the room");
+        d.add_hits(vec![("a".into(), hit(9)), ("b".into(), hit(1)), ("c".into(), hit(4))]);
+        d.set_sort("matches", ColumnSort::Descending);
+        assert_eq!(ids(&d), ["a", "c", "b"]);
+        d.set_search(true);
+        assert_eq!(keys(&d).iter().filter(|k| *k == "matches").count(), 1, "a new search keeps the one column");
+        assert_eq!(d.sort_state(), Some(("matches".into(), ColumnSort::Descending)), "and the sort");
+
+        d.set_search(false);
+        assert_eq!(keys(&d), before);
+        assert_eq!(d.sort_state(), None, "without the column the table is back to newest first");
+        assert_eq!(ids(&d), ["c", "b", "a"]);
+        assert_eq!(d.fixed_cols_width(), FIXED_COLS_W);
+    }
+
+    #[test]
+    fn search_targets_are_the_filtered_sessions_newest_first() {
+        let mut d = SessionTableDelegate::new();
+        d.set_rows(vec![row("a", "/p/x", 100), row("b", "/p/y", 200), row("c", "/p/x", 300), history("h", "/p/x", 400)]);
+        d.set_filter(Filter { project: Some("-p-x".into()), ..Default::default() });
+        d.set_search(true);
+        let targets = d.search_targets();
+        let got: Vec<(&str, bool)> = targets.iter().map(|t| (t.session_id.as_str(), t.path.is_some())).collect();
+        assert_eq!(got, [("h", false), ("c", true), ("a", true)], "hits do not narrow the targets; history has no transcript");
     }
 
     #[test]

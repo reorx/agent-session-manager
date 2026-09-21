@@ -84,6 +84,23 @@ impl Db {
         }
     }
 
+    /// A second, query-only connection to an index another thread maintains (WAL lets it read
+    /// while that thread writes). Never creates, repairs or migrates anything. The file itself is
+    /// opened read-write: a `SQLITE_OPEN_READ_ONLY` connection cannot open a WAL database whose
+    /// `-shm` file is gone (the last writer closed cleanly).
+    pub fn open_read_only(path: &Path) -> Result<Db> {
+        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags).with_context(|| format!("open {}", path.display()))?;
+        conn.execute_batch(
+            "PRAGMA query_only = ON;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA mmap_size = 268435456;
+             PRAGMA cache_size = -65536;",
+        )?;
+        conn.busy_timeout(std::time::Duration::from_secs(2))?;
+        Ok(Db { conn, path: Some(path.to_path_buf()) })
+    }
+
     pub fn open_in_memory() -> Result<Db> {
         let conn = Connection::open_in_memory()?;
         let mut db = Db { conn, path: None };

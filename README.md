@@ -37,6 +37,7 @@ All common commands are in the `Makefile`. `make` or `make help` lists them.
 | `make asm ARGS="list -d 7"` | Run the `asm` CLI (release build) |
 | `make parity` | Diff `asm` against `~/Code/scripts/claude_session_search.py` on the real `~/.claude` |
 | `make screenshot` | Wake the screen, launch the app and save three window screenshots to `tmp/<date>-screenshots/` (override with `SHOT_DIR=…`) |
+| `make screenshot-search` | Run the scripted search session (`ASM_SEARCH_AUTOPLAY=1`) and save seven screenshots; types and clicks nothing |
 | `make bin` | Print the debug binary path |
 | `make clean` | Remove only this project's artifacts |
 
@@ -52,6 +53,6 @@ Notes:
 ```text
 crates/core   agent-session-core    parsing, SQLite index, FTS5 / regex search, `asm` CLI; no GPUI dependency
 crates/app    agent-session-manager gpui-kit UI
-scripts/      screenshot.sh, winid.swift (window id lookup), compare-with-python.sh (parity check)
+scripts/      screenshot.sh, screenshot-clicks.sh, screenshot-search.sh, winid.swift (window id lookup), compare-with-python.sh (parity check)
 kb/           docs, plans, notes
 ```

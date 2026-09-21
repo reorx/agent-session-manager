@@ -395,7 +395,7 @@ impl App {
         };
         let since_ms = args.days.filter(|d| *d > 0.0).map(|d| chrono::Utc::now().timestamp_millis() - (d * 86_400_000.0) as i64);
         let started = std::time::Instant::now();
-        let hits = search_sessions(&db, &FtsQuery { text: args.query.clone(), roles, project: args.project.clone(), since_ms, limit: args.limit })?;
+        let hits = search_sessions(&db, &FtsQuery { text: args.query.clone(), roles, project: args.project.clone(), since_ms, sessions: None, limit: args.limit })?;
         let elapsed = started.elapsed();
         let mut total = 0;
         for hit in &hits {

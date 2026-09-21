@@ -336,3 +336,14 @@ fn a_new_history_row_is_streamed_once() {
     assert_eq!(streamed[0].source, Source::History);
     assert!(scan_streaming(&sb, &mut db).is_empty());
 }
+
+#[test]
+fn a_read_only_connection_searches_while_the_writer_keeps_the_index() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    Indexer::new(sb.claude.clone()).scan(&mut db, &mut |_| {}).unwrap();
+    let reader = Db::open_read_only(&sb.db_path()).unwrap();
+    assert_eq!(reader.list_sessions(&Default::default()).unwrap().len(), db.list_sessions(&Default::default()).unwrap().len());
+    assert!(reader.conn().execute("DELETE FROM sessions", []).is_err(), "the reader cannot write");
+    assert!(Db::open_read_only(&sb.tmp.path().join("missing.sqlite")).is_err(), "and never creates an index");
+}

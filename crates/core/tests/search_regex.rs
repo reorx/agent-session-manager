@@ -4,7 +4,7 @@
 mod common;
 
 use agent_session_core::search::regex::{
-    RegexOptions, RoleSet, Snippet, ToolLineKind, compile_query, list_transcripts, search,
+    FileMatches, RegexOptions, RoleSet, SessionScan, Snippet, ToolLineKind, compile_query, list_transcripts, scan_sessions, search,
 };
 use common::*;
 
@@ -168,4 +168,46 @@ fn limit_stops_after_the_file_that_reaches_it() {
     assert_eq!(out.files[0].matches.len(), 1);
     assert!(out.files[0].match_count > 1, "the header still reports every match of the file");
     assert!(out.files.len() <= 1, "later files are not scanned once the limit is reached");
+}
+
+fn scan(sb: &Sandbox, query: &str, max_sessions: usize, cancelled: &(dyn Fn() -> bool + Sync)) -> (Vec<FileMatches>, SessionScan) {
+    let files = list_transcripts(&sb.claude, None, None).unwrap();
+    let mut seen = Vec::new();
+    let summary = scan_sessions(query, &files, &opts(), max_sessions, cancelled, &mut |batch| seen.extend(batch));
+    (seen, summary)
+}
+
+#[test]
+fn a_session_scan_reports_every_session_with_its_match_count_and_first_match() {
+    let sb = sandbox();
+    let (seen, summary) = scan(&sb, "parser", 200, &|| false);
+    assert_eq!(summary, SessionScan { sessions: 1, matches: 3, scanned: 4, truncated: false, cancelled: false });
+    assert_eq!(seen.len(), 1);
+    assert_eq!((seen[0].session_id.as_str(), seen[0].match_count), (S1, 3));
+    assert_eq!(seen[0].matches.len(), 1, "only the first match is kept for the preview");
+    match &seen[0].matches[0].snippet {
+        Snippet::Text(h) => assert_eq!(h.text, "Here is the plan: refactor the parser."),
+        other => panic!("expected text snippet, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_session_scan_stops_at_the_session_cap_and_says_so() {
+    let sb = sandbox();
+    let (all, full) = scan(&sb, "e", 200, &|| false);
+    assert!(all.len() > 1 && !full.truncated);
+    let (seen, summary) = scan(&sb, "e", 1, &|| false);
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].session_id, S3, "files are scanned in the order given (newest first)");
+    assert!(summary.truncated);
+    assert_eq!(summary.sessions, 1);
+}
+
+#[test]
+fn a_cancelled_session_scan_emits_nothing_more() {
+    let sb = sandbox();
+    let (seen, summary) = scan(&sb, "e", 200, &|| true);
+    assert!(seen.is_empty());
+    assert!(summary.cancelled);
+    assert_eq!(summary.scanned, 0);
 }
