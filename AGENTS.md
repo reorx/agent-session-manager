@@ -75,7 +75,8 @@ M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，方案在 `kb
 - `kb/plans/2026-09-08-agent-session-manager-prd.md` — 需求 R1–R13、架构、里程碑 M0–M5、风险；开发任务的总入口
 - `kb/docs/product-prd.md` — 产品视角的功能描述与实现状态表；核对功能状态或向他人介绍应用时读
 - `kb/docs/claude-session-data-format.md` — `~/.claude` 数据源与 JSONL 记录类型实测；改解析器、派生字段、history 回退逻辑前读
-- `kb/docs/data-layer-design.md` — DDL 与 serde 类型草案；改 schema、索引器、增量更新、搜索前读
+- `kb/docs/app-architecture.md` — 运行时现状：线程划分、冷 / 热启动的事件顺序、扫描后整表重读的原因、搜索何时重跑、选中与视图状态保存的规则；改 `store.rs`、`search.rs`、`main.rs` 的事件处理或 `settings.rs` 前读，加线程或加事件后要更新它
+- `kb/docs/data-layer-design.md` — 开工前的设计稿：存储选型论证、DDL、增量索引；类型草案与线程方案已与实现不符（顶部有说明）。改 schema、索引器、增量更新、搜索前读
 - `kb/docs/gpui-kit-guide.md` — 本项目实际采用的 gpui-kit 做法、已核实的 API、绕不开的限制；改界面代码前读
 - `kb/docs/gpui-framework-research.md` — 开工前的调研：GPUI 心智模型、组件目录、选型理由；用到还没用过的组件或重新评估依赖时读
 - `kb/notes/2026-09-15-m0-spike.md` — M0：环境准备与构建耗时

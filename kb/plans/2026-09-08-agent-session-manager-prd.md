@@ -205,6 +205,8 @@ Claude 数据目录（默认 `~/.claude`，可改以支持多账号）、主题�
 
 ## 2. 架构
 
+> **本节是立项时的设计，未随实现更新。** 现状见 `../docs/app-architecture.md`（线程、事件顺序、选中与保存规则）和 `../notes/2026-09-17-m1-core-crate.md`（core 的模块划分）。主要出入：没有 `app_root.rs`，`AppRoot` 在 `main.rs`；`store.rs` 是后台线程与界面之间的桥，全部行由表格 delegate 持有，没有 `SessionStore`；搜索另有 `search.rs` 一条线程；通道是 `std::sync::mpsc`（请求）加 `async-channel`（事件），没有用 `smol`；`watch.rs`、`highlight.rs` 和 watcher 线程尚不存在（M5）；`grep-searcher`、`jiff` 没有采用。
+
 ```text
 agent-session-manager/            Cargo workspace
 ├── crates/core/                  agent-session-core：无 gpui 依赖

@@ -310,7 +310,8 @@ pub struct ToolResult {
 
 ### 每段完成后的文档
 
-- `CLAUDE.md`"当前状态"、PRD 里程碑表、`../docs/product-prd.md` 状态表与 §4.5
+- `AGENTS.md`"当前状态"、PRD 里程碑表、`../docs/product-prd.md` 状态表与 §4.5
+- `../docs/app-architecture.md`：线程表加上 transcript 读取线程，事件表里 `Messages` 换成 `Transcript`，删掉"扫描期间请求要排队"里关于详情的那一段
 - 新笔记 `kb/notes/<date>-m4-detail.md`：数据流、截断规则、实测数字、与本方案的差异
 - `../known-issues.md`：删掉已解决的条目，登记新发现的
 - commit
