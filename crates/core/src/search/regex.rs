@@ -168,7 +168,7 @@ pub fn search(query: &str, files: &[TranscriptFile], opts: &RegexOptions) -> Sea
     let re = compile_query(query, opts.case_sensitive).expect("escaped query always compiles");
     let mut out = SearchOutcome { scanned: files.len(), ..Default::default() };
     for batch in files.chunks(BATCH) {
-        let results: Vec<Vec<Match>> = batch.par_iter().map(|f| search_path(f, &re, opts)).collect();
+        let results: Vec<Vec<Match>> = batch.par_iter().map(|f| search_path(f, &re, opts, usize::MAX).matches).collect();
         for (f, mut matches) in batch.iter().zip(results) {
             if matches.is_empty() {
                 continue;
@@ -193,16 +193,92 @@ pub fn search(query: &str, files: &[TranscriptFile], opts: &RegexOptions) -> Sea
     out
 }
 
-fn search_path(f: &TranscriptFile, re: &Regex, opts: &RegexOptions) -> Vec<Match> {
-    let Ok(handle) = File::open(&f.path) else { return Vec::new() };
-    let Ok(len) = handle.metadata().map(|m| m.len()) else { return Vec::new() };
-    let Ok(bytes) = map_file(&handle, len) else { return Vec::new() };
-    search_bytes(&bytes, re, opts)
+/// What a scan for sessions (rather than for matches) found.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionScan {
+    /// Sessions with at least one match that were emitted.
+    pub sessions: usize,
+    /// Matches in those sessions.
+    pub matches: usize,
+    /// Transcripts read before the scan ended.
+    pub scanned: usize,
+    /// The session cap ended the scan; later transcripts may match as well.
+    pub truncated: bool,
+    pub cancelled: bool,
+}
+
+/// The interactive variant of `search`: every transcript with a match is reported with its
+/// match count and its first match only, batch by batch through `emit`, until `max_sessions`
+/// sessions matched or `cancelled` turns true (checked per file). `opts.limit` does not apply.
+pub fn scan_sessions(
+    query: &str,
+    files: &[TranscriptFile],
+    opts: &RegexOptions,
+    max_sessions: usize,
+    cancelled: &(dyn Fn() -> bool + Sync),
+    emit: &mut dyn FnMut(Vec<FileMatches>),
+) -> SessionScan {
+    let re = compile_query(query, opts.case_sensitive).expect("escaped query always compiles");
+    let mut out = SessionScan::default();
+    for batch in files.chunks(BATCH) {
+        let results: Vec<Option<Found>> = batch.par_iter().map(|f| if cancelled() { None } else { Some(search_path(f, &re, opts, 1)) }).collect();
+        if cancelled() || results.iter().any(Option::is_none) {
+            out.cancelled = true;
+            return out;
+        }
+        out.scanned += batch.len();
+        let mut hits: Vec<FileMatches> = batch
+            .iter()
+            .zip(results.into_iter().flatten())
+            .filter(|(_, found)| found.count > 0)
+            .map(|(f, found)| FileMatches {
+                project_key: f.project_key.clone(),
+                session_id: f.session_id.clone(),
+                path: f.path.clone(),
+                mtime_ms: f.mtime_ms,
+                match_count: found.count,
+                matches: found.matches,
+            })
+            .collect();
+        let room = max_sessions.saturating_sub(out.sessions);
+        let full = hits.len() >= room;
+        out.truncated = hits.len() > room || (full && out.scanned < files.len());
+        hits.truncate(room);
+        out.sessions += hits.len();
+        out.matches += hits.iter().map(|h| h.match_count).sum::<usize>();
+        if !hits.is_empty() {
+            emit(hits);
+        }
+        if full {
+            return out;
+        }
+    }
+    out
+}
+
+/// Matches of one transcript: all of them counted, the first `keep` built.
+#[derive(Default)]
+struct Found {
+    matches: Vec<Match>,
+    count: usize,
+    keep: usize,
+}
+
+fn search_path(f: &TranscriptFile, re: &Regex, opts: &RegexOptions, keep: usize) -> Found {
+    let none = Found::default;
+    let Ok(handle) = File::open(&f.path) else { return none() };
+    let Ok(len) = handle.metadata().map(|m| m.len()) else { return none() };
+    let Ok(bytes) = map_file(&handle, len) else { return none() };
+    find_in_bytes(&bytes, re, opts, keep)
 }
 
 /// Search one transcript's bytes; matches come back in file order.
 pub fn search_bytes(bytes: &[u8], re: &Regex, opts: &RegexOptions) -> Vec<Match> {
-    let mut out = Vec::new();
+    find_in_bytes(bytes, re, opts, usize::MAX).matches
+}
+
+fn find_in_bytes(bytes: &[u8], re: &Regex, opts: &RegexOptions, keep: usize) -> Found {
+    let mut out = Found { keep, ..Default::default() };
     let mut start = 0;
     for nl in memchr_iter(b'\n', bytes) {
         let line = &bytes[start..nl];
@@ -215,7 +291,7 @@ pub fn search_bytes(bytes: &[u8], re: &Regex, opts: &RegexOptions) -> Vec<Match>
     out
 }
 
-fn search_line(line: &[u8], re: &Regex, opts: &RegexOptions, out: &mut Vec<Match>) {
+fn search_line(line: &[u8], re: &Regex, opts: &RegexOptions, out: &mut Found) {
     match classify(line) {
         LineKind::Skip | LineKind::Meta => return,
         LineKind::User if !opts.roles.user && !opts.roles.tool => return,
@@ -235,11 +311,15 @@ fn search_line(line: &[u8], re: &Regex, opts: &RegexOptions, out: &mut Vec<Match
             }
         }
         let Some(m) = re.find(&piece.text) else { continue };
+        out.count += 1;
+        if out.matches.len() >= out.keep {
+            continue;
+        }
         let snippet = match &piece.tool_input {
             Some(input) => Snippet::ToolUse(render_tool_use(input, re, opts.context)),
             None => Snippet::Text(make_snippet(&piece.text, m.range(), opts.context)),
         };
-        out.push(Match { role: piece.role, timestamp_ms: ts, detail: piece.detail, snippet });
+        out.matches.push(Match { role: piece.role, timestamp_ms: ts, detail: piece.detail, snippet });
     }
 }
 

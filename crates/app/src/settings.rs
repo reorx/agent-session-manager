@@ -9,6 +9,7 @@ use gpui_kit::component::table::ColumnSort;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{DisplayMode, KindSet, RangePreset};
+use crate::search::SearchOptions;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum SortDir {
@@ -47,6 +48,8 @@ pub struct ViewState {
     pub hidden_projects: Vec<String>,
     pub detail_visible: bool,
     pub selected_id: Option<String>,
+    /// Scope, mode, case and labels of the search box; the query itself starts empty.
+    pub search: SearchOptions,
 }
 
 impl Default for ViewState {
@@ -61,6 +64,7 @@ impl Default for ViewState {
             hidden_projects: Vec::new(),
             detail_visible: true,
             selected_id: None,
+            search: SearchOptions::default(),
         }
     }
 }
@@ -90,7 +94,8 @@ impl ViewState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Kind;
+    use crate::model::{Kind, ScopeSet};
+    use crate::search::SearchMode;
 
     #[test]
     fn a_saved_state_comes_back_unchanged() {
@@ -108,6 +113,12 @@ mod tests {
             hidden_projects: vec!["-Users-me-Code-probe".into()],
             detail_visible: false,
             selected_id: Some("11111111-aaaa-4bbb-8ccc-000000000001".into()),
+            search: SearchOptions {
+                mode: SearchMode::Regex,
+                case_sensitive: true,
+                scope: ScopeSet { user: false, assistant: true, tools: true },
+                labels: vec!["tool_use:Bash".into()],
+            },
         };
         state.save(&path).unwrap();
         assert_eq!(ViewState::load(&path), state);
@@ -135,6 +146,8 @@ mod tests {
         assert_eq!(state.kinds, KindSet::default(), "a file written before the Kind filter shows every kind");
         assert_eq!(state.kinds.label(), "All");
         assert!(state.hidden_projects.is_empty(), "a file written before projects could be hidden hides none");
+        assert_eq!(state.search, SearchOptions::default(), "a file written before search: text mode, prompts and replies");
+        assert_eq!(state.search.scope.label(), "Both");
     }
 
     #[test]

@@ -4,10 +4,10 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格列出本机所有 Cla
 
 ## 当前状态
 
-M0–M2 完成（2026-09-21），下一步 **M3：搜索接入界面**（目前只有 `asm search` 可用）。功能状态表在 `kb/docs/product-prd.md`，里程碑定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3。
+M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，方案在 `kb/plans/2026-09-28-m4-detail-panel.md`（第 1 节的待确认项 D1–D6 还没有答复）。功能状态表在 `kb/docs/product-prd.md`，里程碑定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3。
 
 - `crates/core`（`agent-session-core`，无 gpui 依赖）：JSONL 解析、增量 SQLite 索引、FTS5 / 正则搜索、`asm` CLI
-- `crates/app`（`agent-session-manager`）：gpui-kit 界面，保持薄。`store.rs` 后台线程独占 `Db`，启动先读索引出表，再流式增量扫描
+- `crates/app`（`agent-session-manager`）：gpui-kit 界面，保持薄。`store.rs` 后台线程独占 `Db`，启动先读索引出表，再流式增量扫描；`search.rs` 是另一条线程，自带只读连接，文本模式走 FTS、正则模式流式扫描 transcript
 - Conversation tab 是过渡实现（索引里的 user / assistant 文本，前 300 条），M4 改为直接读 transcript
 - 未解决的问题记在 `kb/known-issues.md`
 
@@ -18,8 +18,8 @@ M0–M2 完成（2026-09-21），下一步 **M3：搜索接入界面**（目前�
 - `make dev`：编译并启动 app（`run` 会先 pkill 旧实例）。手动起的 app 验证后必须 kill，用 `pgrep -fl agent-session-manager` 检查
 - 测试：`cargo test -p agent-session-core`（1 秒内）、`cargo test -p agent-session-manager`（纯逻辑，不起窗口）、`make test` 全跑
 - `make asm ARGS="…"`：跑 `asm` CLI（`index` / `list` / `session` / `search [--index]` / `stats`，参数看 `--help`）
-- `make parity`：在真实 `~/.claude` 上把 `asm` 与 Python 脚本逐字比对；改解析器、清理逻辑或输出格式后必须跑
-- `make screenshot`（autoplay，3 张）、`make screenshot-clicks`（cliclick 真点击，12 张；坐标在 `scripts/screenshot-clicks.sh`，改布局后要校对）。输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改），跑在真实索引上，但用一次性的 `state.json` 保证从默认视图开始
+- `make parity`：在真实 `~/.claude` 上把 `asm` 与 Python 脚本逐字比对；改解析器、清理逻辑、`regex.rs` 或输出格式后必须跑
+- `make screenshot`（autoplay，3 张）、`make screenshot-clicks`（cliclick 真点击，12 张；坐标在 `scripts/screenshot-clicks.sh`，改布局后要校对）、`make screenshot-search`（`ASM_SEARCH_AUTOPLAY=1`，app 自己走完搜索流程，脚本等日志标记后截 7 张）。输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改），跑在真实索引上，但用一次性的 `state.json` 保证从默认视图开始
 - 构建产物在 `~/Library/Caches/cargo-target`（全局 cargo 配置），不在 `./target`；`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒
 - 环境变量：`ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（默认 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`）、`ASM_STATE`（仅 app，默认为索引同目录的 `state.json`）。验收时把 `ASM_DB` / `ASM_STATE` 指到 `tmp/`，可反复测冷启动而不动真实索引
 - Rust 由 mise 管理（版本锁在 `mise.toml`）；新机器先 `make setup`（含 Metal Toolchain）
@@ -48,10 +48,13 @@ M0–M2 完成（2026-09-21），下一步 **M3：搜索接入界面**（目前�
 - 只依赖 `gpui-kit = "=0.6.1"`，**不要**再声明 `gpui` 或 `gpui-pre`，否则两份 GPUI 类型不匹配
 - **API 以本地源码为准**，在线文档和 docs.rs 都有偏差。查签名直接 grep `~/.cargo/registry/src/index.crates.io-*/{gpui-component-0.6.1,gpui-base-0.6.1,gpui-pre-0.3.5}/src`
 - 数据只经 `store.rs` 进出（UI 发 `StoreRequest`，后台线程回 `StoreEvent`）；`SessionRow::from_summary` 是 core 类型到界面行的唯一转换点
+- 搜索只经 `search.rs` 进出：每次搜索取代上一次，`on_search_events` 丢弃旧 `seq` 的事件；搜索对象是通过当前过滤条件的 session，所以过滤变化或整表 reload 后要重搜
 - 只有 SQLite 查询和文件扫描走后台，过滤 / 排序在主线程做；`render_td` 只取预格式化的字符串，不做计算
 - 色值集中在 `style.rs`，不要在别处写 hex
 - `Task` drop 即取消：`cx.spawn` 的结果要 `.detach()` 或存进字段；`this.update(cx, ..)` 返回 Result，用 `.ok()` 不要 unwrap
 - 测试模块里要写 `use core::prelude::v1::test;`，否则 `use gpui_kit::*` 带进的 `test` 宏会让 `#[test]` 展开递归超限
+- 程序化 `InputState::set_value` 不发 `InputEvent::Change`，之后要自己触发后续逻辑（如 `AppRoot::set_query` 直接调 `run_search`）
+- **验收时不要用 System Events / osascript / cliclick 发按键，也不要动剪贴板**：全局按键只进最前台的 app，会打进用户正在用的窗口，GPUI 也收不到 cliclick 的按键。交互用环境变量驱动的 autoplay（app 每步稳定后打日志标记，脚本等到标记再按窗口 ID 截图）；cliclick 鼠标点击只用于无法程序化打开的弹出层
 
 其余做法在 `kb/docs/gpui-kit-guide.md`：表格的行高 / 列宽 / 排序状态 / 选中保持、主题三步、下拉菜单、返回类型的借用冲突、截图脚本。改 `table.rs`、`style.rs`、`toolbar.rs` 或 `main.rs` 的渲染与选中逻辑前先读。
 
@@ -79,3 +82,5 @@ M0–M2 完成（2026-09-21），下一步 **M3：搜索接入界面**（目前�
 - `kb/notes/2026-09-16-design-refactor.md` — 界面重构记录：设计稿链接、与设计稿的功能差异
 - `kb/notes/2026-09-17-m1-core-crate.md` — M1：core 模块划分、关键实现细节、与设计文档的差异、实测数字、Python 比对方法；改 core 前读
 - `kb/notes/2026-09-21-m2-real-data.md` — M2：store 线程与事件流、流式扫描时序、视图状态持久化、相对 PRD 未做的条目；改 `store.rs` / `main.rs` 数据流前读
+- `kb/notes/2026-09-21-m3-search.md` — M3：搜索线程与取代机制、两段式 FTS 的原因与数字、`Matcher`、Matches 列 / 片段 / 详情跳转、实测；改 `search.rs`、`fts.rs`、`regex.rs::scan_sessions` 或搜索界面前读
+- `kb/plans/2026-09-28-m4-detail-panel.md` — M4（详情面板，R6）实现方案：现状、实测、数据通路与类型设计、11 个步骤及各自的行为测试、验收规则；开工前先看第 1 节的待确认项 D1–D6 是否已有答复

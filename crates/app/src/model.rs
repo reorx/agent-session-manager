@@ -2,11 +2,13 @@
 //! `SharedString`s so `render_td` never allocates.
 
 use std::collections::{BTreeSet, HashMap};
-use std::path::Path;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_session_core::format::{fmt_datetime, fmt_time};
 use agent_session_core::model::{MessageRow, Role, SessionSummary};
+use agent_session_core::search::Matcher;
 use chrono::{Days, Local, TimeZone};
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
@@ -57,6 +59,8 @@ pub struct SessionRow {
     /// Last segment of the project path.
     pub project: SharedString,
     pub project_path: SharedString,
+    /// The transcript a regex search scans; `None` once Claude Code cleaned it up.
+    pub transcript_path: Option<PathBuf>,
     pub title: SharedString,
     pub first_prompt: SharedString,
     pub last_prompt: SharedString,
@@ -171,6 +175,7 @@ impl SessionRow {
             project_key: s.project_key.clone().into(),
             project: project_name(s).into(),
             project_path: or_none(s.project_path.as_deref().or(s.cwd.as_deref())),
+            transcript_path: s.file_path.clone().filter(|_| !s.history_only()),
             title: single_line(s.display_title()),
             first_prompt: single_line(&s.first_prompt),
             last_prompt: single_line(s.last_prompt.as_deref().unwrap_or("")),
@@ -252,7 +257,8 @@ impl DisplayMode {
 }
 
 /// Search scope: which message roles a query runs against.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ScopeSet {
     pub user: bool,
     pub assistant: bool,
@@ -496,6 +502,8 @@ pub struct Message {
     pub kind: MessageKind,
     pub time: SharedString,
     pub text: SharedString,
+    /// Search hits inside `text`.
+    pub highlights: Vec<Range<usize>>,
     /// Tool name (tool messages only).
     pub name: SharedString,
     /// Tool argument summary (tool messages only).
@@ -516,15 +524,50 @@ pub type Conversation = Vec<Arc<Message>>;
 /// Messages rendered at once; the conversation view is not virtualized until M4.
 pub const CONVERSATION_CAP: usize = 300;
 const MESSAGE_CHARS: usize = 4000;
+/// Messages shown ahead of the first search hit when the window has to move to reach it.
+const WINDOW_LEAD: usize = 5;
+/// Characters shown ahead of the first hit of a message whose hits are all past `MESSAGE_CHARS`.
+const HIT_LEAD_CHARS: usize = 200;
+
+/// The slice of a session the conversation view renders.
+#[derive(Default)]
+pub struct ConversationView {
+    pub messages: Conversation,
+    /// Messages left out ahead of the first one: the window moves when the first search hit
+    /// lies beyond `CONVERSATION_CAP`.
+    pub skipped: usize,
+    /// Prompts among the skipped messages, so `USER #n` keeps counting from the real start.
+    pub skipped_turns: usize,
+    /// Messages the session has in the index, shown or not.
+    pub total: usize,
+}
+
+/// The text a message shows and the search hits in it. A hit past the cut moves the cut.
+fn shown_text(text: &str, matcher: Option<&Matcher>) -> (String, Vec<Range<usize>>) {
+    let text = text.trim();
+    let Some(matcher) = matcher else { return (cut(text, MESSAGE_CHARS), Vec::new()) };
+    let limit = text.char_indices().nth(MESSAGE_CHARS).map_or(text.len(), |(i, _)| i);
+    let shown = match matcher.ranges(text).first() {
+        Some(first) if first.end > limit => {
+            let lead = text[..first.start].char_indices().rev().nth(HIT_LEAD_CHARS - 1).map_or(0, |(i, _)| i);
+            format!("…{}", cut(&text[lead..], MESSAGE_CHARS))
+        }
+        _ => cut(text, MESSAGE_CHARS),
+    };
+    let ranges = matcher.ranges(&shown);
+    (shown, ranges)
+}
 
 impl Message {
-    fn text(kind: MessageKind, ts: i64, text: &str) -> Message {
+    fn text(kind: MessageKind, ts: i64, text: &str, matcher: Option<&Matcher>) -> Message {
         let time = Local.timestamp_millis_opt(ts).single().filter(|_| ts > 0).map(|dt| dt.format("%H:%M").to_string());
+        let (text, highlights) = shown_text(text, matcher);
         let empty = SharedString::default;
         Message {
             kind,
             time: time.unwrap_or_default().into(),
-            text: cut(text.trim(), MESSAGE_CHARS).into(),
+            text: text.into(),
+            highlights,
             name: empty(),
             arg: empty(),
             result: empty(),
@@ -538,17 +581,23 @@ impl Message {
 }
 
 /// The indexed user / assistant texts of a session (no tool calls or thinking: those are read
-/// from the transcript in M4). Harness-injected user messages are skipped.
-pub fn conversation_from(messages: &[MessageRow]) -> Conversation {
-    messages
+/// from the transcript in M4). Harness-injected user messages are skipped. With a `matcher`
+/// the hits are marked, and the window starts shortly before the first one if it would
+/// otherwise fall outside.
+pub fn conversation_from(messages: &[MessageRow], matcher: Option<&Matcher>) -> ConversationView {
+    let shown: Vec<&MessageRow> = messages.iter().filter(|m| !m.is_meta && !m.text.trim().is_empty()).collect();
+    let first_hit = matcher.and_then(|matcher| shown.iter().position(|m| matcher.is_match(m.text.trim())));
+    let skipped = first_hit.filter(|ix| *ix >= CONVERSATION_CAP).map_or(0, |ix| ix - WINDOW_LEAD);
+    let messages = shown[skipped..]
         .iter()
-        .filter(|m| !m.is_meta && !m.text.trim().is_empty())
         .take(CONVERSATION_CAP)
         .map(|m| {
             let kind = if m.role == Role::User { MessageKind::User } else { MessageKind::Assistant };
-            Arc::new(Message::text(kind, m.ts, &m.text))
+            Arc::new(Message::text(kind, m.ts, &m.text, matcher))
         })
-        .collect()
+        .collect();
+    let skipped_turns = shown[..skipped].iter().filter(|m| m.role == Role::User).count();
+    ConversationView { messages, skipped, skipped_turns, total: shown.len() }
 }
 
 #[cfg(test)]
@@ -814,12 +863,76 @@ pub mod tests {
             msg(Role::Assistant, "  ", false),
             msg(Role::Assistant, "hi there", false),
         ];
-        let conv = conversation_from(&messages);
-        let got: Vec<(MessageKind, &str)> = conv.iter().map(|m| (m.kind, m.text.as_ref())).collect();
+        let conv = conversation_from(&messages, None);
+        let got: Vec<(MessageKind, &str)> = conv.messages.iter().map(|m| (m.kind, m.text.as_ref())).collect();
         assert_eq!(got, [(MessageKind::User, "hello"), (MessageKind::Assistant, "hi there")]);
-        assert_eq!(conv[0].time, "", "a record without a timestamp shows no time");
+        assert_eq!(conv.messages[0].time, "", "a record without a timestamp shows no time");
+        assert_eq!((conv.total, conv.skipped), (2, 0));
 
         let many: Vec<MessageRow> = (0..CONVERSATION_CAP + 50).map(|_| msg(Role::User, "x", false)).collect();
-        assert_eq!(conversation_from(&many).len(), CONVERSATION_CAP);
+        let capped = conversation_from(&many, None);
+        assert_eq!((capped.messages.len(), capped.total), (CONVERSATION_CAP, CONVERSATION_CAP + 50));
+    }
+
+    fn text_msg(role: Role, text: &str) -> MessageRow {
+        MessageRow {
+            uuid: "u".into(),
+            parent_uuid: None,
+            role,
+            ts: 0,
+            text: text.into(),
+            is_meta: false,
+            byte_offset: 0,
+            byte_len: 0,
+            model: None,
+            input_tokens: None,
+            output_tokens: None,
+        }
+    }
+
+    #[test]
+    fn search_hits_are_marked_in_the_conversation() {
+        let messages = vec![text_msg(Role::User, "fix the Parser"), text_msg(Role::Assistant, "done"), text_msg(Role::Assistant, "parser parser")];
+        let matcher = Matcher::words("parser").unwrap();
+        let conv = conversation_from(&messages, Some(&matcher));
+        let marks: Vec<&[Range<usize>]> = conv.messages.iter().map(|m| m.highlights.as_slice()).collect();
+        assert_eq!(marks, [&[8..14][..], &[][..], &[0..6, 7..13][..]]);
+        assert!(conversation_from(&messages, None).messages.iter().all(|m| m.highlights.is_empty()));
+    }
+
+    #[test]
+    fn a_hit_beyond_the_cap_moves_the_window_and_keeps_the_turn_numbers() {
+        let mut messages: Vec<MessageRow> = (0..CONVERSATION_CAP + 100).map(|i| text_msg(if i % 2 == 0 { Role::User } else { Role::Assistant }, "filler")).collect();
+        messages[CONVERSATION_CAP + 40] = text_msg(Role::User, "the needle");
+        let matcher = Matcher::words("needle").unwrap();
+        let conv = conversation_from(&messages, Some(&matcher));
+        assert_eq!(conv.skipped, CONVERSATION_CAP + 40 - 5, "a few messages of context stay ahead of the hit");
+        assert_eq!(conv.skipped_turns, conv.skipped.div_ceil(2), "every other skipped message was a prompt");
+        assert_eq!(conv.messages.len(), 100 - 40 + 5);
+        assert_eq!(conv.messages[5].highlights, vec![4..10]);
+
+        let early = conversation_from(&messages, Some(&Matcher::words("filler").unwrap()));
+        assert_eq!(early.skipped, 0, "a hit inside the first window leaves it alone");
+    }
+
+    #[test]
+    fn a_hit_deep_inside_a_long_message_moves_the_cut() {
+        let long = format!("{}needle{}", "a".repeat(10_000), "b".repeat(10_000));
+        let matcher = Matcher::words("needle").unwrap();
+        let conv = conversation_from(&[text_msg(Role::Assistant, &long)], Some(&matcher));
+        let m = &conv.messages[0];
+        assert!(m.text.starts_with('…') && m.text.ends_with('…'));
+        assert_eq!(m.highlights.len(), 1);
+        assert_eq!(&m.text[m.highlights[0].clone()], "needle");
+        assert_eq!(m.text.chars().count(), 4000 + 2);
+        assert!(conversation_from(&[text_msg(Role::Assistant, &long)], None).messages[0].text.starts_with("aaa"));
+    }
+
+    #[test]
+    fn a_row_knows_its_transcript_unless_it_was_cleaned_up() {
+        let mut s = summary("s", "/p/a", 5000);
+        assert_eq!(SessionRow::from_summary(&s).transcript_path.as_deref(), Some(Path::new("/tmp/x.jsonl")));
+        s.transcript_missing = true;
+        assert_eq!(SessionRow::from_summary(&s).transcript_path, None);
     }
 }

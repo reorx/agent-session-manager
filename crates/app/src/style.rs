@@ -99,6 +99,21 @@ pub fn white() -> Hsla {
     hex(0xffffff)
 }
 
+// Search (not in the mockup): hits are marked like a text marker, the hit the detail panel is
+// parked on gets the stronger one; toggled toolbar buttons carry the accent.
+pub fn hit_highlight() -> HighlightStyle {
+    HighlightStyle { background_color: Some(hex(0xfde68a)), color: Some(text()), ..Default::default() }
+}
+pub fn hit_current_highlight() -> HighlightStyle {
+    HighlightStyle { background_color: Some(hex(0xfdba74)), color: Some(text()), ..Default::default() }
+}
+pub fn toggle_on_bg() -> Hsla {
+    hex(0xe3ecfb)
+}
+pub fn toggle_on_fg() -> Hsla {
+    hex(0x1d4fb8)
+}
+
 /// Monospace font family (the theme picks `Menlo` on macOS and falls back if missing).
 pub fn mono(cx: &App) -> SharedString {
     cx.theme().mono_font_family.clone()

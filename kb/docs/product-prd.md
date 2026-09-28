@@ -1,5 +1,6 @@
 ---
 created: 2026-09-15
+updated: 2026-09-28
 tags:
   - prd
   - product
@@ -28,7 +29,7 @@ tags:
 
 ## 2. 实现状态
 
-截至 2026-09-21 完成 M0（技术栈验证）、界面重构（见 `../notes/2026-09-16-design-refactor.md`）、M1（核心数据层与 `asm` 命令行，见 `../notes/2026-09-17-m1-core-crate.md`）和 M2（界面接入真实数据，见 `../notes/2026-09-21-m2-real-data.md`）。**App 现在显示本机真实的 session：启动即读索引出表，后台增量扫描，首次启动边索引边填充。** 搜索仍只在 `asm` 命令行可用，M3 接入界面。下表用三种状态标记各模块：
+截至 2026-09-21 完成 M0（技术栈验证）、界面重构（见 `../notes/2026-09-16-design-refactor.md`）、M1（核心数据层与 `asm` 命令行，见 `../notes/2026-09-17-m1-core-crate.md`）M2（界面接入真实数据，见 `../notes/2026-09-21-m2-real-data.md`）和 M3（界面搜索，见 `../notes/2026-09-21-m3-search.md`）。**App 现在显示本机真实的 session：启动即读索引出表，后台增量扫描，首次启动边索引边填充。** 搜索框已接上全文与正则搜索。下表用三种状态标记各模块：
 
 | 状态 | 含义 |
 |---|---|
@@ -40,15 +41,15 @@ tags:
 |---|---|---|
 | Session 表格 | ✅ | 7 列（Project / Preview / Started / Updated / Prompts / Size / Kind）、36px 两行、虚拟滚动、行选中、表头排序；Preview 列随窗口自适应 |
 | Preview 展示模式切换 | ✅ | 工具栏 Preview 下拉或 `cmd-1..4`，四种模式即时切换 |
-| 详情面板 | ✅ Metadata / 🟡 Conversation | 头部 + 两个 tab；Metadata 为真实数据（含 cost、时长、模型、权限模式、top 工具）；Conversation 暂时显示索引里的 user / assistant 文本（前 300 条），工具调用 / thinking 的折叠行要等 M4 直接读 transcript；尚无 Markdown 渲染 |
+| 详情面板 | ✅ Metadata / 🟡 Conversation | 头部 + 两个 tab；Metadata 为真实数据（含 cost、时长、模型、权限模式、top 工具）；Conversation 暂时显示索引里的 user / assistant 文本（前 300 条），工具调用 / thinking 的折叠行要等 M4 直接读 transcript；尚无 Markdown 渲染。M4 方案已写好（`../plans/2026-09-28-m4-detail-panel.md`），尚未开工 |
 | 分栏与折叠 | ✅ | 拖拽调宽，快捷键折叠 |
 | 状态栏 | ✅ | 左：显示数 / 总数；中：操作状态 + 索引状态（loading / indexing n / m / 完成摘要 / 错误）；右：消息数、DB 大小、首批行上屏耗时 |
-| 搜索框与范围切换 | 🟡 | 搜索框（`cmd-f` 聚焦、`esc` 清空）与 Scope 多选下拉都在，输入只显示在状态栏，无搜索逻辑 |
+| 搜索框与范围切换 | ✅ | 搜索框（`cmd-f` 聚焦、Enter 回到表格、`esc` 清空）、Scope 多选、`.*` 正则开关、`Aa` 大小写、Labels 多选；选项重启后保留 |
 | 时间范围过滤 | ✅ 预设 / ⬜ 自定义区间 | Updated 下拉：Today / 3 / 7 / 30 days / Any time，即时过滤 |
 | 项目过滤 | ✅ 单选 + 隐藏项目 | Project 下拉按最近活动列出真实项目与 session 数；可把噪音项目（如 CodexBar 的 `ClaudeProbe`）整个隐藏并随时恢复；多选、可搜索、worktree 聚合待做 |
 | Kind 过滤 | ✅ | Kind 多选下拉（CLI / SDK / BG / History，各带 session 数），默认全选，选择持久化 |
 | 更多过滤 | ⬜ | 最少 prompt 数的界面控件、使用过的工具、有 PR、有 subagent |
-| 全文搜索、正则搜索 | ✅ 核心库 / ⬜ 界面 | `asm search`（正则扫描，与旧脚本逐字一致）与 `asm search --index`（FTS5，3–11ms）可用；界面未接 |
+| 全文搜索、正则搜索 | ✅ | 文本模式 FTS5（2–40ms，两字 CJK 走 LIKE 约 100ms）、正则模式流式扫描 transcript（热缓存 240–425ms）；Matches 列、高亮片段、详情内命中跳转。`asm search` 命令行同样可用 |
 | 真实数据读取与索引 | ✅ | 解析器、增量 SQLite 索引、history.jsonl 补位、损坏自动重建；界面热启动约 200ms 出表（5488 行），冷索引 1.27GB 约 4s 且表格流式填充；Index 菜单可手动 Scan / Rebuild |
 | 实时更新 | ⬜ | |
 | 快捷键与菜单 | ✅ 部分 | 退出、折叠详情面板、`cmd-f`、`cmd-1..4`、`cmd-shift-r` 重建索引；View 菜单可显示 / 隐藏没有 prompt 的空 session |
@@ -111,13 +112,13 @@ Cost、Branch、Tools、ID 不再作为列，只在详情面板的 Metadata 里�
 - **更多过滤**（⬜）：折叠面板，含最少 prompt 数（默认 ≥1 以过滤空 session，目前由 View 菜单开关控制）、使用过的工具、有 PR、有 subagent。
 - 条件持久化到下次启动（✅）；生效条件以 chip 展示可逐个移除、"Reset" 清空（⬜）。
 
-### 4.4 搜索 ⬜（范围控件 🟡）
+### 4.4 搜索 ✅
 
-- 工具栏搜索框，`cmd-f` 聚焦，`esc` 清空。
+- 工具栏搜索框，`cmd-f` 聚焦，输入停顿 150ms 后搜索；Enter 立即搜索并把焦点交回表格，`esc` 清空并回到表格。
 - **范围**：「Scope ▾」多选下拉，User / Assistant / Tools 三个复选项，默认 User + Assistant（显示为 Both）。Tools 指工具调用的输入与输出，仅正则模式可用。
-- **模式**：文本（默认，不区分大小写，多词为 AND）/ 正则。正则模式额外支持标签过滤，如只搜 Bash 调用或 thinking 内容。
-- **结果呈现**：表格只保留有命中的 session，新增 Matches 列显示命中数并可排序；Preview 列改为显示第一个命中片段并高亮；详情面板内高亮命中，可上一个 / 下一个跳转。
-- 搜索与过滤条件叠加；结果上限 200 个 session，超出提示；耗时显示在状态栏。
+- **模式**：文本（默认，不区分大小写，多词为 AND）/ 正则（`.*` 按钮或 ⌥⌘R；非法正则按字面量匹配）。正则模式下多出 `Aa`（区分大小写）和「Labels ▾」标签过滤，如只搜 Bash 调用或 thinking 内容。
+- **结果呈现**：表格只保留有命中的 session，新增 Matches 列显示命中数并可排序；Preview 列改为显示第一个命中片段并高亮；详情面板内高亮命中，`▲ 2 / 9 hits ▼`、`n` / `shift-n`（表格有焦点时）或 `cmd-g` / `cmd-shift-g` 逐个跳转。工具调用与 thinking 里的命中目前只在表格片段里可见，详情面板要等 4.5 直接读 transcript。
+- 搜索与过滤条件叠加（只在通过过滤的 session 里搜）；结果上限为最新的 200 个 session，超出时状态栏提示；命中数与耗时显示在状态栏。
 
 ### 4.5 详情面板 ✅ Metadata / 🟡 Conversation
 
@@ -131,13 +132,23 @@ Cost、Branch、Tools、ID 不再作为列，只在详情面板的 Metadata 里�
 
 **Conversation tab**：顶部 User / Assistant / Tools / Thinking 四个带计数的 chip 可切换显示，右侧 Expand all / Collapse all。user 消息浅蓝底带 `USER #n` 与时间；assistant 消息 `ASST`；thinking 与工具调用默认收成 22px 单行（时间 · ▶ · 工具名 · 参数 · 结果摘要），点击展开 input / output 或 thinking 全文。History 类 session 只显示 user prompt。
 
-**待补充**：
+**待补充**（M4，尚未开工；实现方案见 `../plans/2026-09-28-m4-detail-panel.md`，其中 6 项选择还在等确认）：
 
-- 头部增加 token 用量、时长、模型、权限模式、PR 链接、修改过的文件列表（折叠）
-- 操作按钮：复制 `claude --resume <id>`、在终端打开、在 Finder 显示记录文件、打开项目目录、导出 Markdown
-- 消息流接真实数据；助手正文 Markdown 渲染，长消息默认折叠 5 行；连续工具调用分组（设计稿 `groupTools`）
+第一段，决定"打开速度"这项指标：
+
+- 消息流直接读记录文件，显示全部消息，不再有 300 条和 4000 字的上限
+- 工具调用与 thinking 的折叠行有真实内容；一次工具调用和它的返回结果合成一张卡片
+- 搜索命中落在工具调用或 thinking 里时，详情面板里同样高亮并可跳转
+- 索引扫描进行中选中一行，对话照常显示
+
+第二段：
+
+- 头部增加 token 用量、修改过的文件列表（折叠）
+- 操作按钮：复制 session ID、复制 `claude --resume <id>`、在 Finder 显示记录文件、打开项目目录、导出 Markdown。"在终端打开"方案里默认不做，只复制命令
+- 助手正文 Markdown 渲染，长消息默认折叠 5 行。搜索时有命中的消息会退回带高亮的纯文本显示
+- 工具卡片展开后显示说明（`#`）与命令（`$`），长命令重新排版；连续工具调用分组（设计稿 `groupTools`）需先核对设计稿
 - subagent 列表，点击切换查看其消息流
-- History 类 session 提示记录已被清理
+- History 类 session 显示 history.jsonl 里的 prompt 列表，并提示记录已被清理
 
 ### 4.6 索引与实时更新 ✅ 索引与界面 / ⬜ 监听
 
@@ -158,7 +169,7 @@ M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebui
 
 ### 4.8 状态栏 ✅ 部分
 
-22px 等宽字体。左：当前显示 N / 总 M 个 session；中：最近一次操作状态（过滤耗时等）+ 索引状态（`loading index…` / `indexing 598 / 941 files` / `index up to date · 941 files checked in 0.07s` / 错误信息）；右：已索引消息数、DB 大小、首批行上屏耗时。待补充：搜索耗时、生效过滤 chip。
+22px 等宽字体。左：当前显示 N / 总 M 个 session；中：最近一次操作状态（过滤耗时等）+ 索引状态（`loading index…` / `indexing 598 / 941 files` / `index up to date · 941 files checked in 0.07s` / 错误信息）；右：已索引消息数、DB 大小、首批行上屏耗时。搜索时中间显示「N sessions · M matches」，右侧最前面是搜索耗时。待补充：生效过滤 chip。
 
 ### 4.9 设置 ⬜
 
@@ -180,7 +191,7 @@ M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebui
 | 首次全量索引（约 1GB） | < 3s，期间界面可用 |
 | 过滤 / 排序 | < 16ms（M0 实测 10k 行排序 7ms） |
 | 全文搜索 | < 100ms；正则 < 500ms |
-| 打开 30MB 的 session 详情 | < 200ms |
+| 打开 30MB 的 session 详情 | < 200ms。本机最大的记录文件已到 70MB，M4 方案建议把口径改为"选中行到对话首帧上屏，以最大的记录文件为基准"，待确认 |
 | 常驻内存 | < 150MB |
 
 ## 7. 术语
@@ -193,5 +204,6 @@ M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebui
 ## 8. 相关文档
 
 - 原始 PRD（含实现方案与里程碑）：`../plans/2026-09-08-agent-session-manager-prd.md`
+- M4 详情面板实现方案（含待确认项）：`../plans/2026-09-28-m4-detail-panel.md`
 - M0 验证记录与截图说明：`../notes/2026-09-15-m0-spike.md`；界面重构记录（设计稿、模块划分、gpui-kit 坑、与设计稿差异）：`../notes/2026-09-16-design-refactor.md`；M1 核心库记录（模块、实测、与旧脚本的比对）：`../notes/2026-09-17-m1-core-crate.md`
 - 数据格式：`claude-session-data-format.md`；数据层设计：`data-layer-design.md`；UI 框架：`gpui-framework-research.md`

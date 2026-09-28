@@ -54,6 +54,9 @@ screenshot: build ## Wake the screen, launch the app and capture 3 window screen
 screenshot-clicks: build ## Like screenshot, but drive dropdowns / tabs / rows with real clicks (needs cliclick)
 	scripts/screenshot-clicks.sh "$(BIN)" "$(SHOT_DIR)"
 
+screenshot-search: build ## Run the scripted search session (text, next hit, CJK, regex, Tools scope, sort, cleared) and capture 7 screenshots; types and clicks nothing
+	scripts/screenshot-search.sh "$(BIN)" "$(SHOT_DIR)"
+
 bin: ## Print the path of the debug binary
 	@echo "$(BIN)"
 
@@ -68,4 +71,4 @@ parity: ## Diff asm against the Python reference script on the real ~/.claude (o
 clean: ## Remove this project's build artifacts only (the target dir is shared across projects)
 	cargo clean -p $(APP) -p $(CORE)
 
-.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks bin asm parity clean
+.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search bin asm parity clean

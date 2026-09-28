@@ -1,4 +1,7 @@
-//! Toolbar: `Label value ▾` dropdowns (Project / Scope / Updated / Kind / Preview) and the search box.
+//! Toolbar: `Label value ▾` dropdowns (Project / Scope / Updated / Kind / Preview), the search box
+//! with its mode toggles, and the search life cycle (debounce → `Searcher` → hits into the table).
+
+use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::Input;
@@ -7,12 +10,15 @@ use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex};
 use gpui_kit::*;
 
 use crate::model::{DisplayMode, Filter, Kind, RangePreset, ScopeSet};
+use crate::search::{LABELS, MAX_RESULT_SESSIONS, SearchEvent, SearchMode};
 use crate::style::{self, FluentBuilder};
 use crate::AppRoot;
 
 pub const TOOLBAR_H: f32 = 36.;
 const CONTROL_H: f32 = 22.;
 const MENU_ITEM_H: f32 = 24.;
+/// Typing pause before a search starts.
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// `Label value ▾` trigger button styled like the mockup.
 fn trigger(id: &'static str, label: &'static str, value: SharedString, cx: &App) -> Button {
@@ -38,6 +44,23 @@ fn trigger(id: &'static str, label: &'static str, value: SharedString, cx: &App)
                 .child(div().text_color(style::label()).child(label))
                 .child(div().font_weight(FontWeight::MEDIUM).child(value)),
         )
+}
+
+/// Square on / off button next to the search box (`.*`, `Aa`).
+fn toggle(id: &'static str, glyph: &'static str, on: bool, tooltip: &'static str, cx: &App) -> Button {
+    let (bg, fg) = if on { (style::toggle_on_bg(), style::toggle_on_fg()) } else { (style::white(), style::label()) };
+    let hover = if on { bg } else { style::control_hover() };
+    Button::new(id)
+        .custom(ButtonCustomVariant::new(cx).color(bg).foreground(fg).hover(hover).active(hover))
+        .small()
+        .h(px(CONTROL_H))
+        .w(px(26.))
+        .px(px(0.))
+        .border_1()
+        .border_color(if on { style::toggle_on_fg().opacity(0.35) } else { style::control_border() })
+        .rounded(px(5.))
+        .tooltip(tooltip)
+        .child(div().font_family(style::mono(cx)).text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).child(glyph))
 }
 
 /// One row inside a dropdown: `name` on the left, an optional right-aligned `hint`.
@@ -137,8 +160,137 @@ impl AppRoot {
             self.status = format!("filtered {shown} sessions in {ms}ms").into();
             self.after_rows_changed(cx);
             self.persist(cx);
+            // the search looks into the filtered sessions only, so it has to look again
+            if self.searching() {
+                self.run_search(cx);
+            }
         }
         cx.notify();
+    }
+
+    /// A search is showing its results or on its way.
+    pub fn searching(&self) -> bool {
+        !self.query.is_empty()
+    }
+
+    /// The search box changed: wait for a pause in typing, then search.
+    pub fn schedule_search(&mut self, cx: &mut Context<Self>) {
+        self._debounce = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SEARCH_DEBOUNCE).await;
+            this.update(cx, |this, cx| this.run_search(cx)).ok();
+        }));
+    }
+
+    /// Search for what the box holds now, in the sessions the filters let through. The table
+    /// keeps the previous results until the first ones of this search arrive.
+    pub fn run_search(&mut self, cx: &mut Context<Self>) {
+        self.query = self.search.read(cx).value().trim().to_string().into();
+        self.matcher = self.search_opts.matcher(&self.query);
+        self.detail.set_matcher(self.matcher.as_ref());
+        self.search_summary = None;
+        self.search_error = None;
+        if self.query.is_empty() {
+            self.end_search(cx);
+            return;
+        }
+        let targets = self.table.read(cx).delegate().search_targets();
+        self.search_seq = self.searcher.search(self.query.to_string(), self.search_opts.clone(), targets);
+        self.search_pending = true;
+        cx.notify();
+    }
+
+    fn end_search(&mut self, cx: &mut Context<Self>) {
+        self.search_seq = self.searcher.cancel();
+        self.search_pending = false;
+        self.show_search_results(false, cx);
+        self.after_rows_changed(cx);
+        cx.notify();
+    }
+
+    /// Switch the table into (a fresh) search mode or out of it.
+    fn show_search_results(&mut self, active: bool, cx: &mut Context<Self>) {
+        self.table.update(cx, |table, cx| {
+            if !active && !table.delegate().search_active() {
+                return;
+            }
+            table.delegate_mut().set_search(active);
+            table.refresh(cx);
+            table.scroll_to_row(0, cx);
+        });
+    }
+
+    /// Apply a batch of search events; anything of a superseded search is dropped.
+    pub fn on_search_events(&mut self, batch: Vec<SearchEvent>, cx: &mut Context<Self>) {
+        let seq_of = |ev: &SearchEvent| match ev {
+            SearchEvent::Hits { seq, .. } | SearchEvent::Done { seq, .. } | SearchEvent::Failed { seq, .. } => *seq,
+        };
+        let current: Vec<SearchEvent> = batch.into_iter().filter(|ev| seq_of(ev) == self.search_seq).collect();
+        if current.is_empty() {
+            return;
+        }
+        if std::mem::take(&mut self.search_pending) {
+            self.show_search_results(true, cx);
+        }
+        for ev in current {
+            match ev {
+                SearchEvent::Hits { hits, .. } => self.table.update(cx, |table, _| table.delegate_mut().add_hits(hits)),
+                SearchEvent::Done { summary, .. } => {
+                    println!("search {:?} ({:?}): {summary:?}", self.query, self.search_opts.mode);
+                    self.search_summary = Some(summary);
+                }
+                SearchEvent::Failed { message, .. } => {
+                    eprintln!("search: {message}");
+                    self.search_error = Some(message.into());
+                }
+            }
+        }
+        self.after_rows_changed(cx);
+        cx.notify();
+    }
+
+    /// Status bar text of the search: (what it found, how long it took).
+    pub fn search_status(&self) -> Option<(SharedString, SharedString)> {
+        if !self.searching() {
+            return None;
+        }
+        if let Some(message) = &self.search_error {
+            return Some((format!("search failed: {message}").into(), "".into()));
+        }
+        let scope = self.search_opts.scope;
+        if self.search_opts.mode == SearchMode::Text && !scope.user && !scope.assistant {
+            return Some(("nothing to search: the Tools scope needs regex mode (.*)".into(), "".into()));
+        }
+        let Some(summary) = &self.search_summary else { return Some(("searching…".into(), "".into())) };
+        let mut found = format!("{} sessions · {} matches", summary.total_sessions.unwrap_or(summary.sessions), summary.matches);
+        if summary.truncated {
+            let more = if summary.total_sessions.is_some() { "" } else { ", more match" };
+            found.push_str(&format!(" · newest {MAX_RESULT_SESSIONS} shown{more}"));
+        }
+        let ms = summary.elapsed.as_secs_f64() * 1000.0;
+        let took = if ms < 10.0 { format!("search {ms:.1}ms") } else { format!("search {ms:.0}ms") };
+        Some((found.into(), took.into()))
+    }
+
+    /// Scope / mode / case / labels changed: remember it and search again.
+    pub(crate) fn search_options_changed(&mut self, cx: &mut Context<Self>) {
+        self.persist(cx);
+        if self.searching() {
+            self.run_search(cx);
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_regex(&mut self, cx: &mut Context<Self>) {
+        self.search_opts.mode = match self.search_opts.mode {
+            SearchMode::Text => SearchMode::Regex,
+            SearchMode::Regex => SearchMode::Text,
+        };
+        self.search_options_changed(cx);
+    }
+
+    pub fn toggle_case(&mut self, cx: &mut Context<Self>) {
+        self.search_opts.case_sensitive = !self.search_opts.case_sensitive;
+        self.search_options_changed(cx);
     }
 
     pub fn set_mode(&mut self, mode: DisplayMode, cx: &mut Context<Self>) {
@@ -210,20 +362,39 @@ impl AppRoot {
 
     fn scope_menu(&self, cx: &Context<Self>) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
         let this = cx.entity().downgrade();
-        let scope = self.scope;
+        let scope = self.search_opts.scope;
         move |menu, _, _| {
             let mut menu = menu.min_w(px(200.));
             for (ix, (label, hint)) in ScopeSet::ITEMS.iter().enumerate() {
                 let this = this.clone();
                 menu = menu.item(menu_item((*label).into(), (*hint).into(), false, scope.get(ix), move |cx| {
                     this.update(cx, |app, cx| {
-                        app.scope.toggle(ix);
-                        cx.notify();
+                        app.search_opts.scope.toggle(ix);
+                        app.search_options_changed(cx);
                     })
                     .ok();
                 }));
             }
             menu.separator().label("Applies to search. Tools = tool input/output, regex only.")
+        }
+    }
+
+    fn label_menu(&self, cx: &Context<Self>) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let this = cx.entity().downgrade();
+        let picked = self.search_opts.labels.clone();
+        move |menu, _, _| {
+            let mut menu = menu.min_w(px(200.));
+            for (label, hint) in LABELS {
+                let this = this.clone();
+                menu = menu.item(menu_item(label.into(), hint.into(), false, picked.iter().any(|l| l == label), move |cx| {
+                    this.update(cx, |app, cx| {
+                        app.search_opts.toggle_label(label);
+                        app.search_options_changed(cx);
+                    })
+                    .ok();
+                }));
+            }
+            menu.separator().label("Only matches inside these pieces. Regex mode.")
         }
     }
 
@@ -282,6 +453,9 @@ impl AppRoot {
             (None, hidden) => format!("All · {hidden} hidden").into(),
         };
         let mode = self.table.read(cx).delegate().mode;
+        let regex = self.search_opts.mode == SearchMode::Regex;
+        let this = cx.entity().downgrade();
+        let on_regex = this.clone();
 
         h_flex()
             .w_full()
@@ -294,7 +468,7 @@ impl AppRoot {
             .border_b_1()
             .border_color(style::border_soft())
             .child(trigger("project", "Project", project_label, cx).dropdown_menu(self.project_menu(cx)))
-            .child(trigger("scope", "Scope", self.scope.label().into(), cx).dropdown_menu(self.scope_menu(cx)))
+            .child(trigger("scope", "Scope", self.search_opts.scope.label().into(), cx).dropdown_menu(self.scope_menu(cx)))
             .child(trigger("range", "Updated", self.range.label().into(), cx).dropdown_menu(self.range_menu(cx)))
             .child(trigger("kind", "Kind", filter.kinds.label().into(), cx).dropdown_menu(self.kind_menu(cx)))
             .child(
@@ -312,6 +486,15 @@ impl AppRoot {
                         ),
                 ),
             )
+            .child(toggle("regex", ".*", regex, "Regex search over transcripts (⌥⌘R)", cx).on_click(move |_, _, cx| {
+                on_regex.update(cx, |app, cx| app.toggle_regex(cx)).ok();
+            }))
+            .when(regex, |el| {
+                el.child(toggle("case", "Aa", self.search_opts.case_sensitive, "Match case (⌥⌘C)", cx).on_click(move |_, _, cx| {
+                    this.update(cx, |app, cx| app.toggle_case(cx)).ok();
+                }))
+                .child(trigger("labels", "Labels", self.search_opts.labels_label().into(), cx).dropdown_menu(self.label_menu(cx)))
+            })
             .child(div().flex_1())
             .child(
                 trigger("preview", "Preview", mode.label().into(), cx)

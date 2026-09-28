@@ -3,12 +3,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use agent_session_core::model::MessageRow;
+use agent_session_core::search::Matcher;
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use gpui_kit::*;
 
-use crate::model::{CONVERSATION_CAP, Conversation, Kind, Message, MessageKind, SessionRow};
+use crate::model::{ConversationView, Kind, Message, MessageKind, SessionRow, conversation_from};
 use crate::style::{self, FluentBuilder};
 use crate::AppRoot;
 
@@ -48,9 +50,14 @@ pub struct DetailState {
     pub chips: Chips,
     expanded: HashMap<usize, bool>,
     force_all: Option<bool>,
-    pub conversation: Conversation,
-    /// Indexed messages of the session, including the ones beyond `CONVERSATION_CAP`.
-    total_messages: usize,
+    /// Indexed messages of the selected session, kept so a new search can mark them again.
+    raw: Vec<MessageRow>,
+    view: ConversationView,
+    /// Positions in `view.messages` of the messages with search hits.
+    hits: Vec<usize>,
+    /// The hit the view is parked on (index into `hits`).
+    current_hit: Option<usize>,
+    scroll: ScrollHandle,
 }
 
 impl Default for DetailState {
@@ -60,18 +67,67 @@ impl Default for DetailState {
             chips: Chips([true, true, true, true]),
             expanded: HashMap::new(),
             force_all: None,
-            conversation: Vec::new(),
-            total_messages: 0,
+            raw: Vec::new(),
+            view: ConversationView::default(),
+            hits: Vec::new(),
+            current_hit: None,
+            scroll: ScrollHandle::new(),
         }
     }
 }
 
 impl DetailState {
-    pub fn set_conversation(&mut self, conversation: Conversation, total_messages: usize) {
-        self.conversation = conversation;
-        self.total_messages = total_messages;
+    /// Another session was selected: show its messages, parked on the first search hit.
+    pub fn set_messages(&mut self, raw: Vec<MessageRow>, matcher: Option<&Matcher>) {
+        self.raw = raw;
         self.expanded.clear();
         self.force_all = None;
+        self.set_matcher(matcher);
+    }
+
+    pub fn clear(&mut self) {
+        self.set_messages(Vec::new(), None);
+    }
+
+    /// The search changed: mark the hits of the new one and park on the first.
+    pub fn set_matcher(&mut self, matcher: Option<&Matcher>) {
+        self.view = conversation_from(&self.raw, matcher);
+        self.hits = self.view.messages.iter().enumerate().filter(|(_, m)| !m.highlights.is_empty()).map(|(ix, _)| ix).collect();
+        self.current_hit = if self.hits.is_empty() { None } else { Some(0) };
+        self.park();
+    }
+
+    /// Move to the next / previous message with a hit, wrapping around.
+    pub fn step_hit(&mut self, forward: bool) {
+        let (Some(current), count) = (self.current_hit, self.hits.len()) else { return };
+        self.current_hit = Some(if forward { (current + 1) % count } else { (current + count - 1) % count });
+        self.park();
+    }
+
+    /// (1-based position, count) of the hit the view is parked on.
+    pub fn hit_position(&self) -> Option<(usize, usize)> {
+        self.current_hit.map(|current| (current + 1, self.hits.len()))
+    }
+
+    fn current_message(&self) -> Option<usize> {
+        self.current_hit.map(|current| self.hits[current])
+    }
+
+    /// Children of the scroll area ahead of the first message.
+    fn lead_children(&self) -> usize {
+        usize::from(self.view.skipped > 0)
+    }
+
+    /// Scroll the current hit to the top, or back to the start without one. A hit hidden by the
+    /// chips leaves the scroll position alone.
+    fn park(&mut self) {
+        let Some(message_ix) = self.current_message() else {
+            self.scroll.set_offset(point(px(0.), px(0.)));
+            return;
+        };
+        if let Some(child) = self.visible().position(|(ix, _)| ix == message_ix) {
+            self.scroll.scroll_to_top_of_item(child + self.lead_children());
+        }
     }
 
     fn is_open(&self, ix: usize) -> bool {
@@ -84,7 +140,7 @@ impl DetailState {
     }
 
     fn visible(&self) -> impl Iterator<Item = (usize, &Arc<Message>)> {
-        self.conversation.iter().enumerate().filter(|(_, m)| self.chips.shows(m.kind))
+        self.view.messages.iter().enumerate().filter(|(_, m)| self.chips.shows(m.kind))
     }
 
     fn any_closed(&self) -> bool {
@@ -93,7 +149,7 @@ impl DetailState {
 
     fn counts(&self) -> [usize; 4] {
         let mut counts = [0; 4];
-        for m in &self.conversation {
+        for m in &self.view.messages {
             counts[Chips::ix(m.kind)] += 1;
         }
         counts
@@ -127,6 +183,11 @@ fn meta_pair(label: &'static str, value: AnyElement) -> Div {
         .gap(px(8.))
         .child(div().w(px(64.)).flex_none().text_size(px(11.)).text_color(style::muted()).child(label))
         .child(div().flex_1().min_w_0().truncate().child(value))
+}
+
+/// A message's text with its search hits marked.
+fn marked_text(m: &Message, marks: HighlightStyle) -> StyledText {
+    StyledText::new(m.text.clone()).with_highlights(m.highlights.iter().map(|r| (r.clone(), marks)))
 }
 
 fn mono_value(value: SharedString, cx: &App) -> Div {
@@ -300,6 +361,7 @@ impl AppRoot {
                     .child(div().font_family(mono(cx)).text_size(px(10.)).opacity(0.7).child(counts[ix].to_string()))
             }))
             .child(div().flex_1())
+            .children(self.detail.hit_position().map(|(at, of)| self.render_hit_nav(at, of, cx)))
             .child(
                 div()
                     .id("toggle-all")
@@ -316,28 +378,79 @@ impl AppRoot {
             )
     }
 
+    /// `▲ 2 / 9 ▼`: step through the messages with search hits (also `n` / `shift-n`, `cmd-g`).
+    fn render_hit_nav(&self, at: usize, of: usize, cx: &mut Context<Self>) -> Div {
+        let step = |id: &'static str, glyph: &'static str, forward: bool, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .w(px(16.))
+                .h(px(16.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(3.))
+                .text_size(px(8.))
+                .text_color(style::text_secondary())
+                .cursor_default()
+                .hover(|el| el.bg(style::control_hover()))
+                .on_click(cx.listener(move |this, _, _, cx| this.step_hit(forward, cx)))
+                .child(glyph)
+        };
+        h_flex()
+            .flex_none()
+            .items_center()
+            .gap(px(2.))
+            .mr(px(8.))
+            .child(step("hit-prev", "▲", false, cx))
+            .child(div().font_family(mono(cx)).text_size(px(10.)).text_color(style::text_secondary()).child(format!("{at} / {of} hits")))
+            .child(step("hit-next", "▼", true, cx))
+    }
+
+    pub fn step_hit(&mut self, forward: bool, cx: &mut Context<Self>) {
+        self.detail.step_hit(forward);
+        cx.notify();
+    }
+
+    /// The table lists this session as a search result.
+    fn table_hit(&self, row: &SessionRow, cx: &App) -> bool {
+        self.table.read(cx).delegate().hit(&row.id).is_some()
+    }
+
     /// Footer under the messages: what this view cannot show yet.
-    fn conversation_note(&self, row: &SessionRow) -> SharedString {
+    fn conversation_note(&self, row: &SessionRow, cx: &App) -> SharedString {
         if row.kind == Kind::History {
             return "The transcript was cleaned up by Claude Code; only the prompts kept in history.jsonl remain (see Metadata).".into();
         }
-        if self.detail.total_messages > CONVERSATION_CAP {
-            return format!("Showing the first {CONVERSATION_CAP} of {} indexed messages. Tool calls and thinking are not shown yet.", self.detail.total_messages).into();
+        if self.detail.hits.is_empty() && self.table_hit(row, cx) {
+            return "The search hits of this session are in tool calls, thinking or messages beyond this view; they show up here once transcripts are read directly.".into();
+        }
+        let view = &self.detail.view;
+        if view.total > view.messages.len() {
+            let (from, to) = (view.skipped + 1, view.skipped + view.messages.len());
+            return format!("Showing messages {from}–{to} of {} indexed ones. Tool calls and thinking are not shown yet.", view.total).into();
         }
         "Indexed user / assistant text only. Tool calls and thinking are not shown yet.".into()
     }
 
     fn render_conversation(&self, row: &SessionRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let note = self.conversation_note(row);
+        let note = self.conversation_note(row, cx);
+        let note_line = |text: SharedString| div().px(px(12.)).py(px(10.)).text_size(px(11.)).text_color(style::muted_light()).child(text);
+        // every message is a direct child of the scroll area: `DetailState::park` scrolls by child index
         let mut items: Vec<AnyElement> = Vec::new();
-        let mut turn = 0;
+        if self.detail.view.skipped > 0 {
+            let skipped = format!("{} earlier messages are not shown: the view starts near the first search hit.", self.detail.view.skipped);
+            items.push(note_line(skipped.into()).into_any_element());
+        }
+        let current = self.detail.current_message();
+        let mut turn = self.detail.view.skipped_turns;
         for (ix, m) in self.detail.visible() {
+            let marks = if current == Some(ix) { style::hit_current_highlight() } else { style::hit_highlight() };
             let el = match m.kind {
                 MessageKind::User => {
                     turn += 1;
-                    self.render_user(m, turn, !items.is_empty(), cx).into_any_element()
+                    self.render_user(m, turn, !items.is_empty(), marks, cx).into_any_element()
                 }
-                MessageKind::Assistant => self.render_assistant(m, cx).into_any_element(),
+                MessageKind::Assistant => self.render_assistant(m, marks, cx).into_any_element(),
                 MessageKind::Thinking => self.render_thinking(ix, m, cx).into_any_element(),
                 MessageKind::Tool => self.render_tool(ix, m, cx).into_any_element(),
             };
@@ -347,12 +460,25 @@ impl AppRoot {
             .flex_1()
             .min_h_0()
             .child(self.render_chip_bar(cx))
-            .child(div().id("conversation").flex_1().min_h_0().overflow_y_scrollbar().child(
-                v_flex().children(items).child(div().px(px(12.)).py(px(10.)).text_size(px(11.)).text_color(style::muted_light()).child(note)),
-            ))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        v_flex()
+                            .id("conversation")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.detail.scroll)
+                            .children(items)
+                            .child(note_line(note)),
+                    )
+                    .vertical_scrollbar(&self.detail.scroll),
+            )
     }
 
-    fn render_user(&self, m: &Arc<Message>, turn: usize, gap_top: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_user(&self, m: &Arc<Message>, turn: usize, gap_top: bool, marks: HighlightStyle, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         h_flex()
             .items_start()
             .gap(px(8.))
@@ -374,10 +500,10 @@ impl AppRoot {
                     .child(div().font_weight(FontWeight::BOLD).text_color(style::accent()).child(format!("USER #{turn}")))
                     .child(div().text_color(style::user_time()).child(m.time.clone())),
             )
-            .child(div().flex_1().min_w_0().text_size(px(12.)).line_height(px(16.)).font_weight(FontWeight::MEDIUM).child(m.text.clone()))
+            .child(div().flex_1().min_w_0().text_size(px(12.)).line_height(px(16.)).font_weight(FontWeight::MEDIUM).child(marked_text(m, marks)))
     }
 
-    fn render_assistant(&self, m: &Arc<Message>, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn render_assistant(&self, m: &Arc<Message>, marks: HighlightStyle, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         h_flex()
             .items_start()
             .gap(px(8.))
@@ -397,7 +523,7 @@ impl AppRoot {
                     .child(div().font_weight(FontWeight::BOLD).text_color(style::text_secondary()).child("ASST"))
                     .child(m.time.clone()),
             )
-            .child(div().flex_1().min_w_0().text_size(px(12.)).line_height(px(16.)).text_color(style::asst_text()).child(m.text.clone()))
+            .child(div().flex_1().min_w_0().text_size(px(12.)).line_height(px(16.)).text_color(style::asst_text()).child(marked_text(m, marks)))
     }
 
     fn collapsed_row(&self, ix: usize, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -502,5 +628,65 @@ impl AppRoot {
                         ),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // `gpui_kit::*` exports gpui's own `test` attribute; name the standard one explicitly.
+    use core::prelude::v1::test;
+
+    use agent_session_core::model::Role;
+
+    use super::*;
+
+    fn msg(role: Role, text: &str) -> MessageRow {
+        MessageRow {
+            uuid: "u".into(),
+            parent_uuid: None,
+            role,
+            ts: 0,
+            text: text.into(),
+            is_meta: false,
+            byte_offset: 0,
+            byte_len: 0,
+            model: None,
+            input_tokens: None,
+            output_tokens: None,
+        }
+    }
+
+    fn session() -> Vec<MessageRow> {
+        vec![msg(Role::User, "fix the parser"), msg(Role::Assistant, "on it"), msg(Role::Assistant, "the parser is fixed"), msg(Role::User, "thanks")]
+    }
+
+    #[test]
+    fn the_view_parks_on_the_first_hit_and_steps_around_the_others() {
+        let mut d = DetailState::default();
+        let matcher = Matcher::words("parser").unwrap();
+        d.set_messages(session(), Some(&matcher));
+        assert_eq!(d.hit_position(), Some((1, 2)));
+        assert_eq!(d.current_message(), Some(0));
+        d.step_hit(true);
+        assert_eq!((d.hit_position(), d.current_message()), (Some((2, 2)), Some(2)));
+        d.step_hit(true);
+        assert_eq!(d.hit_position(), Some((1, 2)), "past the last hit comes the first again");
+        d.step_hit(false);
+        assert_eq!(d.hit_position(), Some((2, 2)), "and the other way round");
+    }
+
+    #[test]
+    fn a_new_search_marks_the_same_messages_again_and_no_search_marks_nothing() {
+        let mut d = DetailState::default();
+        d.set_messages(session(), None);
+        assert_eq!(d.hit_position(), None);
+        d.step_hit(true);
+        assert_eq!(d.hit_position(), None, "nothing to step through");
+        d.set_matcher(Some(&Matcher::words("thanks").unwrap()));
+        assert_eq!((d.hit_position(), d.current_message()), (Some((1, 1)), Some(3)));
+        d.set_matcher(None);
+        assert!(d.view.messages.iter().all(|m| m.highlights.is_empty()));
+        d.clear();
+        assert!(d.view.messages.is_empty());
     }
 }

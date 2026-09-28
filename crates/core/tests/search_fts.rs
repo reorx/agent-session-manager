@@ -3,7 +3,8 @@
 mod common;
 
 use agent_session_core::index::{Db, Indexer};
-use agent_session_core::search::fts::{FtsQuery, FtsRoles, needs_like, search_sessions, to_fts_query};
+use agent_session_core::search::Matcher;
+use agent_session_core::search::fts::{FtsQuery, FtsRoles, needs_like, search, search_sessions, to_fts_query};
 use common::*;
 
 fn indexed(sb: &Sandbox) -> Db {
@@ -13,7 +14,7 @@ fn indexed(sb: &Sandbox) -> Db {
 }
 
 fn q(text: &str) -> FtsQuery {
-    FtsQuery { text: text.into(), roles: FtsRoles::both(), project: None, since_ms: None, limit: 200 }
+    FtsQuery { text: text.into(), roles: FtsRoles::both(), project: None, since_ms: None, sessions: None, limit: 200 }
 }
 
 #[test]
@@ -114,4 +115,52 @@ fn messages_deleted_with_their_transcript_disappear_from_search() {
     std::fs::remove_file(sb.transcript(ALPHA, S1)).unwrap();
     Indexer::new(sb.claude.clone()).scan(&mut db, &mut |_| {}).unwrap();
     assert!(search_sessions(&db, &q("parser")).unwrap().is_empty());
+}
+
+#[test]
+fn the_outcome_reports_totals_beyond_the_limit_and_honours_a_session_filter() {
+    let sb = sandbox();
+    let db = indexed(&sb);
+    let all = search(&db, &q("the")).unwrap();
+    assert_eq!((all.hits.len(), all.total_sessions), (2, 2));
+    assert_eq!(all.total_matches, all.hits.iter().map(|h| h.count as usize).sum::<usize>());
+
+    let one = search(&db, &FtsQuery { limit: 1, ..q("the") }).unwrap();
+    assert_eq!(one.hits.len(), 1, "only the newest session is kept");
+    assert_eq!(one.total_sessions, 2, "but the caller learns there were more");
+    assert_eq!(one.total_matches, all.total_matches);
+
+    let only_s1 = search(&db, &FtsQuery { sessions: Some([S1.to_string()].into()), ..q("the") }).unwrap();
+    assert_eq!(only_s1.hits.iter().map(|h| h.session_id.as_str()).collect::<Vec<_>>(), [S1]);
+    assert_eq!(only_s1.total_sessions, 1, "sessions outside the filter do not count");
+}
+
+#[test]
+fn snippets_highlight_every_query_word_around_the_first_one() {
+    let sb = sandbox();
+    let db = indexed(&sb);
+    let hits = search_sessions(&db, &q("arrays nested")).unwrap();
+    let first = &hits[0].first;
+    let marked: Vec<String> = first.ranges.iter().map(|r| first.text[r.clone()].to_lowercase()).collect();
+    assert!(marked.contains(&"nested".to_string()) && marked.contains(&"arrays".to_string()), "marked: {marked:?} in {:?}", first.text);
+    assert!(!first.text.contains('\n'), "snippets are one line");
+}
+
+#[test]
+fn a_matcher_marks_words_or_a_regex_in_any_text() {
+    let words = Matcher::words("Parser  plan").unwrap();
+    assert_eq!(words.ranges("the PLAN: refactor the parser"), vec![4..8, 23..29]);
+    assert!(words.is_match("planning") && !words.is_match("nothing"));
+    assert!(Matcher::words("   ").is_none(), "a blank query matches nothing");
+    assert_eq!(Matcher::words("a.b").unwrap().ranges("axb a.b"), vec![4..7], "words are literal text");
+
+    let re = Matcher::regex(r"pars\w+", false);
+    assert_eq!(re.ranges("Parser parsing"), vec![0..6, 7..14]);
+    assert!(Matcher::regex("Parser", true).ranges("parser").is_empty());
+    assert_eq!(Matcher::regex("a(", false).ranges("f(a(b))"), vec![2..4], "an invalid regex is literal text");
+    assert!(Matcher::regex("x*", false).ranges("abc").is_empty(), "empty matches are not highlights");
+
+    let cut = words.snippet(&format!("{}\nthe parser{}", "a".repeat(100), "b".repeat(100)), 10, 20);
+    assert_eq!(cut.text, format!("…{}⏎the parser{}…", "a".repeat(5), "b".repeat(14)));
+    assert_eq!(&cut.text[cut.ranges[0].clone()], "parser");
 }
