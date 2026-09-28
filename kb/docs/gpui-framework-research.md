@@ -1,5 +1,6 @@
 ---
 created: 2026-09-08
+updated: 2026-09-28
 tags:
   - gpui
   - gpui-kit
@@ -422,42 +423,45 @@ this._load_rows_task = cx.spawn(async move |this, cx| {
 
 有状态控件统一模式：构造时 `cx.new(|cx| XState::new(window, cx))` → `cx.subscribe_in(&state, window, ..)` → render 时 `X::new(&state)`。
 
+**已经用上的组件**不在下表里，做法和核实过的行为在 [gpui-kit 开发指南](gpui-kit-guide.md)：
+
+| 需求 | 实际采用 | 指南章节 |
+|---|---|---|
+| 搜索框 | `Input` / `InputState`，不开 `clean_on_escape` | 搜索框与键盘 |
+| 过滤、搜索范围、展示模式 | `Button` + `.dropdown_menu(..)`，没有用 `Select` / `Combobox` / `TabBar` | 下拉菜单与按钮 |
+| 详情面板的 tab | `TabBar` | 已核实的 API |
+| 左右分栏 | `h_resizable` + `resizable_panel` | 表格 › 列宽、已核实的 API |
+| 搜索命中高亮 | `StyledText::with_highlights`，没有用 `Label::highlights` | 命中高亮 |
+| 滚动条 | `overflow_y_scrollbar()`，或 `ScrollHandle` + `vertical_scrollbar` | 滚动到某个子元素 |
+
+**还没用上的组件**，下表是调研时从文档和源码摘的，未在本项目里验证，使用前对照本地源码：
+
 | 需求 | 组件 | 关键 API |
 |---|---|---|
-| 搜索框 | `input::{Input, InputState, InputEvent}` | `InputState::new(window, cx).placeholder("Search…").clean_on_escape()`；`Input::new(&s).cleanable(true).prefix(Icon::new(IconName::Search).small()).small()`；事件 `Change / PressEnter{secondary} / Focus / Blur`；读值 `state.read(cx).value()` |
 | 项目下拉（可搜索） | `select::{Select, SelectState, SelectItem, SelectEvent}` | `SelectState::new(items, Some(IndexPath::default()), window, cx).searchable(true)`；`Select::new(&s).placeholder("Project").cleanable(true).w(px(240.))`；自定义项实现 `SelectItem { type Value; title(); value(); matches(query) }` |
 | 多选过滤 | `combobox::{Combobox, ComboboxState}` + `SearchableVec` | `.multiple(true).searchable(true)` |
 | 时间范围 | `date_picker::{DatePicker, DatePickerState, DatePickerEvent, DateRangePreset}` | `DatePickerState::range(window, cx)`；`DatePicker::new(&s).number_of_months(2).cleanable(true)`；预设用 `DateRangePreset`；基于 `chrono::NaiveDate` |
-| 搜索范围 / 展示模式（互斥） | `tab::{Tab, TabBar}` 或 `RadioGroup` | `TabBar::new("scope").segmented().selected_index(i).on_click(|ix, _, _| ..).child(Tab::new().label("User"))`。`ToggleGroup` 文档描述为多选，互斥模式未确认 |
-| 左右分栏 | `resizable::{h_resizable, resizable_panel}` | `h_resizable("main").child(resizable_panel().size(px(600.)).size_range(px(300.)..px(1200.)).child(table)).child(resizable_panel().child(detail))`。文档中签名有 `h_resizable("id")` / `("id", state)` / `("id", window, cx)` 三种写法，**使用前查 docs.rs 确认** |
+| 互斥选项 | `RadioGroup`、`ToggleGroup` | `ToggleGroup` 文档描述为多选，互斥模式未确认 |
 | 右侧详情抽屉（分栏的廉价替代） | `WindowExt::open_sheet_at` | `window.open_sheet_at(Placement::Right, cx, \|sheet, _, _\| sheet.title("Session").size(px(560.)).child(..))` |
-| 消息 Markdown 渲染 | `text::{markdown, TextView}` | `TextView::markdown("id", src).max_lines(5)`（`TextViewState::is_clamped()` 判断是否折叠）；`.on_link_click(..)`；代码高亮需 `tree-sitter-*` feature |
-| 搜索命中高亮 | `label::{Label, HighlightsMatch}` 或 `gpui::StyledText` | `Label::new(text).highlights("query")` 全部大小写不敏感命中；已有字节区间时 `StyledText::new(text).with_highlights(ranges)` |
-| 右键菜单 / 下拉菜单 | `menu::{PopupMenu, ContextMenuExt}` | `div().id("x").context_menu(\|menu, w, cx\| menu.menu("Copy", Box::new(CopyAction)).separator())`；菜单项是 GPUI `Action`，自动显示快捷键 |
+| 消息 Markdown 渲染 | `text::{markdown, TextView}` | `TextView::markdown("id", src).max_lines(5)`（`TextViewState::is_clamped()` 判断是否折叠）；`.on_link_click(..)`；代码高亮需 `tree-sitter-*` feature。没有传入高亮区间的接口，`max_lines` 也不省布局开销，见 M4 方案 |
+| 右键菜单 | `menu::{PopupMenu, ContextMenuExt}` | `div().id("x").context_menu(\|menu, w, cx\| menu.menu("Copy", Box::new(CopyAction)).separator())`；菜单项是 GPUI `Action`，自动显示快捷键 |
 | 通知 / 对话框 | `WindowExt::push_notification / open_dialog` | `window.push_notification((NotificationType::Success, "Indexed 4,213 sessions"), cx)` |
-| 滚动条 / 骨架屏 / 快捷键标签 | `scroll::*`、`Skeleton`、`Kbd` | `div().id("page").overflow_y_scrollbar()`；`Skeleton::new().w(px(250.)).h_4()`；`Kbd::new(Keystroke::parse("cmd-k")?)` |
+| 骨架屏 / 快捷键标签 | `Skeleton`、`Kbd` | `Skeleton::new().w(px(250.)).h_4()`；`Kbd::new(Keystroke::parse("cmd-k")?)` |
 | 侧栏 / 标题栏 | `sidebar::*`、`TitleBar` | `Sidebar::new().collapsible(true)`；`TitleBar::new().child(..)` |
-| 可变高度虚拟列表 | `list::{List, ListState, ListDelegate}`、`v_virtual_list` | 详情面板消息流备选 |
+| 可变高度虚拟列表 | GPUI 核心 `list` + `ListState`、gpui-kit `v_virtual_list` | 详情面板消息流备选。`v_virtual_list` 要求预先给出每项高度，两者的比较见 M4 方案的待确认项 D1 |
 | 小型静态表 | 声明式 `Table / TableRow / TableCell`（0.6 新增） | 详情面板 key/value 块；无虚拟化 |
 
-### 4.5 推荐的应用骨架
+### 4.5 应用骨架
 
-```text
-AppRoot (Entity)              状态: filters, search, display_mode, selected: Option<SessionId>
-├── TitleBar
-├── toolbar: h_flex — Select(project) · DatePicker(range) · Input(search) · TabBar.segmented(scope) · TabBar.segmented(display mode)
-├── h_resizable("main")
-│   ├── resizable_panel(60%) → DataTable::new(&self.table)
-│   └── resizable_panel     → DetailPane (Entity): 元数据 + 消息列表（TextView::markdown, max_lines 折叠）
-├── StatusBar: 索引进度 / session 计数 / live 指示
-└── Root::render_dialog_layer / render_sheet_layer / render_notification_layer
-```
+调研时设想的骨架与实现有三处不同，这里只记差异，现状见 [gpui-kit 开发指南](gpui-kit-guide.md) 的"应用骨架"和 [运行时架构](app-architecture.md)：
 
-数据流：规范数据存于 delegate 之外（`Arc<Vec<Session>>` 或 `Entity<SessionStore>`），delegate 只持有 `rows: Vec<usize>`（过滤+排序后的索引）与当前 `ColumnSort`。过滤事件 → 防抖 → `cx.background_spawn` 计算索引 → `table.update(.. refresh ..)`；`perform_sort` 原地排 `rows`；`TableEvent::SelectRow(ix)` → `rows[ix]` → 更新详情 entity；展示模式切换只改变 `render_td` 输出，`cx.notify()` 即可。
+| 调研时的设想 | 实际 |
+|---|---|
+| 工具栏用 `Select`、`DatePicker`、分段 `TabBar` | 统一用 `Button` 下拉，贴合设计稿的「标签 值 ▾」样式 |
+| 过滤放到 `cx.background_spawn` 里算 | 在主线程算，几千行不到 1ms |
+| 行数据存在 delegate 之外，delegate 只持索引 | delegate 同时持有行和索引 |
 
-焦点与快捷键：`impl Focusable for AppRoot { fn focus_handle(..) { self.table.focus_handle(cx) } }` 让表格启动即可方向键导航；全局快捷键 `gpui_kit::actions!(app, [FocusSearch, ToggleMode])` + `cx.bind_keys([KeyBinding::new("cmd-f", FocusSearch, None)])` + `.on_action(cx.listener(..))`。
-
-`DockArea`（可拖拽重排面板，Longbridge Pro 在用）存在但对本项目过重，`h_resizable` + Sheet 足够。
+`DockArea`（可拖拽重排面板，Longbridge Pro 在用）存在但对本项目过重，`h_resizable` 足够。
 
 ---
 

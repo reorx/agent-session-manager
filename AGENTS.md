@@ -56,7 +56,7 @@ M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，方案在 `kb
 - 程序化 `InputState::set_value` 不发 `InputEvent::Change`，之后要自己触发后续逻辑（如 `AppRoot::set_query` 直接调 `run_search`）
 - **验收时不要用 System Events / osascript / cliclick 发按键，也不要动剪贴板**：全局按键只进最前台的 app，会打进用户正在用的窗口，GPUI 也收不到 cliclick 的按键。交互用环境变量驱动的 autoplay（app 每步稳定后打日志标记，脚本等到标记再按窗口 ID 截图）；cliclick 鼠标点击只用于无法程序化打开的弹出层
 
-其余做法在 `kb/docs/gpui-kit-guide.md`：表格的行高 / 列宽 / 排序状态 / 选中保持、主题三步、下拉菜单、返回类型的借用冲突、截图脚本。改 `table.rs`、`style.rs`、`toolbar.rs`、`detail.rs` 或 `main.rs` 的渲染与选中逻辑前先读。
+其余做法在 `kb/docs/gpui-kit-guide.md`：表格的行高 / 列宽 / 排序状态 / 选中保持、主题三步、下拉菜单、搜索框的事件与 Escape、单键快捷键的上下文、命中高亮的区间规则、滚动定位、返回类型的借用冲突、截图脚本。改 `table.rs`、`style.rs`、`toolbar.rs`、`detail.rs` 或 `main.rs` 的渲染与选中逻辑前先读。
 
 ## 关键决策
 

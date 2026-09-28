@@ -44,7 +44,7 @@ debug 构建能用，靠的是根 `Cargo.toml` 的 `[profile.dev.package]` 给�
 ```text
 Root
 └── AppRoot
-    ├── 工具栏        五个「标签 值 ▾」下拉 + 搜索框
+    ├── 工具栏        「标签 值 ▾」下拉 · 搜索框 · 搜索模式开关
     ├── h_resizable   左：DataTable    右：详情面板（可隐藏）
     ├── StatusBar     行数 · 索引状态 · 消息数与 DB 大小
     └── sheet / dialog / notification 层
@@ -91,6 +91,8 @@ Root
 
 `TableState::set_selected_row` 会顺带滚动到该行，没有只选中不滚动的入口。所以不能在行还在变动时反复设置选中，否则表格跟着跳。选中按 session id 保持以及由此而来的两个例外，规则在 [运行时架构](app-architecture.md) 的"选中"一节。
 
+列选中默认是开的：点表头会选中整列，整列的高亮会盖掉行选中。本项目的表头点击只用于排序，所以建表时关掉了（`col_selectable(false)`）。
+
 ## 主题与密度
 
 设计稿的全部色值集中在 `style.rs`，按名字取用。别处不写 hex，这样界面才能和设计稿逐项比对。
@@ -107,6 +109,35 @@ Root
 - 菜单项用 `PopupMenuItem::element(..)` 放任意内容，`.checked(bool)` 打勾，回调里通过弱引用更新 `AppRoot`
 - 靠右的下拉用 `dropdown_menu_with_anchor(Anchor::TopRight, ..)`，否则菜单会伸出窗口
 - 按钮外观：`ButtonCustomVariant` 定底色和 hover 色，边框、高度、圆角直接链在 `Button` 上。实例样式最后生效，能覆盖变体
+- 搜索框旁的开关（`.*`、`Aa`）也是自定义外观的 `Button`，开和关各用一套颜色，没有用 `Switch` 或 `ToggleGroup`。悬停说明用 `.tooltip(..)`
+
+## 搜索框与键盘
+
+搜索框是 `Input`，状态在 `InputState` 里，两者分开：状态在构造视图时创建并订阅事件，render 时用 `Input::new(&state)` 画出来。
+
+- **程序化写入不发事件。** `set_value` 在写入期间关掉了事件发送，订阅者收不到 `Change`。代码里改了搜索框的内容（清空、autoplay 填词）之后，要自己调用后续逻辑
+- **Escape 会冒泡。** 没有开 `clean_on_escape` 时，输入框处理完自己的事（收起多光标、取消输入法组字）就把 Escape 交给上层。本项目靠这一点在 `AppRoot` 上接住它：清空搜索并把焦点交还表格。开了 `clean_on_escape` 则输入框自己清空并吞掉按键，上层收不到
+- **Enter 是事件，不是 Action。** `PressEnter` 从订阅里来；本项目用它立即搜索并把焦点交给表格
+- **防抖靠替换任务。** 每次 `Change` 都新建一个"等一会儿再搜索"的任务并存进同一个字段，旧任务随之被 drop 而取消
+
+**单键快捷键要限定上下文。** 组件各有自己的 key context（表格是 `"DataTable"`，输入框是 `"Input"`），绑定时把它作为第三个参数，快捷键就只在该组件有焦点时生效。`n` / `shift-n` 绑在表格的上下文上，所以在搜索框里打字不会被吞掉。带修饰键的快捷键不受打字影响，可以绑成全局。
+
+## 命中高亮
+
+高亮用 GPUI 核心的 `StyledText::with_highlights`，没有用组件库的 `Label::highlights`。后者接收的是查询字符串并自己做大小写不敏感的匹配，而本项目的命中位置由 core 算出（多词、正则、大小写开关），界面只负责按给定的区间上色。
+
+- 区间是 **UTF-8 字节偏移**，必须落在字符边界上，debug 构建会断言
+- 区间要按起点升序、互不重叠。源码按顺序累加各段长度，不排序也不合并
+- 高亮样式（背景色、前景色）和其他色值一样集中在 `style.rs`
+- 放在会截断的单元格里时，截断发生在右侧，排在后面的高亮可能被裁掉。表格的片段因此让首个命中尽量靠前
+
+## 滚动到某个子元素
+
+详情面板的"跳到下一个命中"靠 `ScrollHandle`：滚动容器用 `.track_scroll(&handle)` 挂上句柄，之后 `scroll_to_top_of_item(n)` 把第 n 个子元素滚到顶部，`set_offset` 回到开头。
+
+序号数的是滚动容器的**直接子元素**。消息必须直接挂在滚动容器下，中间不能再包一层；消息前面若有别的子元素（如"跳过了 n 条"的说明），序号要相应后移。
+
+这个办法要求所有子元素都真实渲染，只适合条数有上限的列表。
 
 ## 元素函数的返回类型
 
@@ -156,8 +187,11 @@ use core::prelude::v1::test;
 | `cx.theme()` | 需要导入 `component::ActiveTheme` |
 | `overflow_y_scrollbar()` | 在 `component::scroll::ScrollableElement` |
 | `Window::viewport_size()` | 无参 |
-| 输入框聚焦 | `InputState::focus_handle(cx)` 取句柄，再 `focus(window, cx)` |
+| 输入框聚焦 | `InputState::focus_handle(cx)` 取句柄，再 `focus(window, cx)`；表格同理 |
+| `InputEvent::PressEnter` | 有两个字段：`secondary` 和 `shift` |
+| 输入框的 Escape | 是 `component::input::Escape` 这个 Action，在上层用 `.on_action(..)` 接 |
 | `TableState::scroll_to_row` | 把目标行滚到顶部；`set_selected_row` 也会滚动 |
+| 自绘滚动条 | 容器 `.overflow_y_scroll().track_scroll(&handle)`，外层 `.vertical_scrollbar(&handle)`；不需要句柄时直接 `.overflow_y_scrollbar()` |
 
 ## 相关文件
 
@@ -165,6 +199,7 @@ use core::prelude::v1::test;
 - `crates/app/src/store.rs` — 后台线程与请求 / 事件类型
 - `crates/app/src/table.rs` — 表格 delegate
 - `crates/app/src/style.rs` — 色值与主题安装
-- `crates/app/src/toolbar.rs`、`detail.rs` — 下拉菜单、详情面板
+- `crates/app/src/toolbar.rs` — 下拉菜单、搜索框与开关、搜索的防抖
+- `crates/app/src/detail.rs` — 详情面板、命中高亮与跳转
 - [GPUI 框架调研](gpui-framework-research.md) — 心智模型、组件目录、选型理由
 - 设计稿链接与界面改版记录：`kb/notes/2026-09-16-design-refactor.md`
