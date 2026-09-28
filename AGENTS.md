@@ -56,14 +56,14 @@ M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，方案在 `kb
 - 程序化 `InputState::set_value` 不发 `InputEvent::Change`，之后要自己触发后续逻辑（如 `AppRoot::set_query` 直接调 `run_search`）
 - **验收时不要用 System Events / osascript / cliclick 发按键，也不要动剪贴板**：全局按键只进最前台的 app，会打进用户正在用的窗口，GPUI 也收不到 cliclick 的按键。交互用环境变量驱动的 autoplay（app 每步稳定后打日志标记，脚本等到标记再按窗口 ID 截图）；cliclick 鼠标点击只用于无法程序化打开的弹出层
 
-其余做法在 `kb/docs/gpui-kit-guide.md`：表格的行高 / 列宽 / 排序状态 / 选中保持、主题三步、下拉菜单、返回类型的借用冲突、截图脚本。改 `table.rs`、`style.rs`、`toolbar.rs` 或 `main.rs` 的渲染与选中逻辑前先读。
+其余做法在 `kb/docs/gpui-kit-guide.md`：表格的行高 / 列宽 / 排序状态 / 选中保持、主题三步、下拉菜单、返回类型的借用冲突、截图脚本。改 `table.rs`、`style.rs`、`toolbar.rs`、`detail.rs` 或 `main.rs` 的渲染与选中逻辑前先读。
 
 ## 关键决策
 
 - UI 走 gpui-kit 精确锁版（提交 Cargo.lock）：官方 `gpui` 在 crates.io 停更，Zed 的 `ui` / `theme` crate 是 GPL 且未发布，只读源码不依赖。理由见 `kb/docs/gpui-framework-research.md` §1
 - 数据层：SQLite（rusqlite bundled，WAL，单写线程）+ FTS5 trigram，只索引 user / assistant 文本；正则模式用 memmap2 + memchr + `regex` 扫原始文件，在 JSON 解码后的文本上匹配
 - SDK 与后台 session 不隐藏，用 Kind 列徽章区分
-- bundle id 定为 `com.reorx.agent-session-manager`（M5 打包时用）；数据目录名是 `dev.reorx.AgentSessionManager`，与之不同
+- bundle id 定为 `com.reorx.agent-session-manager`（M5 打包时用）
 
 ## 参考
 
