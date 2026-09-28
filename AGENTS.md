@@ -4,7 +4,7 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格列出本机所有 Cla
 
 ## 当前状态
 
-M0–M3 完成（2026-09-21），下一步 **M4：详情面板**（直接读 transcript，工具调用与 thinking 里的命中才能在详情里看到）。功能状态表在 `kb/docs/product-prd.md`，里程碑定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3。
+M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，方案在 `kb/plans/2026-09-28-m4-detail-panel.md`（第 1 节的待确认项 D1–D6 还没有答复）。功能状态表在 `kb/docs/product-prd.md`，里程碑定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3。
 
 - `crates/core`（`agent-session-core`，无 gpui 依赖）：JSONL 解析、增量 SQLite 索引、FTS5 / 正则搜索、`asm` CLI
 - `crates/app`（`agent-session-manager`）：gpui-kit 界面，保持薄。`store.rs` 后台线程独占 `Db`，启动先读索引出表，再流式增量扫描；`search.rs` 是另一条线程，自带只读连接，文本模式走 FTS、正则模式流式扫描 transcript
@@ -83,3 +83,4 @@ M0–M3 完成（2026-09-21），下一步 **M4：详情面板**（直接读 tra
 - `kb/notes/2026-09-17-m1-core-crate.md` — M1：core 模块划分、关键实现细节、与设计文档的差异、实测数字、Python 比对方法；改 core 前读
 - `kb/notes/2026-09-21-m2-real-data.md` — M2：store 线程与事件流、流式扫描时序、视图状态持久化、相对 PRD 未做的条目；改 `store.rs` / `main.rs` 数据流前读
 - `kb/notes/2026-09-21-m3-search.md` — M3：搜索线程与取代机制、两段式 FTS 的原因与数字、`Matcher`、Matches 列 / 片段 / 详情跳转、实测；改 `search.rs`、`fts.rs`、`regex.rs::scan_sessions` 或搜索界面前读
+- `kb/plans/2026-09-28-m4-detail-panel.md` — M4（详情面板，R6）实现方案：现状、实测、数据通路与类型设计、11 个步骤及各自的行为测试、验收规则；开工前先看第 1 节的待确认项 D1–D6 是否已有答复

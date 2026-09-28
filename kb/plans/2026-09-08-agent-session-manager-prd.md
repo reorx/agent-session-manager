@@ -138,12 +138,15 @@ tags:
 6. subagent：若有 `subagents/`，在头部显示列表（agentType、description），点击在面板内切换查看该 subagent 的消息流。
 7. history-only session：显示 history.jsonl 里的 prompt 列表并提示 transcript 已被清理。
 
-**实现**：
+**实现**（2026-09-28 按 M4 方案 `2026-09-28-m4-detail-panel.md` 修订；标"待确认"的条目对应该方案第 1 节的 D1–D6，用户尚未拍板，这里写的是方案的默认选择）：
 - 布局 `h_resizable("main")` 两个 `resizable_panel`；折叠用 `.visible(false)`。
-- 消息内容**不进 SQLite**（只存 `byte_offset / byte_len`），选中时后台线程按需 mmap 原文件、解析该 session 的全部 user / assistant 记录（单文件最大 30MB，解析 <50ms），tool_result 只取前 N 字节。结果 `Vec<Arc<MessageView>>` 送回前台。
-- 消息流用 gpui-kit `v_virtual_list`（可变高度）或核心 `list`；Markdown 用 `TextView::markdown(id, src).max_lines(5)`，`is_clamped()` 决定是否显示"展开"。
-- Shell 命令用 `shfmt` 重排（若 PATH 有，对应脚本 `format_command`），通过 `std::process::Command` 后台执行。
+- 消息内容**不进 SQLite**，选中时后台线程按需 mmap 原文件、解析该 session 的全部 user / assistant 记录，把 tool_use 与 tool_result 按 `tool_use_id` 配对；每条文本与 tool_result 按上限截断并保留原始字节数 / 行数。读取放在 core（`claude/transcript.rs`），经 `store.rs` 内部的第二条线程进出，不排在索引扫描后面。本机最大单文件已是 70MB（2026-09-28 实测，完整解码一遍 ≤ 117ms），不再是立项时的 30MB。
+- 消息流用 GPUI 核心 `list` + `ListState`（**待确认 D1**）。gpui-kit 的 `v_virtual_list` 要求预先给出每一项的高度，自动换行的消息给不出来。
+- Markdown 用 `TextView::markdown(id, src).max_lines(5)`，`is_clamped()` 决定是否显示"展开"。`TextView` 没有传入搜索高亮的接口，所以搜索时有命中的消息显示带高亮的纯文本，其余显示 Markdown（**待确认 D3**）。`max_lines` 要先布局整篇文档再裁剪，超长正文需先截断。
+- 详情内的命中高亮由 core 的 `Matcher` 在读取时计算，覆盖工具输入 / 输出与 thinking；范围不受 Scope / Labels 限制（**待确认 D5**）。
+- Shell 命令用 `shfmt` 重排（若 PATH 有，对应脚本 `format_command`）。每条命令起一个进程，所以只在展开工具卡片时才格式化，不在读取时做。
 - 导出 Markdown 复用解析结果，格式沿用 `~/Code/agent-sessions` 的中间格式思路。
+- "在终端中打开"不在 M4 内，M4 只做复制命令（**待确认 D6**，同 §5 开放问题 2）。
 
 ### R7 索引与实时更新
 
@@ -236,7 +239,7 @@ agent-session-manager/            Cargo workspace
 | **M1 核心 crate**（2 天）✅ 2026-09-17 | 解析器（fixture JSONL 覆盖全部记录类型）、SQLite schema 与索引器、增量逻辑、FTS 与 LIKE 搜索、正则扫描、`asm` CLI | BDD 测试：`asm list` 与 Python 脚本 `--list` 输出一致；`asm search` 命中数与脚本一致；全量索引本机 <3s（记录：`../notes/2026-09-17-m1-core-crate.md`，61 个场景 + 21 组真实数据逐字比对通过，全量 2.1–2.4s） |
 | **M2 表格 + 过滤 + 排序**（2 天）✅ 2026-09-21 | R1 R2 R3 R5 R12，SessionStore 流式填充 | 冷启动可用、热启动 <300ms、过滤排序一帧内（记录：`../notes/2026-09-21-m2-real-data.md`；热启动 ~200ms 上屏 5488 行、冷索引 3.6–4.0s 流式填充、filter + sort 0–1ms。R1 右键菜单 / 列显隐、R2 多选 / 可搜索 / 自定义区间 / 更多过滤（其中 Kind 多选已于同日补上）、R5 行密度 / 相对时间未做，见笔记"未做"一节） |
 | **M3 搜索**（1.5 天）✅ 2026-09-21 | R4 全部，高亮，Matches 列 | FTS <100ms、正则 <500ms、CJK 两字可搜（记录：`../notes/2026-09-21-m3-search.md`；文本 2–40ms、正则热缓存 240–425ms、两字 CJK 走 LIKE 在 debug app 里 83–137ms / release 14–27ms。正则用 M1 的 memmap 扫描而非 grep-searcher；详情面板里工具调用内的命中要等 M4） |
-| **M4 详情面板**（2 天） | R6，Markdown、折叠、subagent、导出 | 30MB session 打开 <200ms |
+| **M4 详情面板**（2 天）方案已定稿，未开工 | R6，Markdown、折叠、subagent、导出。方案：`2026-09-28-m4-detail-panel.md`，拆成 M4a（直接读 transcript、虚拟化消息流、工具 / thinking 内的命中）与 M4b（工具卡片格式、头部与操作按钮、subagent、Markdown、history-only、导出），拆分本身**待确认 D2** | 立项口径：30MB session 打开 <200ms。方案建议改为"选中行到对话首帧上屏 <200ms，以本机最大的 transcript（现为 70MB）为基准"，**待确认 D4** |
 | **M5 实时与打磨**（1.5 天） | R7 watcher、R8 history、R9、R10、R11、菜单、cargo-bundle、图标 | 新 session 5s 内出现；`.app` 可双击运行 |
 
 开发规范：新功能先写行为测试（core crate 用 fixture JSONL；UI 用 gpui-kit 0.6.1 新增的 `gpui_kit::test` 无头 UI 测试 + `test-support` feature，覆盖 delegate 与交互）；每个里程碑完成后截图归档到 `tmp/<date>-<task>/` 并 commit。
@@ -248,7 +251,7 @@ agent-session-manager/            Cargo workspace
 | gpui-kit / gpui-pre API 在开发期间 breaking | 精确锁版 + Cargo.lock；升级是独立任务；UI 层薄 |
 | Xcode / rustc 版本导致编不过 | M0 首先解决；`runtime_shaders` 作为 Metal Toolchain 替代 |
 | Claude Code transcript schema 变化 | 所有字段 Option、未知 type 忽略、fixture 测试覆盖已知类型、schema version 门控重建 |
-| 单文件 30MB+ 的 session 详情打开慢 | 按需解析 + tool_result 截断 + 后台线程 + 骨架屏 |
+| 单文件 30MB+ 的 session 详情打开慢（本机最大已到 70MB） | 按需解析 + tool_result 截断 + 后台线程 + 骨架屏。实测解析不是瓶颈（70MB ≤ 117ms，大在 base64 图片而非消息条数），预算主要花在首帧布局上 |
 | trigram 对 2 字中文失效 | LIKE 回退（已设计） |
 | FSEvents 丢事件 | 30s 轮询兜底 |
 | `DataTable` 行高固定不够表达 | 两行 48px 设计；确需可变高再换 `v_virtual_list` |
@@ -256,7 +259,8 @@ agent-session-manager/            Cargo workspace
 ## 5. 开放问题（需你拍板）
 
 1. Preview 列默认用 **First prompt** 还是 **Title**（新版本才有 ai-title，覆盖率目前 5/654）？本 PRD 默认 First prompt。
-2. 是否需要 "在终端 resume" 直接拉起终端（涉及 AppleScript 权限），还是仅复制命令？
+2. 是否需要 "在终端 resume" 直接拉起终端（涉及 AppleScript 权限），还是仅复制命令？M4 方案默认仅复制命令，拉起终端留给 M5（D6）。
+3. M4 方案的 6 个待确认项（虚拟列表选型、拆分交付、Markdown 与高亮、验收口径、详情内命中范围、在终端打开）：见 `2026-09-28-m4-detail-panel.md` 第 1 节，每项都写了前因、选项、默认与最晚确认的步骤。
 
 ### 已定决策（2026-09-15）
 
@@ -268,5 +272,6 @@ agent-session-manager/            Cargo workspace
 - [Claude Code Session 数据格式调研](../docs/claude-session-data-format.md)
 - [GPUI 框架调研](../docs/gpui-framework-research.md)
 - [数据层设计](../docs/data-layer-design.md)
+- [M4 详情面板实现方案](2026-09-28-m4-detail-panel.md)
 - 参考实现：`~/Code/scripts/claude_session_search.py`
 - 旧项目：`~/Code/agent-sessions`（transcript → 静态站点 SSG，含 Codex parser）
