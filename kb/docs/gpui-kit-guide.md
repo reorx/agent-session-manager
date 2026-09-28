@@ -120,6 +120,8 @@ Root
 - **Enter 是事件，不是 Action。** `PressEnter` 从订阅里来；本项目用它立即搜索并把焦点交给表格
 - **防抖靠替换任务。** 每次 `Change` 都新建一个"等一会儿再搜索"的任务并存进同一个字段，旧任务随之被 drop 而取消
 
+**窗口刚打开时没有焦点，此时任何快捷键和菜单项都到不了 `AppRoot`。** 动作从有焦点的元素沿祖先向上分发，没有焦点就只到窗口的根。`AppRoot` 创建时把焦点给了表格；规则在 [运行时架构](app-architecture.md) 的"键盘焦点"一节。
+
 **单键快捷键要限定上下文。** 组件各有自己的 key context（表格是 `"DataTable"`，输入框是 `"Input"`），绑定时把它作为第三个参数，快捷键就只在该组件有焦点时生效。`n` / `shift-n` 绑在表格的上下文上，所以在搜索框里打字不会被吞掉。带修饰键的快捷键不受打字影响，可以绑成全局。
 
 ## 命中高亮
@@ -151,7 +153,21 @@ edition 2024 下，`fn f(cx: &App) -> impl IntoElement` 的返回值会捕获 `c
 
 ## 测试
 
-界面层的测试都是纯逻辑，不起窗口：行转换、过滤、排序、视图状态读写、store 的事件序列。
+界面层的测试大部分是纯逻辑，不起窗口：行转换、过滤、排序、视图状态读写、store 与搜索线程的事件序列。
+
+键盘路径是例外。`keyboard_tests.rs` 在无界面的测试窗口里把整个应用跑起来（数据是 core 的 fixture，索引和视图状态在临时目录），按键走 GPUI 自己的分发：同一套绑定、同一套 key context、同一套处理者。不发系统级按键，所以不会打进别的应用，也不需要屏幕。
+
+| 要点 | 说明 |
+|---|---|
+| 依赖 | `[dev-dependencies]` 里给 `gpui-kit` 开 `test-support`，版本同样锁 `=0.6.1` |
+| 测试属性 | `#[gpui_kit::test]`，参数是 `&mut TestAppContext` |
+| 导入 | 逐个导入用到的名字，不写 `use gpui_kit::*` |
+| 操作 | `gpui_kit::test::TestWindowExt`：`press("cmd-f")`、`input("文字")`、`click(id)` |
+| 后台线程 | 先调 `cx.executor().allow_parking()`。测试调度器默认把别的线程发来的唤醒当成"测试不确定"而报错，而 store 和搜索线程是真线程 |
+| 等后台结果 | 真实时间轮询：`run_until_parked()` 后检查条件，不满足就睡 10ms 再看。`wait_for` 走的是测试时钟，等不到真线程 |
+| 定时器 | 防抖这类定时器走测试时钟，用 `cx.executor().advance_clock(..)` 推进 |
+
+这类测试能证明按键到动作到状态的整条路径，证明不了系统把物理按键交给 GPUI 的那一段，也不看像素。
 
 `use gpui_kit::*` 会带进 GPUI 自己的 `test` 属性宏，盖住标准库的。测试模块里要显式写：
 
@@ -170,6 +186,8 @@ use core::prelude::v1::test;
 **不要用固定的 `sleep` 等界面就绪。** 新编译的二进制首次启动要几秒才出窗口，等不够就截到空窗口或上一帧的画面；`set -euo pipefail` 下这类失败经常没有任何输出，看起来就像脚本正常跑完了。做法是让 app 在每一步稳定后打一行标记（`autoplay-search: <step>`），脚本轮询窗口 id 和日志里的标记，超时就报错并指向 app 日志。`screenshot-search.sh` 是这个写法的参考。
 
 **脚本里"挑一个最有代表性的"要从当前可见的行里算，不要从全量数据里算。** 真实数据的分布很不均匀，按 session 数挑"最忙的项目"会稳定挑中某个工具批量产生的 history session，截出来的图说明不了任何功能。autoplay 选项目就是从过滤后的索引向量里取的。
+
+**截图脚本跑出来的耗时不能当性能数字。** 屏幕睡着时 `wake-screen` 会把它唤醒，之后十几秒里查询耗时可以到平时的 4–8 倍（两字搜索 74–87ms 对 17–20ms，正则首次扫描 1.1–2.3s 对 0.26–0.31s）。量耗时用不起窗口的探针：`ASM_BENCH_DB=<索引副本> cargo test -p agent-session-manager real_index_timings -- --ignored --nocapture`，它和 debug app 是同一个构建配置。
 
 启动时 stderr 里的 `error messaging the mach port for IMKCFRunLoopWakeUpReliable` 是 macOS 输入法框架的噪音，无影响。
 
@@ -197,6 +215,7 @@ use core::prelude::v1::test;
 
 - `crates/app/src/main.rs` — `AppRoot`、事件接收、选中保持、Preview 列宽同步、窗口与菜单
 - `crates/app/src/store.rs` — 后台线程与请求 / 事件类型
+- `crates/app/src/keyboard_tests.rs` — 无界面窗口里的键盘测试，新写这类测试时照它的 `launch` / `wait_until` 写
 - `crates/app/src/table.rs` — 表格 delegate
 - `crates/app/src/style.rs` — 色值与主题安装
 - `crates/app/src/toolbar.rs` — 下拉菜单、搜索框与开关、搜索的防抖

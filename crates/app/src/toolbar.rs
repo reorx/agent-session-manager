@@ -18,7 +18,7 @@ pub const TOOLBAR_H: f32 = 36.;
 const CONTROL_H: f32 = 22.;
 const MENU_ITEM_H: f32 = 24.;
 /// Typing pause before a search starts.
-const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
+pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// `Label value ▾` trigger button styled like the mockup.
 fn trigger(id: &'static str, label: &'static str, value: SharedString, cx: &App) -> Button {

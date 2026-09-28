@@ -527,6 +527,47 @@ mod tests {
         assert!(matches!(events.recv_blocking().unwrap(), SearchEvent::Done { seq: s, .. } if s == seq), "a regex scan needs no index");
     }
 
+    /// Not a behavior test: prints how long text searches take on a real index, in the same
+    /// build profile as the debug app. `ASM_BENCH_DB=<index copy> cargo test -p agent-session-manager
+    /// real_index_timings -- --ignored --nocapture`; `ASM_BENCH_QUERIES` = comma-separated queries.
+    #[test]
+    #[ignore]
+    fn real_index_timings() {
+        let db_path = PathBuf::from(std::env::var("ASM_BENCH_DB").expect("ASM_BENCH_DB points to an index"));
+        let queries = std::env::var("ASM_BENCH_QUERIES").unwrap_or_else(|_| "session table,搜索,ab,罕见,的".into());
+        let db = Db::open_read_only(&db_path).unwrap();
+        let sessions = db.list_sessions(&ListFilter { order: Order::UpdatedDesc, ..Default::default() }).unwrap();
+        let targets: Vec<SearchTarget> = sessions
+            .iter()
+            .map(|s| SearchTarget {
+                session_id: s.id.clone(),
+                project_key: s.project_key.clone(),
+                path: s.file_path.clone().filter(|_| !s.history_only()),
+                updated_at: s.updated_at,
+            })
+            .collect();
+        let (searcher, events) = Searcher::spawn(db_path);
+        let f = Fixture { _dir: tempfile::tempdir().unwrap(), searcher, events, targets };
+        let timed = |query: &str, options: SearchOptions| {
+            let runs: Vec<String> = (0..5)
+                .map(|_| {
+                    let wall = Instant::now();
+                    let (_, summary) = run(&f, query, options.clone(), f.targets.clone());
+                    format!("{:.1}/{:.1}", summary.elapsed.as_secs_f64() * 1000.0, wall.elapsed().as_secs_f64() * 1000.0)
+                })
+                .collect();
+            let (hits, summary) = run(&f, query, options.clone(), f.targets.clone());
+            println!("{query:>14}: {} sessions shown, {:?} total, {} matches; worker/wall ms: {}", hits.len(), summary.total_sessions, summary.matches, runs.join("  "));
+        };
+        for query in queries.split(',') {
+            timed(query, SearchOptions::default());
+        }
+        if let Ok(pattern) = std::env::var("ASM_BENCH_REGEX") {
+            timed(&pattern, regex(ScopeSet::default()));
+            timed(&pattern, regex(everything()));
+        }
+    }
+
     #[test]
     fn preview_snippets_are_one_line_start_near_the_match_and_stay_short() {
         let text = format!("{}\nneedle{}", "a".repeat(100), "b".repeat(400));
