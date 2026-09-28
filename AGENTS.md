@@ -45,20 +45,15 @@ M0–M2 完成（2026-09-21），下一步 **M3：搜索接入界面**（目前�
 
 ## GPUI / gpui-kit 编码规则
 
-细节与原因见 `kb/notes/2026-09-16-design-refactor.md`（主题、下拉、覆盖层）和 `kb/notes/2026-09-21-m2-real-data.md`（数据流、选中、排序）。
-
-- 只依赖 `gpui-kit = "=0.6.1"`，**不要**再声明 `gpui` 或 `gpui-pre`，否则两份 GPUI 类型不匹配。`use gpui_kit::*` 拿到 gpui，组件在 `gpui_kit::component::*`，Action 用 `gpui_kit::actions!`
-- **API 以本地源码为准**，调研文档和 docs.rs 都有偏差。查签名直接 grep `~/.cargo/registry/src/index.crates.io-*/{gpui-component-0.6.1,gpui-base-0.6.1,gpui-pre-0.3.5}/src`
-- 数据只经 `store.rs` 进出：UI 发 `StoreRequest`，后台线程回 `StoreEvent`；pump 把积压事件攒成一批、只 recompute 一次。`SessionRow::from_summary` 是 core 类型到界面行的唯一转换点
-- 只有 SQLite 查询和文件扫描走后台；几千行的过滤 / 排序直接在主线程做（5488 行 0–1ms）
-- 表格 delegate 持 `rows: Vec<Arc<Row>>` + `ix: Vec<usize>`（过滤 + 排序后的索引）；`render_td` 只取预格式化的 `SharedString`，不做计算；排序同值按 updated 降序
-- 排序状态以 delegate 的 `self.sort` 为准，由 `sync_column_arrows` 同步到列；程序化排序用 `delegate_mut().set_sort(..)` + `table.refresh(cx)`
-- 选中行按 session id 保持（`AppRoot::after_rows_changed`）；流式扫描进行时不自动选中首行，否则表格会一直滚动去追它
+- 只依赖 `gpui-kit = "=0.6.1"`，**不要**再声明 `gpui` 或 `gpui-pre`，否则两份 GPUI 类型不匹配
+- **API 以本地源码为准**，在线文档和 docs.rs 都有偏差。查签名直接 grep `~/.cargo/registry/src/index.crates.io-*/{gpui-component-0.6.1,gpui-base-0.6.1,gpui-pre-0.3.5}/src`
+- 数据只经 `store.rs` 进出（UI 发 `StoreRequest`，后台线程回 `StoreEvent`）；`SessionRow::from_summary` 是 core 类型到界面行的唯一转换点
+- 只有 SQLite 查询和文件扫描走后台，过滤 / 排序在主线程做；`render_td` 只取预格式化的字符串，不做计算
+- 色值集中在 `style.rs`，不要在别处写 hex
 - `Task` drop 即取消：`cx.spawn` 的结果要 `.detach()` 或存进字段；`this.update(cx, ..)` 返回 Result，用 `.ok()` 不要 unwrap
 - 测试模块里要写 `use core::prelude::v1::test;`，否则 `use gpui_kit::*` 带进的 `test` 宏会让 `#[test]` 展开递归超限
-- 色值集中在 `style.rs`，不要在别处写 hex。改 `theme.colors` 后必须重建 `tokens` 并 `Theme::sync_base`；`table_active` 必须半透明（选中行是盖在单元格上的覆盖层）
-- 带 `cx` 参数的函数返回 `Div` / `AnyElement` 或 `impl IntoElement + use<>`，避免借用冲突
-- 脚本化交互优先加环境变量驱动的 autoplay（`ASM_SPIKE_AUTOPLAY`）；弹出层无法程序化打开，才用 cliclick 点击
+
+其余做法在 `kb/docs/gpui-kit-guide.md`：表格的行高 / 列宽 / 排序状态 / 选中保持、主题三步、下拉菜单、返回类型的借用冲突、截图脚本。改 `table.rs`、`style.rs`、`toolbar.rs` 或 `main.rs` 的渲染与选中逻辑前先读。
 
 ## 关键决策
 
@@ -78,8 +73,9 @@ M0–M2 完成（2026-09-21），下一步 **M3：搜索接入界面**（目前�
 - `kb/docs/product-prd.md` — 产品视角的功能描述与实现状态表；核对功能状态或向他人介绍应用时读
 - `kb/docs/claude-session-data-format.md` — `~/.claude` 数据源与 JSONL 记录类型实测；改解析器、派生字段、history 回退逻辑前读
 - `kb/docs/data-layer-design.md` — DDL 与 serde 类型草案；改 schema、索引器、增量更新、搜索前读
-- `kb/docs/gpui-framework-research.md` — GPUI 心智模型、DataTable、异步加载模式、坑清单；写 GPUI 代码前读
-- `kb/notes/2026-09-15-m0-spike.md` — M0：构建耗时、与调研文档的 API 差异
-- `kb/notes/2026-09-16-design-refactor.md` — 界面重构：设计稿链接、app 模块划分、gpui-kit 用法与坑、与设计稿的已知差异；改界面前读
+- `kb/docs/gpui-kit-guide.md` — 本项目实际采用的 gpui-kit 做法、已核实的 API、绕不开的限制；改界面代码前读
+- `kb/docs/gpui-framework-research.md` — 开工前的调研：GPUI 心智模型、组件目录、选型理由；用到还没用过的组件或重新评估依赖时读
+- `kb/notes/2026-09-15-m0-spike.md` — M0：环境准备与构建耗时
+- `kb/notes/2026-09-16-design-refactor.md` — 界面重构记录：设计稿链接、与设计稿的功能差异
 - `kb/notes/2026-09-17-m1-core-crate.md` — M1：core 模块划分、关键实现细节、与设计文档的差异、实测数字、Python 比对方法；改 core 前读
 - `kb/notes/2026-09-21-m2-real-data.md` — M2：store 线程与事件流、流式扫描时序、视图状态持久化、相对 PRD 未做的条目；改 `store.rs` / `main.rs` 数据流前读

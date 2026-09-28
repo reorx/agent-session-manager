@@ -14,6 +14,8 @@ tags:
 
 信息来源：crates.io API、gpui.rs、docs.rs、Zed 仓库 main 分支（commit `3384317a`，2026-09-08）、longbridge/gpui-kit 仓库（HEAD `294ba34`）、context7、本机两次试编译。所有 API 签名以 main 分支 / gpui-kit 0.6.x 为准；与 crates.io `gpui 0.2.2` 有差异处会标注。
 
+> **本文是开工前的调研**，§4.4 / §4.5 的组件选择与应用骨架是当时的设想。本项目实际采用的做法、已核实的 API 和已知限制见 [gpui-kit 开发指南](gpui-kit-guide.md)，两者不一致时以指南为准。
+>
 > **2026-09-15 修订**：§1.1 原先对 GPUI 归属的表述容易被误读成"GPUI 由 Longbridge 掌握"，已按 crates.io owner 与 Zed 仓库配置逐条核实重写。版本号同步到 gpui-kit 0.6.1 / gpui-pre 0.3.5。
 
 ---
