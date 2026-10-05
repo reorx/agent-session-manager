@@ -8,6 +8,8 @@
 //! `ASM_CLAUDE_DIR`, `ASM_DB` and `ASM_STATE` point the app at other data.
 
 mod detail;
+#[cfg(test)]
+mod keyboard_tests;
 mod model;
 mod search;
 mod settings;
@@ -115,6 +117,20 @@ pub struct AppRoot {
     _autoplay: Option<Task<()>>,
 }
 
+/// Where the app finds its data and keeps its own.
+pub struct AppPaths {
+    pub claude: ClaudeDir,
+    pub db: PathBuf,
+    pub state: PathBuf,
+}
+
+impl AppPaths {
+    /// `ASM_CLAUDE_DIR`, `ASM_DB` and `ASM_STATE`, or their defaults.
+    fn from_env() -> Self {
+        AppPaths { claude: ClaudeDir::from_env(), db: default_db_path(), state: default_state_path() }
+    }
+}
+
 fn scan_summary(report: &ScanReport) -> SharedString {
     let changed = report.files_parsed + report.files_appended + report.files_rebuilt;
     let secs = report.elapsed.as_secs_f64();
@@ -126,8 +142,8 @@ fn scan_summary(report: &ScanReport) -> SharedString {
 }
 
 impl AppRoot {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let state_path = default_state_path();
+    fn new(paths: AppPaths, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let state_path = paths.state;
         let saved = ViewState::load(&state_path);
         let mut delegate = SessionTableDelegate::new();
         delegate.mode = saved.mode;
@@ -162,7 +178,7 @@ impl AppRoot {
             cx.observe(&table, |this, _, cx| this.persist(cx)),
         ];
 
-        let (store, events) = Store::spawn(ClaudeDir::from_env(), default_db_path());
+        let (store, events) = Store::spawn(paths.claude, paths.db.clone());
         let pump = cx.spawn(async move |this, cx| {
             while let Ok(first) = events.recv().await {
                 let mut batch = vec![first];
@@ -175,7 +191,7 @@ impl AppRoot {
             }
         });
 
-        let (searcher, search_events) = Searcher::spawn(default_db_path());
+        let (searcher, search_events) = Searcher::spawn(paths.db);
         let search_pump = cx.spawn(async move |this, cx| {
             while let Ok(first) = search_events.recv().await {
                 let mut batch = vec![first];
@@ -222,6 +238,8 @@ impl AppRoot {
             _debounce: None,
             _autoplay: None,
         };
+        // a fresh window has no focus, and without one no key binding or menu action reaches the app
+        this.focus_table(window, cx);
         if std::env::var_os("ASM_SPIKE_AUTOPLAY").is_some() {
             this._autoplay = Some(this.autoplay(window, cx));
         } else if std::env::var_os("ASM_SEARCH_AUTOPLAY").is_some() {
@@ -610,6 +628,26 @@ impl Render for AppRoot {
     }
 }
 
+fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-\\", ToggleDetail, None),
+        KeyBinding::new("cmd-f", FocusSearch, None),
+        KeyBinding::new("alt-cmd-r", ToggleRegex, None),
+        KeyBinding::new("alt-cmd-c", ToggleCase, None),
+        KeyBinding::new("cmd-g", NextHit, None),
+        KeyBinding::new("cmd-shift-g", PrevHit, None),
+        // plain keys only while the table has the focus, never while typing in the search box
+        KeyBinding::new("n", NextHit, Some("DataTable")),
+        KeyBinding::new("shift-n", PrevHit, Some("DataTable")),
+        KeyBinding::new("cmd-1", Preview1, None),
+        KeyBinding::new("cmd-2", Preview2, None),
+        KeyBinding::new("cmd-3", Preview3, None),
+        KeyBinding::new("cmd-4", Preview4, None),
+        KeyBinding::new("cmd-shift-r", RebuildIndex, None),
+    ]);
+}
+
 fn main() {
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
     app.run(move |cx| {
@@ -617,23 +655,7 @@ fn main() {
         style::install_theme(cx);
         cx.activate(true);
         cx.on_action(|_: &Quit, cx| cx.quit());
-        cx.bind_keys([
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-\\", ToggleDetail, None),
-            KeyBinding::new("cmd-f", FocusSearch, None),
-            KeyBinding::new("alt-cmd-r", ToggleRegex, None),
-            KeyBinding::new("alt-cmd-c", ToggleCase, None),
-            KeyBinding::new("cmd-g", NextHit, None),
-            KeyBinding::new("cmd-shift-g", PrevHit, None),
-            // plain keys only while the table has the focus, never while typing in the search box
-            KeyBinding::new("n", NextHit, Some("DataTable")),
-            KeyBinding::new("shift-n", PrevHit, Some("DataTable")),
-            KeyBinding::new("cmd-1", Preview1, None),
-            KeyBinding::new("cmd-2", Preview2, None),
-            KeyBinding::new("cmd-3", Preview3, None),
-            KeyBinding::new("cmd-4", Preview4, None),
-            KeyBinding::new("cmd-shift-r", RebuildIndex, None),
-        ]);
+        bind_keys(cx);
         cx.set_menus([
             Menu::new("Agent Session Manager").items(vec![MenuItem::action("Quit", Quit)]),
             Menu::new("View").items(vec![
@@ -666,7 +688,7 @@ fn main() {
         };
         cx.spawn(async move |cx| {
             cx.open_window(options, |window, cx| {
-                let view = cx.new(|cx| AppRoot::new(window, cx));
+                let view = cx.new(|cx| AppRoot::new(AppPaths::from_env(), window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })
             .expect("failed to open window");

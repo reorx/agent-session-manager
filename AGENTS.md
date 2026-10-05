@@ -16,7 +16,8 @@ M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，方案在 `kb
 `make help` 列出全部命令，README 有说明。要点：
 
 - `make dev`：编译并启动 app（`run` 会先 pkill 旧实例）。手动起的 app 验证后必须 kill，用 `pgrep -fl agent-session-manager` 检查
-- 测试：`cargo test -p agent-session-core`（1 秒内）、`cargo test -p agent-session-manager`（纯逻辑，不起窗口）、`make test` 全跑
+- 测试：`cargo test -p agent-session-core`（1 秒内）、`cargo test -p agent-session-manager`（纯逻辑，加上无界面窗口里的键盘测试）、`make test` 全跑
+- 量搜索耗时：`ASM_BENCH_DB=<索引副本> cargo test -p agent-session-manager real_index_timings -- --ignored --nocapture`（`ASM_BENCH_QUERIES`、`ASM_BENCH_REGEX` 可换查询）。不要用截图脚本日志里的耗时，刚唤醒屏幕后的数字可以偏高 4–8 倍
 - `make asm ARGS="…"`：跑 `asm` CLI（`index` / `list` / `session` / `search [--index]` / `stats`，参数看 `--help`）
 - `make parity`：在真实 `~/.claude` 上把 `asm` 与 Python 脚本逐字比对；改解析器、清理逻辑、`regex.rs` 或输出格式后必须跑
 - `make screenshot`（autoplay，3 张）、`make screenshot-clicks`（cliclick 真点击，12 张；坐标在 `scripts/screenshot-clicks.sh`，改布局后要校对）、`make screenshot-search`（`ASM_SEARCH_AUTOPLAY=1`，app 自己走完搜索流程，脚本等日志标记后截 7 张）。输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改），跑在真实索引上，但用一次性的 `state.json` 保证从默认视图开始
@@ -45,7 +46,7 @@ M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，方案在 `kb
 
 ## GPUI / gpui-kit 编码规则
 
-- 只依赖 `gpui-kit = "=0.6.1"`，**不要**再声明 `gpui` 或 `gpui-pre`，否则两份 GPUI 类型不匹配
+- 只依赖 `gpui-kit = "=0.6.1"`（`[dev-dependencies]` 里同一版本加开 `test-support`），**不要**再声明 `gpui` 或 `gpui-pre`，否则两份 GPUI 类型不匹配
 - **API 以本地源码为准**，在线文档和 docs.rs 都有偏差。查签名直接 grep `~/.cargo/registry/src/index.crates.io-*/{gpui-component-0.6.1,gpui-base-0.6.1,gpui-pre-0.3.5}/src`
 - 数据只经 `store.rs` 进出（UI 发 `StoreRequest`，后台线程回 `StoreEvent`）；`SessionRow::from_summary` 是 core 类型到界面行的唯一转换点
 - 搜索只经 `search.rs` 进出：每次搜索取代上一次，`on_search_events` 丢弃旧 `seq` 的事件；搜索对象是通过当前过滤条件的 session，所以过滤变化或整表 reload 后要重搜
@@ -53,10 +54,12 @@ M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，方案在 `kb
 - 色值集中在 `style.rs`，不要在别处写 hex
 - `Task` drop 即取消：`cx.spawn` 的结果要 `.detach()` 或存进字段；`this.update(cx, ..)` 返回 Result，用 `.ok()` 不要 unwrap
 - 测试模块里要写 `use core::prelude::v1::test;`，否则 `use gpui_kit::*` 带进的 `test` 宏会让 `#[test]` 展开递归超限
+- 焦点必须始终在应用的某个元素上：没有焦点时快捷键和菜单动作到不了 `AppRoot`。启动时焦点给表格；新增弹出层，关闭后要把焦点还回去
+- 改快捷键、焦点或搜索框的按键处理，先在 `keyboard_tests.rs` 写行为测试（整个应用跑在无界面窗口里，按键走 GPUI 的分发）
 - 程序化 `InputState::set_value` 不发 `InputEvent::Change`，之后要自己触发后续逻辑（如 `AppRoot::set_query` 直接调 `run_search`）
 - **验收时不要用 System Events / osascript / cliclick 发按键，也不要动剪贴板**：全局按键只进最前台的 app，会打进用户正在用的窗口，GPUI 也收不到 cliclick 的按键。交互用环境变量驱动的 autoplay（app 每步稳定后打日志标记，脚本等到标记再按窗口 ID 截图）；cliclick 鼠标点击只用于无法程序化打开的弹出层
 
-其余做法在 `kb/docs/gpui-kit-guide.md`：表格的行高 / 列宽 / 排序状态 / 选中保持、主题三步、下拉菜单、搜索框的事件与 Escape、单键快捷键的上下文、命中高亮的区间规则、滚动定位、返回类型的借用冲突、截图脚本。改 `table.rs`、`style.rs`、`toolbar.rs`、`detail.rs` 或 `main.rs` 的渲染与选中逻辑前先读。
+其余做法在 `kb/docs/gpui-kit-guide.md`：表格的行高 / 列宽 / 排序状态 / 选中保持、主题三步、下拉菜单、搜索框的事件与 Escape、单键快捷键的上下文、命中高亮的区间规则、滚动定位、返回类型的借用冲突、键盘测试的写法、截图脚本。改 `table.rs`、`style.rs`、`toolbar.rs`、`detail.rs` 或 `main.rs` 的渲染与选中逻辑前先读。
 
 ## 关键决策
 
@@ -75,7 +78,7 @@ M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，方案在 `kb
 - `kb/plans/2026-09-08-agent-session-manager-prd.md` — 需求 R1–R13、架构、里程碑 M0–M5、风险；开发任务的总入口
 - `kb/docs/product-prd.md` — 产品视角的功能描述与实现状态表；核对功能状态或向他人介绍应用时读
 - `kb/docs/claude-session-data-format.md` — `~/.claude` 数据源与 JSONL 记录类型实测；改解析器、派生字段、history 回退逻辑前读
-- `kb/docs/app-architecture.md` — 运行时现状：线程划分、冷 / 热启动的事件顺序、扫描后整表重读的原因、搜索何时重跑、选中与视图状态保存的规则；改 `store.rs`、`search.rs`、`main.rs` 的事件处理或 `settings.rs` 前读，加线程或加事件后要更新它
+- `kb/docs/app-architecture.md` — 运行时现状：线程划分、冷 / 热启动的事件顺序、扫描后整表重读的原因、搜索何时重跑、键盘焦点、选中与视图状态保存的规则；改 `store.rs`、`search.rs`、`main.rs` 的事件处理或 `settings.rs` 前读，加线程或加事件后要更新它
 - `kb/docs/data-layer-design.md` — 开工前的设计稿：存储选型论证、DDL、增量索引；类型草案与线程方案已与实现不符（顶部有说明）。改 schema、索引器、增量更新、搜索前读
 - `kb/docs/gpui-kit-guide.md` — 本项目实际采用的 gpui-kit 做法、已核实的 API、绕不开的限制；改界面代码前读
 - `kb/docs/gpui-framework-research.md` — 开工前的调研：GPUI 心智模型、组件目录、选型理由；用到还没用过的组件或重新评估依赖时读
