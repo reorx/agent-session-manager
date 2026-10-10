@@ -11,7 +11,7 @@ use clap::Args;
 pub struct ReaderArgs {
     /// Transcript path, full Claude Code session ID, or unique ID prefix
     pub input: String,
-    /// Write to a new XML-structured text file (.txt) instead of stdout (never overwrite)
+    /// Write to a new text file with XML-style tags (.txt) instead of stdout (never overwrite)
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 }

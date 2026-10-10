@@ -18,7 +18,7 @@ cargo run --release -p agent-session-core --bin asm -- search --index 重构    
 
 ## Transcript Reader
 
-Export a local Claude Code session as compact XML-structured text (`.txt`) for another agent:
+Export a local Claude Code session as compact text (`.txt`) with XML-style delimiters for another agent:
 
 ```sh
 make transcript-reader ARGS="SESSION_ID -o session.txt"
@@ -37,7 +37,7 @@ override the data directory (otherwise `CLAUDE_CONFIG_DIR`, then `~/.claude`). N
 index, network access, or model is needed. `-o` refuses to overwrite existing files.
 
 The export preserves cleaned user prompts and final assistant Markdown inside
-`<user>` / `<agent>` CDATA sections, with plain-text `<turn-summary>` entries immediately
+`<user>` / `<agent>` delimiters, with plain-text `<turn-summary>` entries immediately
 before the corresponding answer. Thinking, tool arguments/results, injected context,
 compact summaries and intermediate commentary are omitted. Images/documents become short
 placeholders. Missing final answers are marked; malformed records produce a stderr warning.
@@ -50,10 +50,11 @@ The document has a `<transcript session_id="…">` root. Each opening and closin
 on its own line, with the body or summary between them. Summaries contain a sentence
 such as `Called Bash 2 times, Read 1 time.`, with tools sorted by name and no nested
 elements. No tool calls means no summary element.
-An agent turn without a final answer has `status="missing"`. CDATA keeps Markdown
-headings and literal XML tags inside the body; embedded `]]>` is split across adjacent
-CDATA sections. Attribute values and summary text are escaped. XML 1.0 forbidden control characters are
-replaced with U+FFFD. Output is UTF-8; use `.txt` (the CLI does not enforce an extension).
+An agent turn without a final answer has `status="missing"`. These tags separate content
+for agents to read; the export is not a strict XML document. Bodies and summaries are raw
+text, with no CDATA wrapper or entity escaping: Markdown, literal tags, `&` and `]]>`
+remain as written. The session ID attribute is escaped to preserve its quoted boundary.
+Unreadable controls are replaced with U+FFFD. Output is UTF-8; use `.txt` (the CLI does not enforce an extension).
 This replaces the previous Markdown export; there is no legacy format switch.
 
 IDs resolve main transcripts; pass a `subagents/*.jsonl` path to export a subagent.

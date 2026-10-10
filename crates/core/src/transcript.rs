@@ -1,4 +1,4 @@
-//! Compact, XML-structured text handoffs from Claude Code transcripts.
+//! Compact text handoffs separated by XML-style tags.
 //! No index or model call is needed. The GUI can call `read_transcript` off-thread.
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
@@ -93,10 +93,10 @@ impl Turn {
                 let times = if *count == 1 { "time" } else { "times" };
                 format!("{name} {count} {times}")
             }).collect::<Vec<_>>().join(", ");
-            output.push_str(&format!("<turn-summary>\nCalled {}.\n</turn-summary>\n", xml_content(&calls)));
+            output.push_str(&format!("<turn-summary>\nCalled {}.\n</turn-summary>\n", sanitize_text(&calls)));
         }
         if self.text.is_empty() {
-            output.push_str("<agent status=\"missing\">\n<![CDATA[[No final response recorded]]]>\n</agent>\n\n");
+            output.push_str("<agent status=\"missing\">\n[No final response recorded]\n</agent>\n\n");
         } else {
             write_body(output, "agent", &self.text);
         }
@@ -135,29 +135,22 @@ impl Turn {
     }
 }
 
-/// XML 1.0 cannot represent these controls, even in CDATA. Replace them visibly.
-fn xml_text(text: &str) -> String {
+/// Keep tabs and line breaks; replace unreadable controls and U+FFFE/U+FFFF visibly.
+fn sanitize_text(text: &str) -> String {
     text.chars().map(|c| match c {
         '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}' => c,
         _ => '\u{fffd}',
     }).collect()
 }
 
-fn xml_content(text: &str) -> String {
-    // Bare carriage returns are normalized to newlines by XML parsers.
-    xml_text(text).replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-        .replace('\r', "&#13;")
-}
-
 fn xml_attribute(text: &str) -> String {
-    xml_content(text)
-        .replace('"', "&quot;").replace('\n', "&#10;").replace('\t', "&#9;")
+    sanitize_text(text).replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        .replace('"', "&quot;").replace('\n', "&#10;").replace('\r', "&#13;").replace('\t', "&#9;")
 }
 
 fn write_body(output: &mut String, role: &str, text: &str) {
-    // Split CDATA instead of escaping Markdown/HTML inside the conversation.
-    let body = xml_text(text).replace("]]>", "]]]]><![CDATA[>");
-    output.push_str(&format!("<{role}>\n<![CDATA[{body}]]>\n</{role}>\n\n"));
+    let body = sanitize_text(text);
+    output.push_str(&format!("<{role}>\n{body}\n</{role}>\n\n"));
 }
 
 fn human_text(record: &Record, content: &Content) -> Option<String> {
@@ -191,8 +184,9 @@ fn human_text(record: &Record, content: &Content) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
 }
 
-/// Read in file order, retaining final answer Markdown inside XML CDATA sections.
-/// Outer whitespace is trimmed; XML-forbidden characters become U+FFFD.
+/// Read in file order, retaining raw Markdown between XML-style delimiter tags.
+/// Bodies and tool summaries are not XML-escaped or wrapped in CDATA.
+/// Outer whitespace is trimmed; unreadable controls become U+FFFD.
 /// Legacy transcripts often lack stop reasons: the last text-only API message before
 /// the next human input / turn-duration marker / EOF is treated as the final answer.
 /// Malformed lines are counted, not silently represented as a complete conversation.

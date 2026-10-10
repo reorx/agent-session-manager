@@ -8,7 +8,7 @@ use clap::Parser;
 mod transcript;
 
 #[derive(Parser)]
-#[command(name = "transcript-reader", version, about = "Export a Claude Code transcript as compact XML-structured text for agent handoffs")]
+#[command(name = "transcript-reader", version, about = "Export a Claude Code transcript as compact text with XML-style tags for agent handoffs")]
 struct Cli {
     /// Claude data directory (default: $CLAUDE_CONFIG_DIR or ~/.claude)
     #[arg(long, env = "ASM_CLAUDE_DIR")]

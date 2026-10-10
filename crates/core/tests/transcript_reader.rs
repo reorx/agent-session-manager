@@ -11,37 +11,37 @@ fn exports_human_inputs_final_answers_and_tool_counts_without_intermediate_noise
     assert_eq!(export.text, r#"<transcript session_id="reader">
 
 <user>
-<![CDATA[修复问题]]>
+修复问题
 </user>
 
 <turn-summary>
 Called Bash 2 times, Read 1 time.
 </turn-summary>
 <agent>
-<![CDATA[完成。
+完成。
 
 ```rust
 let x = 1;
-```]]>
+```
 </agent>
 
 <user>
-<![CDATA[继续]]>
+继续
 </user>
 
 <turn-summary>
 Called Edit 1 time.
 </turn-summary>
 <agent status="missing">
-<![CDATA[[No final response recorded]]]>
+[No final response recorded]
 </agent>
 
 <user>
-<![CDATA[[Image omitted]]]>
+[Image omitted]
 </user>
 
 <agent>
-<![CDATA[这是一张图片。]]>
+这是一张图片。
 </agent>
 
 </transcript>
@@ -103,7 +103,7 @@ fn keeps_completed_turns_before_automatic_continuation_and_marks_aborted_text() 
         "{\"type\":\"assistant\",\"isAbortedMidStream\":true,\"message\":{\"id\":\"c\",\"content\":\"Unfinished text\"}}\n"
     )).unwrap();
     let export = read_transcript(&path).unwrap();
-    assert!(export.text.contains("<agent>\n<![CDATA[First final]]>\n</agent>\n\n<turn-summary>\nCalled Read 1 time.\n</turn-summary>\n<agent status=\"missing\">\n"));
+    assert!(export.text.contains("<agent>\nFirst final\n</agent>\n\n<turn-summary>\nCalled Read 1 time.\n</turn-summary>\n<agent status=\"missing\">\n"));
     assert!(export.text.contains("[No final response recorded]"));
     assert!(!export.text.contains("Unfinished text"));
 }
@@ -118,10 +118,10 @@ fn explicit_subagent_path_keeps_its_dialogue() {
 }
 
 #[test]
-fn headings_xml_tags_and_cdata_delimiters_remain_body_text() {
+fn exports_raw_markdown_tags_and_cdata_delimiters_without_wrappers_or_entities() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("a&\"b.jsonl");
-    let body = "# Heading\n## User\n</user><assistant>fake</assistant> & ]]> tail";
+    let body = "# Heading\n## User\n</user><agent>fake</agent> & &amp; ]]> tail\n```rust\nVec<String>\n```";
     let rows = [
         serde_json::json!({"type": "user", "message": {"content": body}}),
         serde_json::json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "a&\"<b]]>\u{1}\r"}]}}),
@@ -130,14 +130,15 @@ fn headings_xml_tags_and_cdata_delimiters_remain_body_text() {
     std::fs::write(&path, rows.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")).unwrap();
     let export = read_transcript(&path).unwrap();
     assert!(export.text.starts_with("<transcript session_id=\"a&amp;&quot;b\">"));
-    assert!(export.text.contains("<turn-summary>\nCalled a&amp;\"&lt;b]]&gt;�&#13; 1 time.\n</turn-summary>"));
-    assert_eq!(export.text.matches("# Heading\n## User").count(), 2);
-    assert_eq!(export.text.matches("]]]]><![CDATA[> tail").count(), 2);
+    assert!(export.text.contains("<turn-summary>\nCalled a&\"<b]]>�\r 1 time.\n</turn-summary>"));
+    assert!(export.text.contains(&format!("<user>\n{body}\n</user>")));
+    assert!(export.text.contains(&format!("<agent>\n{body}\n</agent>")));
+    assert!(!export.text.contains("<![CDATA["));
     assert!(export.text.ends_with("</transcript>\n"));
 }
 
 #[test]
-fn replaces_xml_forbidden_controls_but_keeps_tabs_and_newlines() {
+fn replaces_unreadable_controls_but_keeps_tabs_and_newlines() {
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("controls.jsonl");
     let record = serde_json::json!({"type": "user", "message": {"content": "before\u{0}\u{1}\u{ffff}\t\nafter"}});

@@ -8,35 +8,35 @@ tags:
 
 # Transcript Reader：XML 标签组织的 TXT
 
-原 Markdown 导出的 `## User` / `## Assistant` 会与对话正文的 Markdown 标题混淆。现在统一输出 UTF-8 TXT，以 XML 结构区分角色和工具摘要；不提供旧 Markdown 模式。压缩规则不变。
+原 Markdown 导出的 `## User` / `## Assistant` 会与对话正文的 Markdown 标题混淆。现在统一输出 UTF-8 TXT，用 XML 风格标签分隔角色和工具摘要，供 agent 阅读，不要求符合标准 XML。压缩规则不变。
 
 ## 格式契约
 
-```xml
+```text
 <transcript session_id="example">
 
 <user>
-<![CDATA[请修复这个问题]]>
+请修复这个问题
 </user>
 
 <turn-summary>
 Called Bash 1 time, Read 3 times.
 </turn-summary>
 <agent>
-<![CDATA[## 修改结果
+## 修改结果
 
-已完成。]]>
+已完成。
 </agent>
 
 </transcript>
 ```
 
 - 外层 `transcript` 带文件 stem 作为 `session_id`。
-- 每个起始和结束标签独占一行，正文或摘要放在两者之间；CDATA 内正文不额外缩进。XML 解码后的元素文本两端会包含排版换行，消费者可去除两端空白。
-- `user` 与 `agent` 按对话顺序排列。正文使用 CDATA，Markdown、HTML、XML 示例都不会变成外层结构。
-- `turn-summary` 紧邻其所属的 `agent` 之前，用一句纯文本列出按名称排序的工具和调用次数，不含子元素；没有调用时省略整个摘要。单次为 `1 time`，多次为 `N times`。
+- 每个起始和结束标签独占一行，正文或摘要放在两者之间，不额外缩进。
+- `user` 与 `agent` 按对话顺序排列。正文直接保留 Markdown、HTML、XML 示例，不加 CDATA，也不转义实体；正文里的同名标签也原样保留，由阅读的 agent 结合上下文理解。
+- `turn-summary` 紧邻其所属的 `agent` 之前，用一句纯文本列出按名称排序的工具和调用次数，不再生成工具子元素；没有调用时省略整个摘要。单次为 `1 time`，多次为 `N times`。
 - 未记录最终回复时，使用 `<agent status="missing">` 和简短文字标记。
-- 正文的 `]]>` 拆分为相邻 CDATA 段，XML 解码后恢复原文。摘要文本中的 `&`、`<`、`>` 使用实体编码，属性中的特殊字符与换行也进行实体编码。XML 1.0 不允许的控制字符用 U+FFFD 替换，保证结构可解析。
+- 正文和摘要中的 `&`、`<`、`>`、`]]>` 原样输出，不做 XML 转义或拆分。只对 session_id 属性中的特殊字符与换行进行实体编码，保持引号边界清晰；不可读控制字符与 U+FFFE/U+FFFF 仍用 U+FFFD 替换。
 - CLI stdout 是此文本，`-o session.txt` 保存新文件；扩展名不强制限制，仍拒绝覆盖已有文件。
 - core API 改为 `transcript::read_transcript` → `model::TranscriptExport { text, skipped_lines }`，GUI 未来复用此接口。
 
@@ -51,6 +51,8 @@ make asm ARGS="transcript SESSION_ID" > session.txt
 二进制位于 `dist/transcript-reader`，不纳入 Git。现有全局安装需重新 `cargo install --path crates/core --bin transcript-reader` 才会更新。
 
 ## 验证
+
+以下记录前几版的格式及验收过程；当前纯文本格式以顶部契约为准。
 
 先更新格式行为测试，确认旧 API 不能满足测试，再实现；新增标题/XML/CDATA 冲突和非法控制字符用例。core 全部 79 个测试通过（导出相关 8 个）。实际导出验收由 Herdr 独立 Codex tab 执行，产物归档在 `tmp/2026-10-10-transcript-reader-xml/`。
 
@@ -77,3 +79,11 @@ make asm ARGS="transcript SESSION_ID" > session.txt
 先更新行为测试，确认旧排版有 3 项失败，再修改输出。core 79 个测试通过。release CLI 的 fixture、真实会话、特殊字符及控制字符样本均可被标准库 XML 解析；与原归档比较，正文仅新增两端排版换行，摘要仍无子元素，stdout 和文件输出一致。已阅读 fixture 和真实导出。产物在 `tmp/2026-10-10-transcript-reader-lines/`，已重建 `dist/transcript-reader`。
 
 本次 `make parity` 为 20/21 通过，唯一失败仍是已登记的空 session 排序差异；日志在上述目录的 `parity.log`。
+
+## 移除 CDATA，标签只作分隔
+
+用户明确导出供 agent 阅读，只需标签分隔，不要求标准 XML。去掉所有生成的 CDATA 包裹和结束符拆分，正文和工具摘要原样保留 `<`、`&`、`]]>`、标签示例及 Markdown；继续保持结构标签独占一行。session_id 属性仍转义，不可读控制字符仍替换 U+FFFD。
+
+先更新行为测试，确认旧实现有 3 项失败，再简化导出实现。core 79 个测试通过，README、CLI 帮助、Makefile 与 AGENTS.md 已同步说明新格式；`make parity` 仍为 20/21 通过，唯一差异是已登记的空 session 排序，日志在 `tmp/2026-10-10-transcript-reader-plain/parity.log`。
+
+验收前 context 为 32%，按项目规则使用 Herdr 新 Codex tab 做独立 CLI 验收。76 项检查、44 次命令调用通过：fixture 逐字节一致，真实会话的 2 条用户输入、2 条回复、61 次工具调用与旧导出的解码内容一致；特殊字符、字面 CDATA 示例、缺失回复、控制字符、两个 CLI 入口及 stdout/文件输出均符合契约，拒绝覆盖已有文件。已阅读 fixture、真实导出与特殊字符样本。脚本、导出、日志及 `report.json` 归档在上述目录，未启动 GUI、浏览器或模拟器。

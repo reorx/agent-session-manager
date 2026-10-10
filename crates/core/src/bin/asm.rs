@@ -38,7 +38,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Export a transcript as compact XML-structured text for agent handoffs
+    /// Export a transcript as compact text with XML-style tags for agent handoffs
     Transcript(transcript::ReaderArgs),
     /// Bring the index up to date (or rebuild it from scratch)
     Index {

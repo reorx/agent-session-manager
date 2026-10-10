@@ -64,7 +64,7 @@ asm: ## Run the asm CLI (release build), e.g. make asm ARGS="list -d 7"
 	@cargo build --release -p $(CORE) --bin asm -q
 	@$(TARGET_DIR)/release/asm $(ARGS)
 
-transcript-reader: ## Export compact XML-structured text, e.g. make transcript-reader ARGS="SESSION_ID -o session.txt"
+transcript-reader: ## Export compact text with XML-style tags, e.g. make transcript-reader ARGS="SESSION_ID -o session.txt"
 	@cargo build --release -p $(CORE) --bin transcript-reader -q
 	@$(TARGET_DIR)/release/transcript-reader $(ARGS)
 
