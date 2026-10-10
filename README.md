@@ -37,7 +37,7 @@ override the data directory (otherwise `CLAUDE_CONFIG_DIR`, then `~/.claude`). N
 index, network access, or model is needed. `-o` refuses to overwrite existing files.
 
 The export preserves cleaned user prompts and final assistant Markdown inside
-`<user>` / `<assistant>` CDATA sections, with structured `<tool_calls>` entries immediately
+`<user>` / `<agent>` CDATA sections, with plain-text `<turn-summary>` entries immediately
 before the corresponding answer. Thinking, tool arguments/results, injected context,
 compact summaries and intermediate commentary are omitted. Images/documents become short
 placeholders. Missing final answers are marked; malformed records produce a stderr warning.
@@ -46,11 +46,12 @@ For older records without stop reasons, the last text-only API message before th
 human prompt, turn-end marker or EOF is used. Consecutive blocks with the same message ID
 are kept together. This is deterministic filtering, not an AI-generated summary or a token cap.
 
-The document has a `<transcript session_id="…">` root. Each `<tool_calls>` contains
-`<tool name="Read" count="3" />` entries. No tool calls means no summary element.
-An assistant turn without a final answer has `status="missing"`. CDATA keeps Markdown
+The document has a `<transcript session_id="…">` root. Each summary is a sentence such as
+`<turn-summary>Called Bash 2 times, Read 1 time.</turn-summary>`, with tools sorted by name
+and no nested elements. No tool calls means no summary element.
+An agent turn without a final answer has `status="missing"`. CDATA keeps Markdown
 headings and literal XML tags inside the body; embedded `]]>` is split across adjacent
-CDATA sections. Attribute values are escaped. XML 1.0 forbidden control characters are
+CDATA sections. Attribute values and summary text are escaped. XML 1.0 forbidden control characters are
 replaced with U+FFFD. Output is UTF-8; use `.txt` (the CLI does not enforce an extension).
 This replaces the previous Markdown export; there is no legacy format switch.
 

@@ -89,16 +89,16 @@ impl Turn {
             return;
         }
         if !self.tools.is_empty() {
-            output.push_str("<tool_calls>\n");
-            for (name, count) in &self.tools {
-                output.push_str(&format!("  <tool name=\"{}\" count=\"{count}\" />\n", xml_attribute(name)));
-            }
-            output.push_str("</tool_calls>\n");
+            let calls = self.tools.iter().map(|(name, count)| {
+                let times = if *count == 1 { "time" } else { "times" };
+                format!("{name} {count} {times}")
+            }).collect::<Vec<_>>().join(", ");
+            output.push_str(&format!("<turn-summary>Called {}.</turn-summary>\n", xml_content(&calls)));
         }
         if self.text.is_empty() {
-            output.push_str("<assistant status=\"missing\"><![CDATA[[No final response recorded]]]></assistant>\n\n");
+            output.push_str("<agent status=\"missing\"><![CDATA[[No final response recorded]]]></agent>\n\n");
         } else {
-            write_body(output, "assistant", &self.text);
+            write_body(output, "agent", &self.text);
         }
         *self = Self::default();
     }
@@ -143,9 +143,15 @@ fn xml_text(text: &str) -> String {
     }).collect()
 }
 
-fn xml_attribute(text: &str) -> String {
+fn xml_content(text: &str) -> String {
+    // Bare carriage returns are normalized to newlines by XML parsers.
     xml_text(text).replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-        .replace('"', "&quot;").replace('\n', "&#10;").replace('\r', "&#13;").replace('\t', "&#9;")
+        .replace('\r', "&#13;")
+}
+
+fn xml_attribute(text: &str) -> String {
+    xml_content(text)
+        .replace('"', "&quot;").replace('\n', "&#10;").replace('\t', "&#9;")
 }
 
 fn write_body(output: &mut String, role: &str, text: &str) {

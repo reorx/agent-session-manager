@@ -12,26 +12,21 @@ fn exports_human_inputs_final_answers_and_tool_counts_without_intermediate_noise
 
 <user><![CDATA[修复问题]]></user>
 
-<tool_calls>
-  <tool name="Bash" count="2" />
-  <tool name="Read" count="1" />
-</tool_calls>
-<assistant><![CDATA[完成。
+<turn-summary>Called Bash 2 times, Read 1 time.</turn-summary>
+<agent><![CDATA[完成。
 
 ```rust
 let x = 1;
-```]]></assistant>
+```]]></agent>
 
 <user><![CDATA[继续]]></user>
 
-<tool_calls>
-  <tool name="Edit" count="1" />
-</tool_calls>
-<assistant status="missing"><![CDATA[[No final response recorded]]]></assistant>
+<turn-summary>Called Edit 1 time.</turn-summary>
+<agent status="missing"><![CDATA[[No final response recorded]]]></agent>
 
 <user><![CDATA[[Image omitted]]]></user>
 
-<assistant><![CDATA[这是一张图片。]]></assistant>
+<agent><![CDATA[这是一张图片。]]></agent>
 
 </transcript>
 "#);
@@ -92,7 +87,7 @@ fn keeps_completed_turns_before_automatic_continuation_and_marks_aborted_text() 
         "{\"type\":\"assistant\",\"isAbortedMidStream\":true,\"message\":{\"id\":\"c\",\"content\":\"Unfinished text\"}}\n"
     )).unwrap();
     let export = read_transcript(&path).unwrap();
-    assert!(export.text.contains("First final"));
+    assert!(export.text.contains("<agent><![CDATA[First final]]></agent>\n\n<turn-summary>Called Read 1 time.</turn-summary>\n<agent status=\"missing\">"));
     assert!(export.text.contains("[No final response recorded]"));
     assert!(!export.text.contains("Unfinished text"));
 }
@@ -103,7 +98,7 @@ fn explicit_subagent_path_keeps_its_dialogue() {
     let path = sb.transcript(ALPHA, S1).with_extension("").join("subagents/agent-a1b2c3.jsonl");
     let export = read_transcript(&path).unwrap();
     assert!(export.text.contains("<user>"));
-    assert!(export.text.contains("<assistant>"));
+    assert!(export.text.contains("<agent>"));
 }
 
 #[test]
@@ -113,13 +108,13 @@ fn headings_xml_tags_and_cdata_delimiters_remain_body_text() {
     let body = "# Heading\n## User\n</user><assistant>fake</assistant> & ]]> tail";
     let rows = [
         serde_json::json!({"type": "user", "message": {"content": body}}),
-        serde_json::json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "a&\"<b"}]}}),
+        serde_json::json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "a&\"<b]]>\u{1}\r"}]}}),
         serde_json::json!({"type": "assistant", "message": {"content": body}}),
     ];
     std::fs::write(&path, rows.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")).unwrap();
     let export = read_transcript(&path).unwrap();
     assert!(export.text.starts_with("<transcript session_id=\"a&amp;&quot;b\">"));
-    assert!(export.text.contains("name=\"a&amp;&quot;&lt;b\" count=\"1\""));
+    assert!(export.text.contains("<turn-summary>Called a&amp;\"&lt;b]]&gt;�&#13; 1 time.</turn-summary>"));
     assert_eq!(export.text.matches("# Heading\n## User").count(), 2);
     assert_eq!(export.text.matches("]]]]><![CDATA[> tail").count(), 2);
     assert!(export.text.ends_with("</transcript>\n"));
