@@ -68,10 +68,10 @@ transcript-reader: ## Export compact Markdown, e.g. make transcript-reader ARGS=
 	@cargo build --release -p $(CORE) --bin transcript-reader -q
 	@$(TARGET_DIR)/release/transcript-reader $(ARGS)
 
-build-transcript-reader: ## Build a standalone release binary at bin/transcript-reader
+build-transcript-reader: ## Build a standalone release binary at dist/transcript-reader
 	@cargo build --release -p $(CORE) --bin transcript-reader -q
-	@mkdir -p bin
-	@install -m 755 "$(TARGET_DIR)/release/transcript-reader" bin/transcript-reader
+	@mkdir -p dist
+	@install -m 755 "$(TARGET_DIR)/release/transcript-reader" dist/transcript-reader
 
 parity: ## Diff asm against the Python reference script on the real ~/.claude (outputs in tmp/<date>-python-parity)
 	@cargo build --release -p $(CORE) --bin asm -q

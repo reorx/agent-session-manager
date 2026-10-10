@@ -25,7 +25,7 @@ make transcript-reader ARGS="SESSION_ID -o session.md"
 make asm ARGS="transcript SESSION_ID" > session.md
 # Build a portable binary in this project (macOS Apple Silicon):
 make build-transcript-reader
-./bin/transcript-reader SESSION_ID -o session.md
+./dist/transcript-reader SESSION_ID -o session.md
 # Or install the standalone command:
 cargo install --path crates/core --bin transcript-reader
 transcript-reader 1cbab92c -o session.md
