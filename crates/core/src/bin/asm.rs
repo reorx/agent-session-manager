@@ -17,6 +17,9 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 const PROMPT_LINE_LEN: usize = 240;
 
+#[path = "support/transcript.rs"]
+mod transcript;
+
 #[derive(Parser)]
 #[command(name = "asm", version, about = "Index, list and search Claude Code sessions")]
 struct Cli {
@@ -35,6 +38,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Export a transcript as compact Markdown for agent handoffs
+    Transcript(transcript::ReaderArgs),
     /// Bring the index up to date (or rebuild it from scratch)
     Index {
         #[arg(long)]
@@ -162,6 +167,7 @@ fn main() -> ExitCode {
     let db_path = cli.db.clone().unwrap_or_else(default_db_path);
     let mut app = App { claude, db_path, pal: Palette::new(color), out: std::io::BufWriter::new(std::io::stdout()) };
     let result = match cli.cmd {
+        Cmd::Transcript(args) => transcript::run(args, &app.claude, &mut app.out),
         Cmd::Index { rebuild } => app.index(rebuild),
         Cmd::List(args) => app.list(args),
         Cmd::Session { id, limit, no_scan } => app.session(&id, limit, no_scan),

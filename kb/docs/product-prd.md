@@ -54,6 +54,7 @@ tags:
 | 实时更新 | ⬜ | |
 | 快捷键与菜单 | ✅ 部分 | 退出、折叠详情面板、`cmd-f`、`cmd-1..4`、`cmd-shift-r` 重建索引；View 菜单可显示 / 隐藏没有 prompt 的空 session。启动后焦点在表格上，不需要先点击就能用快捷键 |
 | 设置与状态持久化 | ✅ 视图状态 / ⬜ 设置页 | 项目与时间过滤、排序、Preview 模式、空 session 开关、详情面板开合、选中行存 `state.json`，下次启动恢复 |
+| 精简 Markdown 导出 | ✅ CLI / ⬜ GUI | 2026-10-10 完成 Transcript Reader：通过 Session ID、唯一前缀或文件路径导出用户输入、最终回复与工具计数，去掉思考和工具结果；GUI 待 M4 复用 core 接口，见 `../notes/2026-10-10-transcript-reader.md` |
 
 ## 3. 产品架构
 

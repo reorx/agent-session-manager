@@ -511,5 +511,26 @@ def main():
     print(f'wrote {OUT}')
 
 
+# Kept outside the discovery tree so existing index/parity fixtures stay unchanged.
+reader_rows = [
+    {'type': 'user', 'message': {'content': '<system-reminder>noise</system-reminder>修复问题'}},
+    {'type': 'assistant', 'message': {'content': [{'type': 'thinking', 'thinking': 'private'}, {'type': 'text', 'text': '我先检查'}, {'type': 'tool_use', 'name': 'Read', 'id': 'r1'}]}},
+    {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'content': 'huge output'}, {'type': 'text', 'text': 'tool noise'}]}},
+    {'type': 'assistant', 'uuid': 'tool-1', 'message': {'content': [{'type': 'tool_use', 'name': 'Bash', 'id': 'b1'}, {'type': 'tool_use', 'name': 'Bash', 'id': 'b2'}]}},
+    {'type': 'assistant', 'uuid': 'tool-1', 'message': {'content': [{'type': 'tool_use', 'name': 'Bash', 'id': 'b1'}, {'type': 'tool_use', 'name': 'Bash', 'id': 'b2'}]}},
+    {'type': 'user', 'isMeta': True, 'message': {'content': 'injected skill'}},
+    {'type': 'user', 'origin': {'kind': 'task-notification'}, 'message': {'content': 'background result'}},
+    {'type': 'user', 'isCompactSummary': True, 'message': {'content': 'compacted context'}},
+    {'type': 'assistant', 'message': {'id': 'final1', 'content': [{'type': 'text', 'text': '完成。'}]}},
+    {'type': 'assistant', 'message': {'id': 'final1', 'content': [{'type': 'text', 'text': '```rust\nlet x = 1;\n```'}], 'stop_reason': 'end_turn'}},
+    {'type': 'system', 'subtype': 'turn_duration'},
+    {'type': 'user', 'message': {'content': '继续'}},
+    {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': '正在修改'}, {'type': 'tool_use', 'name': 'Edit'}]}},
+    'broken json',
+    {'type': 'user', 'message': {'content': [{'type': 'image', 'source': {'data': 'base64-noise'}}]}},
+    {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': '这是一张图片。'}]}},
+]
+
 if __name__ == '__main__':
     main()
+    write_jsonl(OUT.parent / 'reader.jsonl', reader_rows)

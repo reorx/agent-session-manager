@@ -185,3 +185,11 @@ pub struct MessageRow {
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
 }
+
+/// A compact transcript handoff and diagnostics for its caller (CLI or GUI).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkdownExport {
+    pub markdown: String,
+    /// Malformed JSON records, including a partially written final line.
+    pub skipped_lines: usize,
+}

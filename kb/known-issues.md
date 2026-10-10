@@ -2,6 +2,12 @@
 
 > 当前 app 已知、待后续处理的问题：缺陷、简化实现、未验收项、待建流程。只反映最新状态——解决了就删掉条目，经过记到 `kb/sessions/`。
 
+## 回归验证：parity 在没有开始时间的空 session 上因排序差异失败
+
+- 记录：2026-10-10（`kb/notes/2026-10-10-transcript-reader.md`）
+- `make parity` 的 `list-code-30d` 比对出现两组空 session 顺序相反，内容相同，其他 20 组通过。没有 started_at 的并列项在 Rust 和 Python 中排序不同，导致整套验证返回失败；本次未改排序实现。
+- 处理方向：明确无 started_at 的并列排序契约，统一参考脚本与 Rust，或只在 parity 比较中归一化该类并列项。原始差异在 `tmp/2026-10-10-python-parity/list-code-30d.diff`。
+
 ## CLI：`asm --db` 帮助文本里的默认索引路径与实际不符
 
 - 记录：2026-09-28（精简 AGENTS.md 时核对代码发现）

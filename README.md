@@ -16,6 +16,37 @@ cargo run --release -p agent-session-core --bin asm -- search --index 重构    
 
 `ASM_CLAUDE_DIR` / `ASM_DB` override the data directory and index location; `NO_COLOR=1` disables colors.
 
+## Transcript Reader
+
+Export a local Claude Code session as compact Markdown for another agent:
+
+```sh
+make transcript-reader ARGS="SESSION_ID -o session.md"
+make asm ARGS="transcript SESSION_ID" > session.md
+# Or install the standalone command:
+cargo install --path crates/core --bin transcript-reader
+transcript-reader 1cbab92c -o session.md
+transcript-reader /path/to/transcript.jsonl > session.md
+```
+
+Accepts full session IDs, unique prefixes, or JSONL paths. `--claude-dir` / `ASM_CLAUDE_DIR`
+override the data directory (otherwise `CLAUDE_CONFIG_DIR`, then `~/.claude`). No SQLite
+index, network access, or model is needed. `-o` refuses to overwrite existing files.
+
+The export preserves cleaned user prompts and final assistant Markdown, with one tool
+count summary before each answer. Thinking, tool arguments/results, injected context,
+compact summaries and intermediate commentary are omitted. Images/documents become short
+placeholders. Missing final answers are marked; malformed records produce a stderr warning.
+Explicitly completed answers are kept even when an automatic continuation follows.
+For older records without stop reasons, the last text-only API message before the next
+human prompt, turn-end marker or EOF is used. Consecutive blocks with the same message ID
+are kept together. This is deterministic filtering, not an AI-generated summary or a token cap.
+
+IDs resolve main transcripts; pass a `subagents/*.jsonl` path to export a subagent.
+History-only sessions cannot be exported. Records stay in file order (no conversation-tree
+branch selection). The reusable `transcript::read_markdown` API lives in the core crate;
+a GUI export action can call it on a background thread.
+
 ## Requirements
 
 - macOS on Apple Silicon, Xcode 26 with the Metal Toolchain component

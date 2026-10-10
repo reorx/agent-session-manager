@@ -1,0 +1,237 @@
+//! Compact, deterministic Markdown handoffs from Claude Code transcripts.
+//! No index or model call is needed. The GUI can call `read_markdown` off-thread.
+use std::collections::{BTreeMap, HashSet};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+use serde_json::value::RawValue;
+
+use crate::claude::clean::clean_prompt;
+use crate::claude::discover::discover_transcripts;
+use crate::claude::parse::{Content, parse_content, user_text};
+use crate::claude::paths::{ClaudeDir, expand_user};
+use crate::model::MarkdownExport;
+
+/// Resolve a local file, exact session ID, or unambiguous ID prefix.
+/// Discovery is read-only; history-only sessions have no transcript to export.
+pub fn resolve_transcript(claude: &ClaudeDir, input: &str) -> Result<PathBuf> {
+    let path = expand_user(input);
+    if path.is_file() {
+        return Ok(path);
+    }
+    if input.contains('/') || input.ends_with(".jsonl") {
+        bail!("transcript file not found: {}", path.display());
+    }
+    if input.is_empty() {
+        bail!("transcript ID must not be empty");
+    }
+    let files = discover_transcripts(claude)?;
+    let exact: Vec<_> = files.iter().filter(|f| f.session_id == input).collect();
+    let hits = if exact.is_empty() {
+        files.iter().filter(|f| f.session_id.starts_with(input)).collect()
+    } else {
+        exact
+    };
+    match hits.as_slice() {
+        [file] => Ok(file.path.clone()),
+        [] => bail!("no transcript matches '{input}' in {} (history-only sessions cannot be exported)", claude.projects_dir().display()),
+        _ => bail!("ambiguous transcript ID '{input}'; use a full ID or file path:\n{}", hits.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>().join("\n")),
+    }
+}
+
+#[derive(Deserialize)]
+struct Record<'a> {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    uuid: Option<String>,
+    subtype: Option<String>,
+    #[serde(rename = "isMeta", default)]
+    is_meta: bool,
+    #[serde(rename = "isSidechain", default)]
+    is_sidechain: bool,
+    #[serde(rename = "isCompactSummary", default)]
+    is_compact_summary: bool,
+    #[serde(rename = "isAbortedMidStream", default)]
+    is_aborted: bool,
+    origin: Option<Origin>,
+    #[serde(borrow)]
+    message: Option<Message<'a>>,
+}
+
+#[derive(Deserialize)]
+struct Origin {
+    kind: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Message<'a> {
+    id: Option<String>,
+    stop_reason: Option<String>,
+    #[serde(borrow)]
+    content: Option<&'a RawValue>,
+}
+
+#[derive(Default)]
+struct Turn {
+    text: String,
+    message_id: Option<String>,
+    tools: BTreeMap<String, usize>,
+    started: bool,
+    completed: bool,
+}
+
+impl Turn {
+    fn finish(&mut self, markdown: &mut String) {
+        if !self.started {
+            return;
+        }
+        markdown.push_str("## Assistant\n\n");
+        if !self.tools.is_empty() {
+            let tools = self.tools.iter().map(|(name, count)| format!("{} ×{count}", name.replace(['\n', '\r'], " "))).collect::<Vec<_>>().join(", ");
+            markdown.push_str(&format!("> Tools: {tools}\n\n"));
+        }
+        if self.text.is_empty() {
+            markdown.push_str("*[No final response recorded]*\n\n");
+        } else {
+            markdown.push_str(&self.text);
+            markdown.push_str("\n\n");
+        }
+        *self = Self::default();
+    }
+
+    fn assistant(&mut self, message: &Message, content: &Content) {
+        self.started = true;
+        let mut has_tools = false;
+        if let Content::Blocks(blocks) = content {
+            for block in blocks {
+                if block.kind.as_deref() == Some("tool_use") {
+                    has_tools = true;
+                    *self.tools.entry(block.name.as_deref().unwrap_or("unknown").to_owned()).or_default() += 1;
+                }
+            }
+        }
+        // Text accompanying a tool call is commentary, not the final response.
+        if has_tools || message.stop_reason.as_deref() == Some("tool_use") {
+            self.text.clear();
+            self.message_id = None;
+            return;
+        }
+        if let Some(text) = user_text(content).filter(|text| !text.trim().is_empty()) {
+            // Claude can write multiple content blocks of one API message as separate
+            // JSONL records. Preserve those blocks, but replace earlier API messages.
+            if message.id.is_some() && message.id == self.message_id && !self.text.is_empty() {
+                self.text.push_str("\n\n");
+                self.text.push_str(text.trim());
+            } else {
+                self.text = text.trim().to_owned();
+            }
+            self.message_id = message.id.clone();
+            self.completed = message.stop_reason.as_deref() == Some("end_turn");
+        }
+    }
+}
+
+fn human_text(record: &Record, content: &Content) -> Option<String> {
+    if record.is_meta || record.is_compact_summary
+        || record.origin.as_ref().and_then(|o| o.kind.as_deref()).is_some_and(|kind| kind != "human") {
+        return None;
+    }
+    if let Content::Blocks(blocks) = content {
+        if blocks.iter().any(|b| b.kind.as_deref() == Some("tool_result")) {
+            return None;
+        }
+    }
+    let text = user_text(content).unwrap_or_default();
+    if text.starts_with("[Image: source:") {
+        return None;
+    }
+    let mut text = clean_prompt(&text);
+    if let Content::Blocks(blocks) = content {
+        for block in blocks {
+            let placeholder = match block.kind.as_deref() {
+                Some("image") => "[Image omitted]",
+                Some("document") => "[Document omitted]",
+                _ => continue,
+            };
+            if !text.is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str(placeholder);
+        }
+    }
+    if text.is_empty() { None } else { Some(text) }
+}
+
+/// Read in file order, preserving final answer Markdown verbatim (apart from outer whitespace).
+/// Legacy transcripts often lack stop reasons: the last text-only API message before
+/// the next human input / turn-duration marker / EOF is treated as the final answer.
+/// Malformed lines are counted, not silently represented as a complete conversation.
+pub fn read_markdown(path: &Path) -> Result<MarkdownExport> {
+    let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let id = path.file_stem().unwrap_or_default().to_string_lossy();
+    let mut export = MarkdownExport { markdown: format!("# Session {}\n\n", id.replace(['\n', '\r'], " ")), skipped_lines: 0 };
+    let mut turn = Turn::default();
+    let is_subagent = path.parent().and_then(Path::file_name).is_some_and(|name| name == "subagents");
+    let mut seen = HashSet::new();
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            break;
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let record = match serde_json::from_slice::<Record>(&line) {
+            Ok(record) => record,
+            Err(_) => {
+                export.skipped_lines += 1;
+                continue;
+            }
+        };
+        if record.is_sidechain && !is_subagent {
+            continue;
+        }
+        if let Some(uuid) = record.uuid.as_ref().filter(|id| !id.is_empty()) {
+            if !seen.insert(uuid.clone()) {
+                continue;
+            }
+        }
+        if record.kind.as_deref() == Some("system") && record.subtype.as_deref() == Some("turn_duration") {
+            turn.finish(&mut export.markdown);
+            continue;
+        }
+        let Some(message) = &record.message else { continue };
+        let Some(raw) = message.content else { continue };
+        let content = parse_content(raw);
+        match record.kind.as_deref() {
+            Some("user") => {
+                if let Some(text) = human_text(&record, &content) {
+                    turn.finish(&mut export.markdown);
+                    export.markdown.push_str("## User\n\n");
+                    export.markdown.push_str(&text);
+                    export.markdown.push_str("\n\n");
+                }
+            }
+            Some("assistant") => {
+                if turn.completed && (message.id.is_none() || message.id != turn.message_id) {
+                    turn.finish(&mut export.markdown);
+                }
+                if record.is_aborted {
+                    turn.started = true;
+                    turn.text.clear();
+                    turn.completed = false;
+                } else {
+                    turn.assistant(message, &content);
+                }
+            }
+            _ => {}
+        }
+    }
+    turn.finish(&mut export.markdown);
+    Ok(export)
+}

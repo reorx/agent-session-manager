@@ -8,3 +8,4 @@ pub mod format;
 pub mod index;
 pub mod model;
 pub mod search;
+pub mod transcript;

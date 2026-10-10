@@ -14,6 +14,10 @@ path = "src/lib.rs"
 name = "asm"
 path = "src/bin/asm.rs"
 
+[[bin]]
+name = "transcript-reader"
+path = "src/bin/transcript-reader.rs"
+
 [dependencies]
 anyhow.workspace = true
 chrono = "0.4.45"
