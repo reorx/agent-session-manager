@@ -303,10 +303,10 @@ pub struct ToolResult {
 
 - 读取线程按需读 `history.jsonl`，取该 session 的 prompt 列表，显示为只有 user 条目的消息流，顶部提示 transcript 已被清理
 
-**步骤 11：导出 Markdown**（R6.3）
+**步骤 11：导出 TXT**（R6.3；2026-10-10 按用户要求改用 XML 标签区分角色）
 
-- core：`transcript::to_markdown(&Transcript)`，行为测试覆盖四种条目
-- 界面：`cx.prompt_for_new_path` 选位置后在读取线程写文件
+- core 已实现：`transcript::read_transcript(path)` 返回 `TranscriptExport { text, skipped_lines }`，保留用户输入、最终回复及工具计数；格式和边界测试见 `../notes/2026-10-10-transcript-reader-xml.md`。
+- 界面：`cx.prompt_for_new_path` 选 `.txt` 位置后在读取线程调用导出接口并写文件，有 skipped_lines 时提示；不要从当前消息展示窗口生成导出。
 
 ### 每段完成后的文档
 

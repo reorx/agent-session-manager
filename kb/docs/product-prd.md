@@ -54,7 +54,7 @@ tags:
 | 实时更新 | ⬜ | |
 | 快捷键与菜单 | ✅ 部分 | 退出、折叠详情面板、`cmd-f`、`cmd-1..4`、`cmd-shift-r` 重建索引；View 菜单可显示 / 隐藏没有 prompt 的空 session。启动后焦点在表格上，不需要先点击就能用快捷键 |
 | 设置与状态持久化 | ✅ 视图状态 / ⬜ 设置页 | 项目与时间过滤、排序、Preview 模式、空 session 开关、详情面板开合、选中行存 `state.json`，下次启动恢复 |
-| 精简 Markdown 导出 | ✅ CLI / ⬜ GUI | 2026-10-10 完成 Transcript Reader：通过 Session ID、唯一前缀或文件路径导出用户输入、最终回复与工具计数，去掉思考和工具结果；GUI 待 M4 复用 core 接口，见 `../notes/2026-10-10-transcript-reader.md` |
+| 精简 TXT 导出 | ✅ CLI / ⬜ GUI | 2026-10-10 完成 Transcript Reader：通过 Session ID、唯一前缀或文件路径导出用户输入、最终回复与工具计数，去掉思考和工具结果；GUI 待 M4 复用 core 接口，见 `../notes/2026-10-10-transcript-reader.md` |
 
 ## 3. 产品架构
 
@@ -145,7 +145,7 @@ Cost、Branch、Tools、ID 不再作为列，只在详情面板的 Metadata 里�
 第二段：
 
 - 头部增加 token 用量、修改过的文件列表（折叠）
-- 操作按钮：复制 session ID、复制 `claude --resume <id>`、在 Finder 显示记录文件、打开项目目录、导出 Markdown。"在终端打开"方案里默认不做，只复制命令
+- 操作按钮：复制 session ID、复制 `claude --resume <id>`、在 Finder 显示记录文件、打开项目目录、导出 TXT。"在终端打开"方案里默认不做，只复制命令
 - 助手正文 Markdown 渲染，长消息默认折叠 5 行。搜索时有命中的消息会退回带高亮的纯文本显示
 - 工具卡片展开后显示说明（`#`）与命令（`$`），长命令重新排版；连续工具调用分组（设计稿 `groupTools`）需先核对设计稿
 - subagent 列表，点击切换查看其消息流

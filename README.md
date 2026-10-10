@@ -18,26 +18,27 @@ cargo run --release -p agent-session-core --bin asm -- search --index 重构    
 
 ## Transcript Reader
 
-Export a local Claude Code session as compact Markdown for another agent:
+Export a local Claude Code session as compact XML-structured text (`.txt`) for another agent:
 
 ```sh
-make transcript-reader ARGS="SESSION_ID -o session.md"
-make asm ARGS="transcript SESSION_ID" > session.md
+make transcript-reader ARGS="SESSION_ID -o session.txt"
+make asm ARGS="transcript SESSION_ID" > session.txt
 # Build a portable binary in this project (macOS Apple Silicon):
 make build-transcript-reader
-./dist/transcript-reader SESSION_ID -o session.md
+./dist/transcript-reader SESSION_ID -o session.txt
 # Or install the standalone command:
 cargo install --path crates/core --bin transcript-reader
-transcript-reader 1cbab92c -o session.md
-transcript-reader /path/to/transcript.jsonl > session.md
+transcript-reader 1cbab92c -o session.txt
+transcript-reader /path/to/transcript.jsonl > session.txt
 ```
 
 Accepts full session IDs, unique prefixes, or JSONL paths. `--claude-dir` / `ASM_CLAUDE_DIR`
 override the data directory (otherwise `CLAUDE_CONFIG_DIR`, then `~/.claude`). No SQLite
 index, network access, or model is needed. `-o` refuses to overwrite existing files.
 
-The export preserves cleaned user prompts and final assistant Markdown, with one tool
-count summary before each answer. Thinking, tool arguments/results, injected context,
+The export preserves cleaned user prompts and final assistant Markdown inside
+`<user>` / `<assistant>` CDATA sections, with structured `<tool_calls>` entries immediately
+before the corresponding answer. Thinking, tool arguments/results, injected context,
 compact summaries and intermediate commentary are omitted. Images/documents become short
 placeholders. Missing final answers are marked; malformed records produce a stderr warning.
 Explicitly completed answers are kept even when an automatic continuation follows.
@@ -45,9 +46,17 @@ For older records without stop reasons, the last text-only API message before th
 human prompt, turn-end marker or EOF is used. Consecutive blocks with the same message ID
 are kept together. This is deterministic filtering, not an AI-generated summary or a token cap.
 
+The document has a `<transcript session_id="…">` root. Each `<tool_calls>` contains
+`<tool name="Read" count="3" />` entries. No tool calls means no summary element.
+An assistant turn without a final answer has `status="missing"`. CDATA keeps Markdown
+headings and literal XML tags inside the body; embedded `]]>` is split across adjacent
+CDATA sections. Attribute values are escaped. XML 1.0 forbidden control characters are
+replaced with U+FFFD. Output is UTF-8; use `.txt` (the CLI does not enforce an extension).
+This replaces the previous Markdown export; there is no legacy format switch.
+
 IDs resolve main transcripts; pass a `subagents/*.jsonl` path to export a subagent.
 History-only sessions cannot be exported. Records stay in file order (no conversation-tree
-branch selection). The reusable `transcript::read_markdown` API lives in the core crate;
+branch selection). The reusable `transcript::read_transcript` API lives in the core crate;
 a GUI export action can call it on a background thread.
 
 ## Requirements

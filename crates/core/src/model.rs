@@ -188,8 +188,8 @@ pub struct MessageRow {
 
 /// A compact transcript handoff and diagnostics for its caller (CLI or GUI).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MarkdownExport {
-    pub markdown: String,
+pub struct TranscriptExport {
+    pub text: String,
     /// Malformed JSON records, including a partially written final line.
     pub skipped_lines: usize,
 }

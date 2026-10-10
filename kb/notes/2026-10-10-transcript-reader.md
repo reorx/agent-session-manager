@@ -8,6 +8,8 @@ tags:
 
 # Transcript Reader
 
+> 本文记录初版 Markdown 导出。当前已改为 XML 标签组织的 TXT，API 为 `read_transcript` / `TranscriptExport`，见 [格式更新](2026-10-10-transcript-reader-xml.md)。
+
 为 Session 交接提供精简 Markdown。用户确认“Cloud Session ID”指本机 Claude Code Session ID。此次完成独立 `transcript-reader` CLI、`asm transcript` 子命令及 core 复用接口；GUI 导出按钮留待 M4 接入。
 
 ## 使用与接口

@@ -1,5 +1,5 @@
-//! Compact, deterministic Markdown handoffs from Claude Code transcripts.
-//! No index or model call is needed. The GUI can call `read_markdown` off-thread.
+//! Compact, XML-structured text handoffs from Claude Code transcripts.
+//! No index or model call is needed. The GUI can call `read_transcript` off-thread.
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -13,7 +13,7 @@ use crate::claude::clean::clean_prompt;
 use crate::claude::discover::discover_transcripts;
 use crate::claude::parse::{Content, parse_content, user_text};
 use crate::claude::paths::{ClaudeDir, expand_user};
-use crate::model::MarkdownExport;
+use crate::model::TranscriptExport;
 
 /// Resolve a local file, exact session ID, or unambiguous ID prefix.
 /// Discovery is read-only; history-only sessions have no transcript to export.
@@ -84,20 +84,21 @@ struct Turn {
 }
 
 impl Turn {
-    fn finish(&mut self, markdown: &mut String) {
+    fn finish(&mut self, output: &mut String) {
         if !self.started {
             return;
         }
-        markdown.push_str("## Assistant\n\n");
         if !self.tools.is_empty() {
-            let tools = self.tools.iter().map(|(name, count)| format!("{} ×{count}", name.replace(['\n', '\r'], " "))).collect::<Vec<_>>().join(", ");
-            markdown.push_str(&format!("> Tools: {tools}\n\n"));
+            output.push_str("<tool_calls>\n");
+            for (name, count) in &self.tools {
+                output.push_str(&format!("  <tool name=\"{}\" count=\"{count}\" />\n", xml_attribute(name)));
+            }
+            output.push_str("</tool_calls>\n");
         }
         if self.text.is_empty() {
-            markdown.push_str("*[No final response recorded]*\n\n");
+            output.push_str("<assistant status=\"missing\"><![CDATA[[No final response recorded]]]></assistant>\n\n");
         } else {
-            markdown.push_str(&self.text);
-            markdown.push_str("\n\n");
+            write_body(output, "assistant", &self.text);
         }
         *self = Self::default();
     }
@@ -134,6 +135,25 @@ impl Turn {
     }
 }
 
+/// XML 1.0 cannot represent these controls, even in CDATA. Replace them visibly.
+fn xml_text(text: &str) -> String {
+    text.chars().map(|c| match c {
+        '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}' => c,
+        _ => '\u{fffd}',
+    }).collect()
+}
+
+fn xml_attribute(text: &str) -> String {
+    xml_text(text).replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        .replace('"', "&quot;").replace('\n', "&#10;").replace('\r', "&#13;").replace('\t', "&#9;")
+}
+
+fn write_body(output: &mut String, role: &str, text: &str) {
+    // Split CDATA instead of escaping Markdown/HTML inside the conversation.
+    let body = xml_text(text).replace("]]>", "]]]]><![CDATA[>");
+    output.push_str(&format!("<{role}><![CDATA[{body}]]></{role}>\n\n"));
+}
+
 fn human_text(record: &Record, content: &Content) -> Option<String> {
     if record.is_meta || record.is_compact_summary
         || record.origin.as_ref().and_then(|o| o.kind.as_deref()).is_some_and(|kind| kind != "human") {
@@ -165,14 +185,15 @@ fn human_text(record: &Record, content: &Content) -> Option<String> {
     if text.is_empty() { None } else { Some(text) }
 }
 
-/// Read in file order, preserving final answer Markdown verbatim (apart from outer whitespace).
+/// Read in file order, retaining final answer Markdown inside XML CDATA sections.
+/// Outer whitespace is trimmed; XML-forbidden characters become U+FFFD.
 /// Legacy transcripts often lack stop reasons: the last text-only API message before
 /// the next human input / turn-duration marker / EOF is treated as the final answer.
 /// Malformed lines are counted, not silently represented as a complete conversation.
-pub fn read_markdown(path: &Path) -> Result<MarkdownExport> {
+pub fn read_transcript(path: &Path) -> Result<TranscriptExport> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let id = path.file_stem().unwrap_or_default().to_string_lossy();
-    let mut export = MarkdownExport { markdown: format!("# Session {}\n\n", id.replace(['\n', '\r'], " ")), skipped_lines: 0 };
+    let mut export = TranscriptExport { text: format!("<transcript session_id=\"{}\">\n\n", xml_attribute(&id)), skipped_lines: 0 };
     let mut turn = Turn::default();
     let is_subagent = path.parent().and_then(Path::file_name).is_some_and(|name| name == "subagents");
     let mut seen = HashSet::new();
@@ -202,7 +223,7 @@ pub fn read_markdown(path: &Path) -> Result<MarkdownExport> {
             }
         }
         if record.kind.as_deref() == Some("system") && record.subtype.as_deref() == Some("turn_duration") {
-            turn.finish(&mut export.markdown);
+            turn.finish(&mut export.text);
             continue;
         }
         let Some(message) = &record.message else { continue };
@@ -211,15 +232,13 @@ pub fn read_markdown(path: &Path) -> Result<MarkdownExport> {
         match record.kind.as_deref() {
             Some("user") => {
                 if let Some(text) = human_text(&record, &content) {
-                    turn.finish(&mut export.markdown);
-                    export.markdown.push_str("## User\n\n");
-                    export.markdown.push_str(&text);
-                    export.markdown.push_str("\n\n");
+                    turn.finish(&mut export.text);
+                    write_body(&mut export.text, "user", &text);
                 }
             }
             Some("assistant") => {
                 if turn.completed && (message.id.is_none() || message.id != turn.message_id) {
-                    turn.finish(&mut export.markdown);
+                    turn.finish(&mut export.text);
                 }
                 if record.is_aborted {
                     turn.started = true;
@@ -232,6 +251,7 @@ pub fn read_markdown(path: &Path) -> Result<MarkdownExport> {
             _ => {}
         }
     }
-    turn.finish(&mut export.markdown);
+    turn.finish(&mut export.text);
+    export.text.push_str("</transcript>\n");
     Ok(export)
 }

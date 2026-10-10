@@ -10,7 +10,7 @@ M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，方案在 `kb
 - `crates/app`（`agent-session-manager`）：gpui-kit 界面，保持薄。`store.rs` 后台线程独占 `Db`，启动先读索引出表，再流式增量扫描；`search.rs` 是另一条线程，自带只读连接，文本模式走 FTS、正则模式流式扫描 transcript
 - Conversation tab 是过渡实现（索引里的 user / assistant 文本，前 300 条），M4 改为直接读 transcript
 - 未解决的问题记在 `kb/known-issues.md`
-- Transcript Reader 已完成（2026-10-10）：独立 `transcript-reader` / `asm transcript` 导出精简 Markdown；GUI 导出待 M4 接入，复用 `transcript::read_markdown`。规则与验证见 `kb/notes/2026-10-10-transcript-reader.md`。
+- Transcript Reader 已完成（2026-10-10）：独立 `transcript-reader` / `asm transcript` 导出 XML 标签组织的精简 TXT；GUI 导出待 M4 接入，复用 `transcript::read_transcript`。当前格式与验证见 `kb/notes/2026-10-10-transcript-reader-xml.md`，压缩规则见 `kb/notes/2026-10-10-transcript-reader.md`。
 
 ## 开发命令
 
@@ -20,7 +20,7 @@ M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，方案在 `kb
 - 测试：`cargo test -p agent-session-core`（1 秒内）、`cargo test -p agent-session-manager`（纯逻辑，加上无界面窗口里的键盘测试）、`make test` 全跑
 - 量搜索耗时：`ASM_BENCH_DB=<索引副本> cargo test -p agent-session-manager real_index_timings -- --ignored --nocapture`（`ASM_BENCH_QUERIES`、`ASM_BENCH_REGEX` 可换查询）。不要用截图脚本日志里的耗时，刚唤醒屏幕后的数字可以偏高 4–8 倍
 - `make asm ARGS="…"`：跑 `asm` CLI（`index` / `list` / `session` / `search [--index]` / `stats`，参数看 `--help`）
-- `make transcript-reader ARGS="SESSION_ID -o session.md"`：导出用户输入、最终回复及工具计数；也支持唯一 ID 前缀或 JSONL 路径，不依赖索引。
+- `make transcript-reader ARGS="SESSION_ID -o session.txt"`：导出用户输入、最终回复及工具计数；也支持唯一 ID 前缀或 JSONL 路径，不依赖索引。
 - `make parity`：在真实 `~/.claude` 上把 `asm` 与 Python 脚本逐字比对；改解析器、清理逻辑、`regex.rs` 或输出格式后必须跑
 - `make screenshot`（autoplay，3 张）、`make screenshot-clicks`（cliclick 真点击，12 张；坐标在 `scripts/screenshot-clicks.sh`，改布局后要校对）、`make screenshot-search`（`ASM_SEARCH_AUTOPLAY=1`，app 自己走完搜索流程，脚本等日志标记后截 7 张）。输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改），跑在真实索引上，但用一次性的 `state.json` 保证从默认视图开始
 - 构建产物在 `~/Library/Caches/cargo-target`（全局 cargo 配置），不在 `./target`；`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒
