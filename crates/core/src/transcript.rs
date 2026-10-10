@@ -93,10 +93,10 @@ impl Turn {
                 let times = if *count == 1 { "time" } else { "times" };
                 format!("{name} {count} {times}")
             }).collect::<Vec<_>>().join(", ");
-            output.push_str(&format!("<turn-summary>Called {}.</turn-summary>\n", xml_content(&calls)));
+            output.push_str(&format!("<turn-summary>\nCalled {}.\n</turn-summary>\n", xml_content(&calls)));
         }
         if self.text.is_empty() {
-            output.push_str("<agent status=\"missing\"><![CDATA[[No final response recorded]]]></agent>\n\n");
+            output.push_str("<agent status=\"missing\">\n<![CDATA[[No final response recorded]]]>\n</agent>\n\n");
         } else {
             write_body(output, "agent", &self.text);
         }
@@ -157,7 +157,7 @@ fn xml_attribute(text: &str) -> String {
 fn write_body(output: &mut String, role: &str, text: &str) {
     // Split CDATA instead of escaping Markdown/HTML inside the conversation.
     let body = xml_text(text).replace("]]>", "]]]]><![CDATA[>");
-    output.push_str(&format!("<{role}><![CDATA[{body}]]></{role}>\n\n"));
+    output.push_str(&format!("<{role}>\n<![CDATA[{body}]]>\n</{role}>\n\n"));
 }
 
 fn human_text(record: &Record, content: &Content) -> Option<String> {

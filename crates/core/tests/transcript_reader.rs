@@ -10,23 +10,39 @@ fn exports_human_inputs_final_answers_and_tool_counts_without_intermediate_noise
     let export = read_transcript(&path).unwrap();
     assert_eq!(export.text, r#"<transcript session_id="reader">
 
-<user><![CDATA[修复问题]]></user>
+<user>
+<![CDATA[修复问题]]>
+</user>
 
-<turn-summary>Called Bash 2 times, Read 1 time.</turn-summary>
-<agent><![CDATA[完成。
+<turn-summary>
+Called Bash 2 times, Read 1 time.
+</turn-summary>
+<agent>
+<![CDATA[完成。
 
 ```rust
 let x = 1;
-```]]></agent>
+```]]>
+</agent>
 
-<user><![CDATA[继续]]></user>
+<user>
+<![CDATA[继续]]>
+</user>
 
-<turn-summary>Called Edit 1 time.</turn-summary>
-<agent status="missing"><![CDATA[[No final response recorded]]]></agent>
+<turn-summary>
+Called Edit 1 time.
+</turn-summary>
+<agent status="missing">
+<![CDATA[[No final response recorded]]]>
+</agent>
 
-<user><![CDATA[[Image omitted]]]></user>
+<user>
+<![CDATA[[Image omitted]]]>
+</user>
 
-<agent><![CDATA[这是一张图片。]]></agent>
+<agent>
+<![CDATA[这是一张图片。]]>
+</agent>
 
 </transcript>
 "#);
@@ -87,7 +103,7 @@ fn keeps_completed_turns_before_automatic_continuation_and_marks_aborted_text() 
         "{\"type\":\"assistant\",\"isAbortedMidStream\":true,\"message\":{\"id\":\"c\",\"content\":\"Unfinished text\"}}\n"
     )).unwrap();
     let export = read_transcript(&path).unwrap();
-    assert!(export.text.contains("<agent><![CDATA[First final]]></agent>\n\n<turn-summary>Called Read 1 time.</turn-summary>\n<agent status=\"missing\">"));
+    assert!(export.text.contains("<agent>\n<![CDATA[First final]]>\n</agent>\n\n<turn-summary>\nCalled Read 1 time.\n</turn-summary>\n<agent status=\"missing\">\n"));
     assert!(export.text.contains("[No final response recorded]"));
     assert!(!export.text.contains("Unfinished text"));
 }
@@ -114,7 +130,7 @@ fn headings_xml_tags_and_cdata_delimiters_remain_body_text() {
     std::fs::write(&path, rows.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")).unwrap();
     let export = read_transcript(&path).unwrap();
     assert!(export.text.starts_with("<transcript session_id=\"a&amp;&quot;b\">"));
-    assert!(export.text.contains("<turn-summary>Called a&amp;\"&lt;b]]&gt;�&#13; 1 time.</turn-summary>"));
+    assert!(export.text.contains("<turn-summary>\nCalled a&amp;\"&lt;b]]&gt;�&#13; 1 time.\n</turn-summary>"));
     assert_eq!(export.text.matches("# Heading\n## User").count(), 2);
     assert_eq!(export.text.matches("]]]]><![CDATA[> tail").count(), 2);
     assert!(export.text.ends_with("</transcript>\n"));

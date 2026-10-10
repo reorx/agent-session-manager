@@ -46,9 +46,10 @@ For older records without stop reasons, the last text-only API message before th
 human prompt, turn-end marker or EOF is used. Consecutive blocks with the same message ID
 are kept together. This is deterministic filtering, not an AI-generated summary or a token cap.
 
-The document has a `<transcript session_id="…">` root. Each summary is a sentence such as
-`<turn-summary>Called Bash 2 times, Read 1 time.</turn-summary>`, with tools sorted by name
-and no nested elements. No tool calls means no summary element.
+The document has a `<transcript session_id="…">` root. Each opening and closing tag is
+on its own line, with the body or summary between them. Summaries contain a sentence
+such as `Called Bash 2 times, Read 1 time.`, with tools sorted by name and no nested
+elements. No tool calls means no summary element.
 An agent turn without a final answer has `status="missing"`. CDATA keeps Markdown
 headings and literal XML tags inside the body; embedded `]]>` is split across adjacent
 CDATA sections. Attribute values and summary text are escaped. XML 1.0 forbidden control characters are

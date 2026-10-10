@@ -15,17 +15,24 @@ tags:
 ```xml
 <transcript session_id="example">
 
-<user><![CDATA[请修复这个问题]]></user>
+<user>
+<![CDATA[请修复这个问题]]>
+</user>
 
-<turn-summary>Called Bash 1 time, Read 3 times.</turn-summary>
-<agent><![CDATA[## 修改结果
+<turn-summary>
+Called Bash 1 time, Read 3 times.
+</turn-summary>
+<agent>
+<![CDATA[## 修改结果
 
-已完成。]]></agent>
+已完成。]]>
+</agent>
 
 </transcript>
 ```
 
 - 外层 `transcript` 带文件 stem 作为 `session_id`。
+- 每个起始和结束标签独占一行，正文或摘要放在两者之间；CDATA 内正文不额外缩进。XML 解码后的元素文本两端会包含排版换行，消费者可去除两端空白。
 - `user` 与 `agent` 按对话顺序排列。正文使用 CDATA，Markdown、HTML、XML 示例都不会变成外层结构。
 - `turn-summary` 紧邻其所属的 `agent` 之前，用一句纯文本列出按名称排序的工具和调用次数，不含子元素；没有调用时省略整个摘要。单次为 `1 time`，多次为 `N times`。
 - 未记录最终回复时，使用 `<agent status="missing">` 和简短文字标记。
@@ -62,3 +69,11 @@ make asm ARGS="transcript SESSION_ID" > session.txt
 独立 release CLI 验收使用标准库 XML 解析，逐项对照先前归档的 fixture、真实会话、特殊字符及控制字符导出：正文和缺失状态完全一致，工具名称和次数完整保留，摘要没有子元素，stdout 与 `-o` 输出逐字节一致。已阅读 fixture 和真实导出；验收脚本、报告及导出归档在 `tmp/2026-10-10-transcript-reader-tags/`。已重建 `dist/transcript-reader`；未启动 GUI、浏览器或模拟器。
 
 本次 `make parity` 仍为 20/21 通过；核对 diff，唯一失败仍是两组空 session 的并列排序差异，已登记在 `kb/known-issues.md`。完整日志见上述验收目录的 `parity.log`。
+
+## 标签分行排版
+
+根据后续反馈，所有结构标签的起始和结束标签各占一行，用户正文、最终回复、缺失回复标记与纯文本工具摘要统一分行。CDATA 内容和原有 Markdown 不额外缩进；解码后的元素文本两端新增一个排版换行。
+
+先更新行为测试，确认旧排版有 3 项失败，再修改输出。core 79 个测试通过。release CLI 的 fixture、真实会话、特殊字符及控制字符样本均可被标准库 XML 解析；与原归档比较，正文仅新增两端排版换行，摘要仍无子元素，stdout 和文件输出一致。已阅读 fixture 和真实导出。产物在 `tmp/2026-10-10-transcript-reader-lines/`，已重建 `dist/transcript-reader`。
+
+本次 `make parity` 为 20/21 通过，唯一失败仍是已登记的空 session 排序差异；日志在上述目录的 `parity.log`。
