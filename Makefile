@@ -68,6 +68,11 @@ transcript-reader: ## Export compact Markdown, e.g. make transcript-reader ARGS=
 	@cargo build --release -p $(CORE) --bin transcript-reader -q
 	@$(TARGET_DIR)/release/transcript-reader $(ARGS)
 
+build-transcript-reader: ## Build a standalone release binary at bin/transcript-reader
+	@cargo build --release -p $(CORE) --bin transcript-reader -q
+	@mkdir -p bin
+	@install -m 755 "$(TARGET_DIR)/release/transcript-reader" bin/transcript-reader
+
 parity: ## Diff asm against the Python reference script on the real ~/.claude (outputs in tmp/<date>-python-parity)
 	@cargo build --release -p $(CORE) --bin asm -q
 	scripts/compare-with-python.sh "$(TARGET_DIR)/release/asm"
@@ -75,4 +80,4 @@ parity: ## Diff asm against the Python reference script on the real ~/.claude (o
 clean: ## Remove this project's build artifacts only (the target dir is shared across projects)
 	cargo clean -p $(APP) -p $(CORE)
 
-.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search bin asm transcript-reader parity clean
+.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search bin asm transcript-reader build-transcript-reader parity clean
