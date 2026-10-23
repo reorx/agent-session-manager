@@ -94,6 +94,22 @@ fn list_errors_when_nothing_matches() {
 }
 
 #[test]
+fn list_includes_project_directories_without_transcripts_in_name_order() {
+    let sb = sandbox();
+    let projects = sb.root().join("projects");
+    std::fs::create_dir_all(projects.join("-Users-me-Code-empty-z/memory")).unwrap();
+    std::fs::create_dir_all(projects.join("-Users-me-Code-empty-a")).unwrap();
+    std::fs::write(projects.join("-Users-me-Code-empty-a/sessions-index.json"), "{}").unwrap();
+    std::fs::write(projects.join("-Users-me-Code-empty-file"), "").unwrap();
+    let out = asm(&sb).args(["list", "Code-empty"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), concat!(
+        "-Users-me-Code-empty-a (0 sessions, 0 with transcript)\n\n",
+        "-Users-me-Code-empty-z (0 sessions, 0 with transcript)\n\n",
+    ));
+}
+
+#[test]
 fn session_looks_up_by_id_prefix_across_transcripts_and_history() {
     let sb = sandbox();
     let out = asm(&sb).args(["session", "4444"]).output().unwrap();

@@ -299,7 +299,19 @@ impl App {
 
     /// Encoded project names matching `arg`: a directory, or a substring of a name.
     fn resolve_project_keys(&self, arg: &str, db: &Db) -> Result<Vec<String>> {
-        let known = db.project_keys()?;
+        let mut known = db.project_keys()?;
+        // The reference also lists project directories containing only memory or metadata.
+        let projects = self.claude.projects_dir();
+        if projects.is_dir() {
+            for entry in std::fs::read_dir(projects)? {
+                let entry = entry?;
+                if entry.path().is_dir() {
+                    known.push(entry.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
+        known.sort();
+        known.dedup();
         let p = expand_user(arg);
         if p.is_dir() {
             let resolved = p.canonicalize().unwrap_or(p);

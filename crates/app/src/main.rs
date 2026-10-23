@@ -121,6 +121,8 @@ pub struct AppRoot {
     _search_events: Task<()>,
     _debounce: Option<Task<()>>,
     _autoplay: Option<Task<()>>,
+    #[cfg(test)]
+    selection_event_count: Option<usize>,
 }
 
 /// Where the app finds its data and keeps its own.
@@ -261,6 +263,8 @@ impl AppRoot {
             _search_events: search_pump,
             _debounce: None,
             _autoplay: None,
+            #[cfg(test)]
+            selection_event_count: None,
         };
         // a fresh window has no focus, and without one no key binding or menu action reaches the app
         this.focus_table(window, cx);
@@ -413,8 +417,21 @@ impl AppRoot {
     }
 
     fn on_table_event(&mut self, _: &Entity<TableState<SessionTableDelegate>>, ev: &TableEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // Opt-in test fuse: let a feedback loop finish so the test can fail instead of hanging
+        // GPUI's effect flush. Production builds have neither the counter nor the cutoff.
+        #[cfg(test)]
+        if matches!(ev, TableEvent::SelectRow(_)) && let Some(count) = self.selection_event_count.as_mut() {
+            *count += 1;
+            if *count > 32 {
+                return;
+            }
+        }
         match ev {
-            TableEvent::SelectRow(ix) => self.select_row(*ix, cx),
+            // Selection events are deferred notifications, not commands. Several selections
+            // can queue before effects flush; replaying an old one would emit another event
+            // and make two selections chase each other forever. A real click updates the
+            // table first, so its current notification still synchronizes the detail/state.
+            TableEvent::SelectRow(ix) if self.table.read(cx).selected_row() == Some(*ix) => self.select_row(*ix, cx),
             TableEvent::DoubleClickedRow(ix) => {
                 self.detail_visible = true;
                 self.select_row(*ix, cx);

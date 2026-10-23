@@ -94,6 +94,90 @@ fn search_done(app: &AppRoot, _: &App) -> bool {
     app.search_summary.is_some()
 }
 
+fn assert_selection_settled(cx: &mut TestAppContext, h: &Harness, row: usize) {
+    cx.run_until_parked();
+    h.app.read_with(cx, |app, cx| {
+        assert!(app.selection_event_count.unwrap() <= 32, "selection feedback loop: {:?} events", app.selection_event_count);
+        let table = app.table.read(cx);
+        assert_eq!(table.selected_row(), Some(row));
+        assert_eq!(app.selected.as_ref().unwrap().id, table.delegate().row(row).id);
+        assert_eq!(app.saved.selected_id.as_deref(), Some(table.delegate().row(row).id.as_ref()));
+    });
+}
+
+#[gpui_kit::test]
+fn multiple_selections_in_one_update_settle_on_the_last_row(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    h.app.update(cx, |app, cx| {
+        app.selection_event_count = Some(0);
+        app.select_row(1, cx);
+        app.select_row(0, cx);
+    });
+    assert_selection_settled(cx, &h, 0);
+}
+
+#[gpui_kit::test]
+fn table_click_notifications_and_keyboard_navigation_still_select_rows(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    h.app.update(cx, |app, cx| {
+        app.selection_event_count = Some(0);
+        // This is the same TableState entry point used by mouse clicks, including its events.
+        app.table.update(cx, |table, cx| {
+            table.set_selected_row(0, cx);
+            table.set_selected_row(1, cx);
+        });
+    });
+    assert_selection_settled(cx, &h, 1);
+    press(cx, &h, "down");
+    assert_selection_settled(cx, &h, 2);
+}
+
+#[gpui_kit::test]
+fn filtering_after_a_selection_and_clearing_the_table_discard_old_events(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    h.app.update(cx, |app, cx| {
+        app.selection_event_count = Some(0);
+        app.select_row(1, cx);
+        app.set_project(Some("-Users-me-Code-beta".into()), cx);
+        app.select_row(0, cx);
+    });
+    assert_selection_settled(cx, &h, 0);
+    h.app.update(cx, |app, cx| {
+        app.select_row(1, cx);
+        app.set_project(Some("no-such-project".into()), cx);
+    });
+    cx.run_until_parked();
+    h.app.read_with(cx, |app, cx| {
+        assert!(app.selection_event_count.unwrap() <= 32);
+        assert!(app.selected.is_none());
+        assert_eq!(app.table.read(cx).selected_row(), None);
+    });
+}
+
+#[gpui_kit::test]
+fn autoplay_filter_sort_and_explicit_selection_settle_together(cx: &mut TestAppContext) {
+    use gpui_kit::component::table::ColumnSort;
+    use crate::model::{RangePreset, project_entries};
+
+    let h = launch(cx);
+    h.app.update(cx, |app, cx| app.select_row(2, cx));
+    h.app.update(cx, |app, cx| {
+        app.selection_event_count = Some(0);
+        app.set_project(None, cx);
+        app.set_range(RangePreset::Days30, cx);
+        let delegate = app.table.read(cx).delegate();
+        let busiest = project_entries((0..delegate.ix.len()).map(|i| delegate.row(i)))
+            .into_iter().max_by_key(|p| p.count).expect("fixture has recent transcripts");
+        app.set_project(Some(busiest.key), cx);
+        app.table.update(cx, |table, cx| {
+            table.delegate_mut().set_sort("cost", ColumnSort::Descending);
+            table.refresh(cx);
+        });
+        app.select_row(0, cx);
+    });
+    assert_selection_settled(cx, &h, 0);
+}
+
 #[gpui_kit::test]
 fn the_table_has_the_focus_after_launch_so_shortcuts_work_before_any_click(cx: &mut TestAppContext) {
     let h = launch(cx);

@@ -2,14 +2,11 @@
 
 > 当前 app 已知、待后续处理的问题：缺陷、简化实现、未验收项、待建流程。只反映最新状态——解决了就删掉条目，经过记到 `kb/sessions/`。
 
-## 回归验证：parity 因两处与解析无关的差异一直返回失败，真正的回归会被淹没
+## 回归验证：parity 因空 session 的并列顺序一直有 1 组失败
 
-- 记录：2026-10-10（`kb/notes/2026-10-10-transcript-reader.md`），2026-10-23 补充第二处
-- `make parity` 在本机稳定失败 2 组（`list-code-30d`、`list-tenderbuddy`），2026-10-23 用改动前后的二进制各跑一次，差异逐字相同：
-  1. 没有 started_at 的空 session 并列时，Rust 和 Python 排序不同
-  2. 只有 `memory/` 或 `sessions-index.json`、没有任何 transcript 的项目目录，Python 会列成 `(0 sessions, 0 with transcript)`，`asm` 不列（它的项目表只收有 session 的项目）
-- 另外 search 组偶尔因为比对期间有 session 正在写入而失败，重跑即过。
-- 处理方向：统一两边的规则，或在 parity 比较里归一化这两类差异。差异样本在 `tmp/2026-10-23-python-parity/`。
+- 记录：2026-10-10（`kb/notes/2026-10-10-transcript-reader.md`），2026-10-23 查明原因（`tmp/2026-10-23-followups/report.md`）
+- `make parity` 的 `list-code-30d` 里，两个都没有 started_at 的空 session 顺序相反，其余 20 组通过。原因在 Python 参考脚本：它按 `glob('*.jsonl')` 的目录遍历顺序收集 transcript，之后只按 `started` 做稳定排序，没有次关键字，所以并列项的顺序取决于文件系统；Rust 按 updated 降序。只要它一直红，真正的回归就看不出来。另外 search 组偶尔因为比对期间有 session 正在写入而失败，重跑即过。
+- 处理方向：定一个两边共用的并列排序键（例如 started 降序、updated 降序、id），同时改 Python 脚本（`~/Code/scripts`，不在本仓库）和 Rust，并补测试。要改参考脚本，需要用户同意。
 
 ## CLI：`asm --db` 帮助文本里的默认索引路径与实际不符
 
@@ -78,10 +75,9 @@
 - 价格表按 2026-10-23 的官方价格页写死。Claude Code 用上表里没有的模型后，这些调用的费用不计入，表格里的 Cost 只显示其余部分，看不出少了；只有详情 Metadata 的 Unpriced 一行列出模型名。`asm cost` 会在末尾列出未计价的模型。
 - 处理方向：表格的 Cost 单元格在有未计价调用时加标记；新模型发布后更新 `pricing.rs` 并提升 `SCHEMA_VERSION`。
 
-## 截图：autoplay 第二步在真实数据上让主线程空转，`make screenshot` 的第 3 张停在第一步
+## 表格：点表头排序后，选中高亮停在原来的行号上，和详情面板对不上
 
-- 记录：2026-10-23（费用列实机验收时发现；诊断在 `tmp/2026-10-23-cost-context/diag/`）
-- `ASM_SPIKE_AUTOPLAY=1` 的第二步（清项目 → 30 天 → 选最忙项目 → 排序 → 选第一行）之后，主线程 CPU 100%，`state.json` 被反复重写，画面不再更新。`sample` 显示主线程一直在 `flush_effects` → 表格的 `TableEvent` 订阅 → `on_table_event` → `select_row` → `persist` 里转。用改动前的 HEAD 在同一份数据上也复现，所以不是费用列引入的，是当天的数据触发的。手动操作（过滤后排序再选行）会不会进同样的循环没有验证。
-- 影响：`make screenshot` 只有前两张可用；如果手动操作也能触发，app 会卡死。
-- 处理方向：在 `keyboard_tests.rs` 里按 autoplay 的步骤写复现测试，查清 `select_row` 与表格 `SelectRow` 事件之间为什么来回触发（例如 `set_selected_row` 发出的行号与传入的不一致），再修。
+- 记录：2026-10-23（选中事件修复时读源码发现；`tmp/2026-10-23-followups/report.md`），**未实机验证**
+- gpui-component 表格的表头排序（`TableState::perform_sort`）只重排 delegate 的行，不改 `selected_row`；`AppRoot` 对表格的 observe 只保存视图状态。所以点表头后，高亮停在原来的行号上，那一行已经换成了另一个 session，详情面板仍显示原来的 session。和「选中跟着 session 走」的规则不一致。
+- 处理方向：先用 cliclick 点表头实机确认；确认后在表格排序变化时按 session id 重新定位选中（走 `after_rows_changed`），并在 `keyboard_tests.rs` 补测试。
 
