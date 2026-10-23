@@ -182,3 +182,39 @@ fn index_and_stats_report_what_was_scanned() {
     let out = asm(&sb).args(["index", "--rebuild"]).output().unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("4 files"));
 }
+
+#[test]
+fn cost_lists_a_projects_sessions_in_a_date_range_most_expensive_first() {
+    let sb = sandbox();
+    let out = asm(&sb).args(["cost", "-p", "alpha", "--since", "2026-09-01", "--until", "2026-09-03"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let expected = concat!(
+        "     COST        CC   CTX  UPDATED           SESSION   PROJECT           TITLE\n",
+        "    $0.13     $1.23    1%  2026-09-01 15:00  11111111  alpha             Parser refactor\n",
+        "        —         —     —  2026-09-03 04:00  55555555  alpha             \n",
+        "\n",
+        "2 sessions · $0.13 (CC $1.23)\n",
+        "tokens: in 62 · out 2k · cache read 89k · cache write 4k\n",
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "the end date is included, S2 (09-05) and S4 (08-20) are not");
+}
+
+#[test]
+fn cost_sorts_by_context_and_puts_sessions_without_data_last() {
+    let sb = sandbox();
+    let out = asm(&sb).args(["cost", "--sort", "context", "-n", "4"]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let ids: Vec<&str> = text.lines().skip(1).take(4).map(|l| l.split_whitespace().nth(5).unwrap_or("")).collect();
+    assert_eq!(ids, ["11111111", "22222222", "33333333", "66666666"], "{text}");
+    assert!(text.contains("\n8 sessions · $0.13 (CC $1.23) (top 4 shown)\n"), "{text}");
+}
+
+#[test]
+fn cost_compare_reports_how_far_the_priced_cost_is_from_claude_codes_own() {
+    let sb = sandbox();
+    let out = asm(&sb).args(["cost", "--compare"]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.starts_with("sessions with a cost recorded by Claude Code: 1\n"), "{text}");
+    assert!(text.contains("  >10% lower        1  (100.0%)\n"), "{text}");
+    assert!(text.contains("total: $0.13 priced here vs $1.23 recorded (-89.51%)\n"), "{text}");
+}

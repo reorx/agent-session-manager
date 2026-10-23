@@ -7,5 +7,6 @@ pub mod claude;
 pub mod format;
 pub mod index;
 pub mod model;
+pub mod pricing;
 pub mod search;
 pub mod transcript;

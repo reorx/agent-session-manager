@@ -159,3 +159,39 @@ fn enter_searches_at_once_and_n_steps_through_the_hits_while_the_table_has_the_f
     press(cx, &h, "cmd-g");
     assert_eq!(h.app.read_with(cx, hit), Some((2, 3)), "cmd-g steps from anywhere");
 }
+
+#[gpui_kit::test]
+fn a_picked_custom_range_filters_the_table_and_hands_the_focus_back_to_it(cx: &mut TestAppContext) {
+    use chrono::NaiveDate;
+    use gpui_kit::component::calendar::Date;
+    use gpui_kit::component::date_picker::DatePickerEvent;
+
+    use crate::model::RangePreset;
+
+    let h = launch(cx);
+    h.app.update(cx, |app, cx| app.set_range(RangePreset::Custom, cx));
+    // while the user clicks through the calendar, the picker has the focus
+    let picker = h.app.read_with(cx, |app, _| app.date_picker.clone());
+    in_window(cx, &h, |window, cx| picker.read(cx).focus_handle(cx).focus(window, cx));
+    assert_eq!(focus(cx, &h), (false, false));
+
+    // what the picker sends once both ends are picked; fixture transcripts carry checkout mtimes,
+    // so the range picks a history-only session with a fixed date (S4, 2026-08-20)
+    let day = |d: u32| NaiveDate::from_ymd_opt(2026, 8, d).unwrap();
+    picker.update(cx, |_, cx| cx.emit(DatePickerEvent::Change(Date::Range(Some(day(1)), Some(day(31))))));
+    cx.run_until_parked();
+    h.app.read_with(cx, |app, cx| {
+        assert_eq!((app.range, app.custom_range), (RangePreset::Custom, Some((day(1), day(31)))));
+        let delegate = app.table.read(cx).delegate();
+        let shown: Vec<&str> = (0..delegate.ix.len()).map(|i| delegate.row(i).short_id.as_ref()).collect();
+        assert_eq!(shown, ["44444444"]);
+    });
+    assert_eq!(focus(cx, &h), (false, true), "the table has the focus again");
+    press(cx, &h, "cmd-\\");
+    assert!(!h.app.read_with(cx, |app, _| app.detail_visible), "so its shortcuts work right away");
+
+    // half a range (the first click) changes nothing yet
+    picker.update(cx, |_, cx| cx.emit(DatePickerEvent::Change(Date::Range(Some(day(5)), None))));
+    cx.run_until_parked();
+    assert_eq!(h.app.read_with(cx, |app, _| app.custom_range), Some((day(1), day(31))));
+}

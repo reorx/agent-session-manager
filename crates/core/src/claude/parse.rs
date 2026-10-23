@@ -1,12 +1,12 @@
 //! Streaming transcript parser. Bytes go in (whole file or an appended tail), searchable
-//! `MessageRow`s and a `SessionDelta` (aggregate fields) come out.
+//! `MessageRow`s, one `UsageRow` per API response and a `SessionDelta` (aggregate fields) come out.
 //!
 //! Only user / assistant text and a handful of metadata records are materialised; tool results,
 //! attachments and file-history records (98% of the bytes) are skipped after a byte-level look at
 //! the line prefix. Prompt-counting rules follow the reference script's `human_prompt_text`.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::path::Path;
 
@@ -19,14 +19,21 @@ use super::clean::clean_prompt;
 use crate::format::parse_ts;
 use crate::model::{
     MessageRow, Role, SessionSummary, TITLE_RANK_AGENT_NAME, TITLE_RANK_AI, TITLE_RANK_CUSTOM,
-    TITLE_RANK_SUMMARY,
+    TITLE_RANK_SUMMARY, UsageRow,
 };
+use crate::pricing;
 
-/// Result of feeding bytes: the messages found and how many bytes were consumed (up to and
-/// including the last newline; a partial last line waits for the next feed).
+/// Model name Claude Code puts on records it writes itself (interrupts, API errors).
+const SYNTHETIC_MODEL: &str = "<synthetic>";
+
+/// Result of feeding bytes: the messages and API responses found, and how many bytes were
+/// consumed (up to and including the last newline; a partial last line waits for the next feed).
 #[derive(Debug, Default)]
 pub struct Feed {
     pub messages: Vec<MessageRow>,
+    /// One row per response within this feed. A response whose records straddle two feeds shows
+    /// up in both, with the same `msg_id`: whoever keeps the rows must dedupe on it.
+    pub usage: Vec<UsageRow>,
     pub consumed: u64,
 }
 
@@ -35,6 +42,7 @@ pub struct Feed {
 pub struct ParsedTranscript {
     pub summary: SessionSummary,
     pub messages: Vec<MessageRow>,
+    pub usage: Vec<UsageRow>,
     pub consumed: u64,
 }
 
@@ -64,11 +72,16 @@ pub struct SessionDelta {
     pub pr_url: Option<String>,
     pub files_touched: BTreeSet<String>,
     pub models: BTreeSet<String>,
+    /// Prompt tokens and model of the last main-thread API call.
+    pub context_tokens: Option<u64>,
+    pub context_model: Option<String>,
+    /// Largest prompt of any main-thread API call.
+    pub context_peak: Option<u64>,
 }
 
 impl SessionDelta {
     /// Merge this chunk into a session: counts add up, "first" fields are only set once,
-    /// "last" fields are overwritten.
+    /// "last" fields are overwritten, "max" fields keep the larger value.
     pub fn apply(&self, s: &mut SessionSummary) {
         if s.first_prompt.is_empty()
             && let Some((prompt, ts)) = &self.first_prompt
@@ -125,6 +138,11 @@ impl SessionDelta {
         }
         s.files_touched.extend(self.files_touched.iter().cloned());
         s.models.extend(self.models.iter().cloned());
+        if self.context_tokens.is_some() {
+            s.context_tokens = self.context_tokens;
+            s.context_model = self.context_model.clone();
+        }
+        s.context_peak = s.context_peak.max(self.context_peak);
     }
 
     fn set_title(&mut self, rank: u8, title: Option<Cow<'_, str>>) {
@@ -140,11 +158,18 @@ impl SessionDelta {
 #[derive(Debug, Default)]
 pub struct TranscriptParser {
     delta: SessionDelta,
+    usage_only: bool,
 }
 
 impl TranscriptParser {
     pub fn new(_session_id: &str) -> Self {
         Self::default()
+    }
+
+    /// A parser that only collects `UsageRow`s (subagent transcripts: their cost counts towards
+    /// the parent session, nothing else of them is indexed).
+    pub fn usage_only() -> Self {
+        TranscriptParser { usage_only: true, ..Self::default() }
     }
 
     pub fn delta(&self) -> &SessionDelta {
@@ -158,6 +183,7 @@ impl TranscriptParser {
     /// Parse every complete line in `bytes`; `base_offset` is where `bytes` starts in the file.
     pub fn feed(&mut self, bytes: &[u8], base_offset: u64) -> Feed {
         let mut feed = Feed::default();
+        let mut usage = UsageSink::default();
         let mut start = 0;
         for nl in memchr_iter(b'\n', bytes) {
             let mut line = &bytes[start..nl];
@@ -165,24 +191,35 @@ impl TranscriptParser {
                 line = &line[..line.len() - 1];
             }
             if !line.is_empty() {
-                self.process_line(line, base_offset + start as u64, &mut feed.messages);
+                self.process_line(line, base_offset + start as u64, &mut feed.messages, &mut usage);
             }
             start = nl + 1;
         }
+        feed.usage = usage.rows;
         feed.consumed = start as u64;
         feed
     }
 
-    fn process_line(&mut self, line: &[u8], offset: u64, out: &mut Vec<MessageRow>) {
+    fn process_line(&mut self, line: &[u8], offset: u64, out: &mut Vec<MessageRow>, usage: &mut UsageSink) {
         match classify(line) {
             LineKind::Skip => return,
-            LineKind::User if !user_line_may_have_text(line) => return,
+            LineKind::User if self.usage_only || !user_line_may_have_text(line) => return,
+            LineKind::Meta if self.usage_only => return,
             _ => {}
         }
         let Ok(rec) = serde_json::from_slice::<RawRecord>(line) else { return };
+        if self.usage_only {
+            if rec.kind.as_deref() == Some("assistant") {
+                self.on_usage(&rec, usage);
+            }
+            return;
+        }
         match rec.kind.as_deref() {
             Some("user") => self.on_user(&rec, offset, line.len() as u64, out),
-            Some("assistant") => self.on_assistant(&rec, offset, line.len() as u64, out),
+            Some("assistant") => {
+                self.on_usage(&rec, usage);
+                self.on_assistant(&rec, offset, line.len() as u64, out);
+            }
             Some("last-prompt") => {
                 if let Some(p) = &rec.last_prompt {
                     self.delta.last_prompt_record = Some(p.to_string());
@@ -268,6 +305,18 @@ impl TranscriptParser {
         self.note_env(rec);
     }
 
+    /// Every assistant record carries its response's usage, text or not.
+    fn on_usage(&mut self, rec: &RawRecord, sink: &mut UsageSink) {
+        let Some(row) = usage_row(rec) else { return };
+        if !rec.is_sidechain {
+            let prompt = row.prompt_tokens();
+            self.delta.context_tokens = Some(prompt);
+            self.delta.context_model = Some(row.model.clone());
+            self.delta.context_peak = self.delta.context_peak.max(Some(prompt));
+        }
+        sink.push(row);
+    }
+
     fn on_assistant(&mut self, rec: &RawRecord, offset: u64, len: u64, out: &mut Vec<MessageRow>) {
         let Some(msg) = rec.message.as_ref() else { return };
         if let Some(Content::Blocks(blocks)) = msg.content.map(parse_content) {
@@ -306,11 +355,67 @@ impl TranscriptParser {
                 });
             }
         }
-        if let Some(model) = &msg.model {
+        if let Some(model) = msg.model.as_deref().filter(|m| *m != SYNTHETIC_MODEL) {
             self.delta.models.insert(model.to_string());
         }
         self.note_env(rec);
     }
+}
+
+/// Usage rows of one feed, deduplicated on `msg_id`: the last record of a response wins (they
+/// all carry the same usage), but the row keeps its position and the first record's timestamp.
+#[derive(Default)]
+struct UsageSink {
+    rows: Vec<UsageRow>,
+    by_id: HashMap<String, usize>,
+}
+
+impl UsageSink {
+    fn push(&mut self, row: UsageRow) {
+        match self.by_id.get(&row.msg_id) {
+            Some(&ix) => {
+                let ts = self.rows[ix].ts;
+                self.rows[ix] = UsageRow { ts, ..row };
+            }
+            None => {
+                self.by_id.insert(row.msg_id.clone(), self.rows.len());
+                self.rows.push(row);
+            }
+        }
+    }
+}
+
+/// The priced usage of an assistant record; `None` for records Claude Code wrote itself and
+/// for records without usage or any id to dedupe on.
+fn usage_row(rec: &RawRecord) -> Option<UsageRow> {
+    let msg = rec.message.as_ref()?;
+    let model = msg.model.as_deref().filter(|m| *m != SYNTHETIC_MODEL)?;
+    let u = msg.usage.as_ref()?;
+    let msg_id = [msg.id.as_deref(), rec.request_id.as_deref(), rec.uuid.as_deref()]
+        .into_iter()
+        .flatten()
+        .find(|id| !id.is_empty())?;
+    let cache_write = u.cache_creation_input_tokens.unwrap_or(0);
+    // records written before the 5m / 1h split are all 5-minute writes
+    let (cache_write_5m, cache_write_1h) = match &u.cache_creation {
+        Some(c) => (c.ephemeral_5m_input_tokens.unwrap_or(0), c.ephemeral_1h_input_tokens.unwrap_or(0)),
+        None => (cache_write, 0),
+    };
+    let mut row = UsageRow {
+        msg_id: msg_id.to_string(),
+        model: model.to_string(),
+        ts: rec.timestamp.as_deref().and_then(parse_ts).unwrap_or(0),
+        input: u.input_tokens.unwrap_or(0).max(0) as u64,
+        cache_write_5m,
+        cache_write_1h,
+        cache_read: u.cache_read_input_tokens.unwrap_or(0),
+        output: u.output_tokens.unwrap_or(0).max(0) as u64,
+        web_search: u.server_tool_use.as_ref().and_then(|s| s.web_search_requests).unwrap_or(0),
+        fast: u.speed.as_deref() == Some("fast"),
+        cost_usd: None,
+    };
+    row.cost_usd = pricing::cost(&row);
+    Some(row)
 }
 
 /// Parse a whole transcript file. The session id is the file stem, the project key its directory.
@@ -324,9 +429,10 @@ pub fn parse_transcript(path: &Path) -> Result<ParsedTranscript> {
     let feed = parser.feed(&bytes, 0);
     let mut summary = SessionSummary::transcript(&session_id, &project_key, path);
     parser.delta().apply(&mut summary);
+    summary.set_usage(&feed.usage);
     summary.updated_at = mtime_ms(&meta);
     summary.file_size = Some(meta.len());
-    Ok(ParsedTranscript { summary, messages: feed.messages, consumed: feed.consumed })
+    Ok(ParsedTranscript { summary, messages: feed.messages, usage: feed.usage, consumed: feed.consumed })
 }
 
 /// Memory-map a file (an empty file maps to an empty buffer, which mmap refuses).
@@ -454,6 +560,8 @@ pub(crate) struct RawRecord<'a> {
     pub message: Option<RawMessage<'a>>,
     #[serde(borrow)]
     pub uuid: Option<Cow<'a, str>>,
+    #[serde(rename = "requestId", borrow)]
+    pub request_id: Option<Cow<'a, str>>,
     #[serde(rename = "parentUuid", borrow)]
     pub parent_uuid: Option<Cow<'a, str>>,
     #[serde(borrow)]
@@ -501,16 +609,36 @@ pub(crate) struct RawRecord<'a> {
 #[derive(Deserialize)]
 pub(crate) struct RawMessage<'a> {
     #[serde(borrow)]
+    pub id: Option<Cow<'a, str>>,
+    #[serde(borrow)]
     pub content: Option<&'a RawValue>,
     #[serde(borrow)]
     pub model: Option<Cow<'a, str>>,
-    pub usage: Option<RawUsage>,
+    #[serde(borrow)]
+    pub usage: Option<RawUsage<'a>>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct RawUsage {
+pub(crate) struct RawUsage<'a> {
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+    pub cache_creation_input_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_creation: Option<RawCacheCreation>,
+    pub server_tool_use: Option<RawServerToolUse>,
+    #[serde(borrow)]
+    pub speed: Option<Cow<'a, str>>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RawCacheCreation {
+    pub ephemeral_5m_input_tokens: Option<u64>,
+    pub ephemeral_1h_input_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RawServerToolUse {
+    pub web_search_requests: Option<u64>,
 }
 
 /// One content block; which fields are present depends on `kind`.

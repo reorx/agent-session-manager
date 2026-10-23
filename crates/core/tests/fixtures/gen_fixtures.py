@@ -67,17 +67,39 @@ def user(sid, ts, content, cwd=ALPHA, **extra):
     return d
 
 
-def assistant(sid, ts, blocks, cwd=ALPHA, model='claude-opus-5', branch='main', usage=None):
+def api_usage(inp=10, out=20, w5m=0, w1h=0, read=0, speed='standard', breakdown=True):
+    """`message.usage` as Claude Code 2.1.2xx writes it. `breakdown=False` drops the 5m / 1h
+    split of cache writes, like records written before it existed."""
+    u = {
+        'input_tokens': inp,
+        'cache_creation_input_tokens': w5m + w1h,
+        'cache_read_input_tokens': read,
+        'output_tokens': out,
+        'server_tool_use': {'web_search_requests': 0, 'web_fetch_requests': 0},
+        'service_tier': 'standard',
+        'cache_creation': {'ephemeral_1h_input_tokens': w1h, 'ephemeral_5m_input_tokens': w5m},
+        'inference_geo': 'not_available',
+        'iterations': [],
+        'speed': speed,
+    }
+    if not breakdown:
+        del u['cache_creation']
+    return u
+
+
+def assistant(sid, ts, blocks, cwd=ALPHA, model='claude-opus-5', branch='main', usage=None, msg=None):
+    """One assistant record. Records of one API response (one per content block) pass the same
+    `msg` key: they share `message.id`, `requestId` and the usage."""
     d = env(sid, ts, cwd, branch=branch)
-    d['requestId'] = 'req_' + uid()[:8]
+    d['requestId'] = f'req_{msg}' if msg else 'req_' + uid()[:8]
     d['message'] = {
         'model': model,
-        'id': 'msg_' + uid()[:8],
+        'id': f'msg_{msg}' if msg else 'msg_' + uid()[:8],
         'type': 'message',
         'role': 'assistant',
         'content': blocks,
         'stop_reason': 'end_turn',
-        'usage': usage or {'input_tokens': 10, 'output_tokens': 20},
+        'usage': usage or api_usage(),
     }
     # Real files put `message` before the top-level `type`, so byte prefilters must not rely on
     # the first "type" key being the record type.
@@ -135,8 +157,21 @@ def session_1():
             origin={'kind': 'human'},
             promptSource='typed',
         ),
-        assistant(sid, '2026-09-01T08:00:05.000Z', [{'type': 'thinking', 'thinking': '', 'signature': 'sig'}]),
-        assistant(sid, '2026-09-01T08:00:06.000Z', [{'type': 'text', 'text': "I'll set things up."}]),
+        # response A: one API call written as three records (thinking, text, tool_use)
+        assistant(
+            sid,
+            '2026-09-01T08:00:05.000Z',
+            [{'type': 'thinking', 'thinking': '', 'signature': 'sig'}],
+            msg='s1A',
+            usage=api_usage(3, 400, w1h=2000, read=10000),
+        ),
+        assistant(
+            sid,
+            '2026-09-01T08:00:06.000Z',
+            [{'type': 'text', 'text': "I'll set things up."}],
+            msg='s1A',
+            usage=api_usage(3, 400, w1h=2000, read=10000),
+        ),
         assistant(
             sid,
             '2026-09-01T08:00:07.000Z',
@@ -148,6 +183,8 @@ def session_1():
                     'input': {'command': "ls -la\nfind . -name '*.rs'", 'description': 'List files'},
                 }
             ],
+            msg='s1A',
+            usage=api_usage(3, 400, w1h=2000, read=10000),
         ),
         tool_result(sid, '2026-09-01T08:00:08.000Z', tu_bash1, 'total 0\nsrc\nCargo.toml'),
         assistant(
@@ -162,6 +199,7 @@ def session_1():
                 },
                 {'type': 'text', 'text': 'Here is the plan: refactor the parser.'},
             ],
+            usage=api_usage(2, 300, w1h=500, read=12000),
         ),
         tool_result(sid, '2026-09-01T08:00:11.000Z', tu_read, [{'type': 'text', 'text': '[package]\nname = "alpha"'}]),
         {'type': 'permission-mode', 'permissionMode': 'bypassPermissions', 'sessionId': sid},
@@ -219,6 +257,7 @@ def session_1():
                 {'type': 'thinking', 'thinking': 'The screenshot shows a terminal window.', 'signature': 'sig'},
                 {'type': 'text', 'text': 'It shows a terminal running cargo test.'},
             ],
+            usage=api_usage(1, 200, w5m=100, read=13000, breakdown=False),
         ),
         assistant(
             sid,
@@ -235,6 +274,8 @@ def session_1():
                     },
                 }
             ],
+            # the context peaks here; a compaction shrinks it before the last reply
+            usage=api_usage(1, 100, read=40000, speed='fast'),
         ),
         tool_result(sid, '2026-09-01T10:00:09.000Z', tu_bash2, 'running 3 tests\ntest result: ok. 3 passed'),
         dict(
@@ -279,7 +320,7 @@ def session_1():
                 {'type': 'text', 'text': 'Done. The parser now handles nested arrays; 14 tests pass.'},
             ],
             branch='feat/parser',
-            usage={'input_tokens': 5, 'output_tokens': 50},
+            usage=api_usage(5, 50, w1h=300, read=14000),
         ),
         {'type': 'last-prompt', 'lastPrompt': 'What is in this screenshot?', 'leafUuid': uid(), 'sessionId': sid},
         {
@@ -319,6 +360,8 @@ def session_1_subagent():
                 S1,
                 '2026-09-01T10:01:05.000Z',
                 [{'type': 'text', 'text': 'The repo has a parser crate (subagent reply).'}],
+                model='claude-sonnet-5',
+                usage=api_usage(50, 500, w5m=1000),
             ),
             isSidechain=True,
         ),
@@ -343,6 +386,8 @@ def session_2():
             [{'type': 'text', 'text': 'Hello there friend.'}],
             model='claude-haiku-4-5-20251001',
         ),
+        # written by Claude Code itself (interrupts, errors): no API call, never priced
+        assistant(sid, '2026-09-05T12:00:03.000Z', [], model='<synthetic>', usage=api_usage(0, 0)),
         {'type': 'last-prompt', 'lastPrompt': 'Say hello in exactly three words.', 'leafUuid': uid(), 'sessionId': sid},
     ]
 

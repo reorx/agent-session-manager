@@ -291,6 +291,7 @@ fn transcript_of(target: &SearchTarget) -> Option<TranscriptFile> {
     Some(TranscriptFile {
         project_key: target.project_key.clone(),
         session_id: target.session_id.clone(),
+        agent: String::new(),
         path: target.path.clone()?,
         size: 0,
         mtime_ms: target.updated_at,

@@ -97,6 +97,20 @@ pub struct SessionSummary {
     pub pr_url: Option<String>,
     pub files_touched: BTreeSet<String>,
     pub models: BTreeSet<String>,
+    /// Priced from token usage (subagents included); `None` when no call could be priced.
+    pub cost_usd: Option<f64>,
+    /// Uncached input tokens, summed over every API response (subagents included).
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub tokens_cache_read: u64,
+    pub tokens_cache_write: u64,
+    /// Prompt tokens of the last main-thread API call: what the context held at the end.
+    pub context_tokens: Option<u64>,
+    pub context_peak: Option<u64>,
+    /// Model of that last call, which decides the context window.
+    pub context_model: Option<String>,
+    /// Models that showed up in the usage but have no price, so `cost_usd` leaves them out.
+    pub unpriced_models: BTreeSet<String>,
 }
 
 impl SessionSummary {
@@ -135,6 +149,15 @@ impl SessionSummary {
             pr_url: None,
             files_touched: BTreeSet::new(),
             models: BTreeSet::new(),
+            cost_usd: None,
+            tokens_in: 0,
+            tokens_out: 0,
+            tokens_cache_read: 0,
+            tokens_cache_write: 0,
+            context_tokens: None,
+            context_peak: None,
+            context_model: None,
+            unpriced_models: BTreeSet::new(),
         }
     }
 
@@ -165,6 +188,63 @@ impl SessionSummary {
     /// True when the row should be shown as "history only" (no transcript on disk).
     pub fn history_only(&self) -> bool {
         self.source == Source::History || self.transcript_missing
+    }
+
+    /// How full the context window was at the end: last main-thread prompt / the model's window.
+    pub fn context_ratio(&self) -> Option<f64> {
+        let window = crate::pricing::context_window(self.context_model.as_deref()?)?;
+        Some(self.context_tokens? as f64 / window as f64)
+    }
+
+    /// Set the cost and token totals from a session's API responses. Rows sharing a `msg_id`
+    /// count once (the last one wins), like the index's `api_usage` table.
+    pub fn set_usage(&mut self, usage: &[UsageRow]) {
+        let mut by_id: BTreeMap<&str, &UsageRow> = BTreeMap::new();
+        for u in usage {
+            by_id.insert(&u.msg_id, u);
+        }
+        self.cost_usd = None;
+        (self.tokens_in, self.tokens_out, self.tokens_cache_read, self.tokens_cache_write) = (0, 0, 0, 0);
+        self.unpriced_models.clear();
+        for u in by_id.values() {
+            self.tokens_in += u.input;
+            self.tokens_out += u.output;
+            self.tokens_cache_read += u.cache_read;
+            self.tokens_cache_write += u.cache_write_5m + u.cache_write_1h;
+            match u.cost_usd {
+                Some(c) => *self.cost_usd.get_or_insert(0.0) += c,
+                None => drop(self.unpriced_models.insert(u.model.clone())),
+            }
+        }
+    }
+}
+
+/// One API response's token usage. Claude Code writes a response as one record per content
+/// block, all carrying the same `message.id` and the same usage: they collapse into one row.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UsageRow {
+    /// `message.id`, else `requestId`, else the record's uuid.
+    pub msg_id: String,
+    pub model: String,
+    /// Unix ms; 0 when the record has no timestamp.
+    pub ts: i64,
+    /// Uncached input tokens.
+    pub input: u64,
+    pub cache_write_5m: u64,
+    pub cache_write_1h: u64,
+    pub cache_read: u64,
+    pub output: u64,
+    pub web_search: u64,
+    /// `usage.speed == "fast"`.
+    pub fast: bool,
+    /// `pricing::cost` of this response; `None` for a model without a known price.
+    pub cost_usd: Option<f64>,
+}
+
+impl UsageRow {
+    /// Every input token the request sent, cached or not: how full the context was.
+    pub fn prompt_tokens(&self) -> u64 {
+        self.input + self.cache_write_5m + self.cache_write_1h + self.cache_read
     }
 }
 

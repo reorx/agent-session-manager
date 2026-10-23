@@ -4,7 +4,7 @@
 mod common;
 
 use agent_session_core::claude::parse::{TranscriptParser, parse_transcript};
-use agent_session_core::model::{Role, Source};
+use agent_session_core::model::{Role, Source, UsageRow};
 use common::*;
 
 fn ts(iso: &str) -> i64 {
@@ -149,12 +149,130 @@ fn incremental_feeding_stops_at_the_last_newline_and_resumes() {
     assert_eq!(all.len(), full.messages.len());
     assert_eq!(all.iter().map(|m| m.byte_offset).collect::<Vec<_>>(), full.messages.iter().map(|m| m.byte_offset).collect::<Vec<_>>());
 
-    // the accumulated delta equals the full-parse summary once applied to an empty session
+    // the accumulated delta (plus the usage rows of both feeds) equals the full-parse summary
     let mut summary = agent_session_core::model::SessionSummary::transcript(S1, ALPHA, &path);
     parser.delta().apply(&mut summary);
+    let usage: Vec<UsageRow> = first.usage.into_iter().chain(second.usage).collect();
+    summary.set_usage(&usage);
     summary.updated_at = full.summary.updated_at;
     summary.file_size = full.summary.file_size;
     assert_eq!(summary, full.summary);
+}
+
+#[test]
+fn feeding_line_by_line_ends_up_with_the_full_parse_summary() {
+    // every record in its own feed: a response split over three records crosses two feeds
+    let sb = sandbox();
+    let path = sb.transcript(ALPHA, S1);
+    let bytes = std::fs::read(&path).unwrap();
+    let full = parse_transcript(&path).unwrap();
+    let mut summary = agent_session_core::model::SessionSummary::transcript(S1, ALPHA, &path);
+    let mut usage = Vec::new();
+    let mut offset = 0;
+    for line in bytes.split_inclusive(|b| *b == b'\n') {
+        let mut parser = TranscriptParser::new(S1);
+        let fed = parser.feed(line, offset);
+        offset += fed.consumed;
+        parser.delta().apply(&mut summary);
+        usage.extend(fed.usage);
+    }
+    assert!(usage.len() > full.usage.len(), "each feed sees its own record of the split response");
+    summary.set_usage(&usage);
+    summary.updated_at = full.summary.updated_at;
+    summary.file_size = full.summary.file_size;
+    assert_eq!(summary, full.summary, "context, peak, cost and tokens included");
+}
+
+#[test]
+fn usage_is_counted_once_per_api_response() {
+    let sb = sandbox();
+    let parsed = parse_transcript(&sb.transcript(ALPHA, S1)).unwrap();
+    let ids: Vec<&str> = parsed.usage.iter().map(|u| u.msg_id.as_str()).collect();
+    assert_eq!(ids.len(), 5, "7 assistant records, but the first three are one response: {ids:?}");
+    let a = &parsed.usage[0];
+    assert_eq!(a.msg_id, "msg_s1A");
+    assert_eq!((a.input, a.cache_write_5m, a.cache_write_1h, a.cache_read, a.output), (3, 0, 2000, 10_000, 400));
+    assert_eq!(a.model, "claude-opus-5");
+    assert_eq!(a.ts, ts("2026-09-01T08:00:05.000Z"), "the response's first record dates it");
+    assert!(parsed.usage[3].fast, "speed: fast");
+    let old = &parsed.usage[2];
+    assert_eq!((old.cache_write_5m, old.cache_write_1h), (100, 0), "a cache write without the 5m / 1h split counts as 5m");
+    assert!(parsed.usage.iter().all(|u| u.cost_usd.is_some()), "rows come priced");
+
+    let s = &parsed.summary;
+    assert!((s.cost_usd.unwrap() - 0.12194).abs() < 1e-9, "{:?}", s.cost_usd);
+    assert_eq!((s.tokens_in, s.tokens_out, s.tokens_cache_read, s.tokens_cache_write), (12, 1050, 89_000, 2900));
+    assert!(s.unpriced_models.is_empty());
+    assert_eq!(s.total_cost_usd, Some(1.2345), "Claude Code's own figure is kept apart");
+}
+
+#[test]
+fn context_is_the_last_main_thread_call_and_the_peak_the_largest() {
+    let sb = sandbox();
+    let s = parse_transcript(&sb.transcript(ALPHA, S1)).unwrap().summary;
+    assert_eq!(s.context_tokens, Some(5 + 300 + 14_000), "input + cache writes + cache reads of the last reply");
+    assert_eq!(s.context_peak, Some(1 + 40_000));
+    assert_eq!(s.context_model.as_deref(), Some("claude-opus-5"));
+}
+
+#[test]
+fn synthetic_records_are_neither_priced_nor_listed_as_models() {
+    let sb = sandbox();
+    let parsed = parse_transcript(&sb.transcript(ALPHA, S2)).unwrap();
+    assert_eq!(parsed.usage.len(), 1);
+    assert_eq!(parsed.usage[0].model, "claude-haiku-4-5-20251001");
+    assert_eq!(parsed.summary.models.iter().collect::<Vec<_>>(), vec!["claude-haiku-4-5-20251001"]);
+    assert!((parsed.summary.cost_usd.unwrap() - (10.0 * 1.0 + 20.0 * 5.0) / 1e6).abs() < 1e-12);
+}
+
+fn assistant_line(id: serde_json::Value, model: &str, input: u64, sidechain: bool) -> String {
+    let mut rec = serde_json::json!({
+        "type": "assistant", "uuid": format!("u-{input}"), "timestamp": "2026-01-01T00:00:00.000Z",
+        "isSidechain": sidechain, "requestId": "req-shared",
+        "message": {"model": model, "role": "assistant", "content": [], "usage": {"input_tokens": input, "output_tokens": 1}},
+    });
+    match id {
+        serde_json::Value::Null => drop(rec["message"].as_object_mut().unwrap().remove("id")),
+        id => rec["message"]["id"] = id,
+    }
+    format!("{rec}\n")
+}
+
+#[test]
+fn sidechain_calls_cost_money_but_do_not_move_the_context() {
+    let text = assistant_line("m1".into(), "claude-opus-5", 1000, false) + &assistant_line("m2".into(), "claude-opus-5", 5000, true);
+    let mut parser = TranscriptParser::new("s");
+    let fed = parser.feed(text.as_bytes(), 0);
+    assert_eq!(fed.usage.len(), 2);
+    let mut s = agent_session_core::model::SessionSummary::transcript("s", "p", std::path::Path::new("/dev/null"));
+    parser.delta().apply(&mut s);
+    assert_eq!((s.context_tokens, s.context_peak), (Some(1000), Some(1000)));
+}
+
+#[test]
+fn responses_without_a_message_id_fall_back_to_the_request_id_then_the_uuid() {
+    let text = assistant_line(serde_json::Value::Null, "claude-opus-5", 1, false)
+        + &assistant_line(serde_json::Value::Null, "claude-opus-5", 2, false);
+    let fed = TranscriptParser::new("s").feed(text.as_bytes(), 0);
+    let ids: Vec<&str> = fed.usage.iter().map(|u| u.msg_id.as_str()).collect();
+    assert_eq!(ids, ["req-shared"], "two records of one request are one response");
+
+    let no_request = text.replace("\"requestId\":\"req-shared\",", "");
+    let fed = TranscriptParser::new("s").feed(no_request.as_bytes(), 0);
+    let ids: Vec<&str> = fed.usage.iter().map(|u| u.msg_id.as_str()).collect();
+    assert_eq!(ids, ["u-1", "u-2"]);
+}
+
+#[test]
+fn a_model_without_a_price_is_named_instead_of_counted() {
+    let text = assistant_line("m1".into(), "claude-opus-9", 1000, false);
+    let fed = TranscriptParser::new("s").feed(text.as_bytes(), 0);
+    assert_eq!(fed.usage[0].cost_usd, None);
+    let mut s = agent_session_core::model::SessionSummary::transcript("s", "p", std::path::Path::new("/dev/null"));
+    s.set_usage(&fed.usage);
+    assert_eq!(s.cost_usd, None, "nothing could be priced");
+    assert_eq!(s.unpriced_models.iter().collect::<Vec<_>>(), ["claude-opus-9"]);
+    assert_eq!(s.tokens_in, 1000, "its tokens still count");
 }
 
 #[test]

@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::model::{MessageRow, Role, SessionSummary, Source};
+use crate::model::{MessageRow, Role, SessionSummary, Source, UsageRow};
 
-pub const SCHEMA_VERSION: i32 = 1;
+/// Also bump this when a price in `pricing.rs` changes: stored costs are computed at index time.
+pub const SCHEMA_VERSION: i32 = 2;
 const SCHEMA: &str = include_str!("schema.sql");
 
 pub struct Db {
@@ -21,6 +22,8 @@ pub struct Db {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexState {
     pub session_id: String,
+    /// Empty for a session transcript, else the subagent file stem (`session_id` is its parent).
+    pub agent: String,
     pub size: u64,
     pub mtime_ns: i64,
     pub inode: Option<u64>,
@@ -59,6 +62,8 @@ pub struct ListFilter {
     pub project_keys: Option<Vec<String>>,
     /// Keep sessions with `updated_at >= since_ms`.
     pub since_ms: Option<i64>,
+    /// Keep sessions with `updated_at < until_ms`.
+    pub until_ms: Option<i64>,
     pub order: Order,
 }
 
@@ -66,7 +71,9 @@ const SESSION_COLUMNS: &str = "s.id, s.id_known, p.encoded_dir, p.path, s.file_p
      s.title, s.title_rank, s.first_prompt, s.last_prompt, s.last_message, s.started_at, s.updated_at, \
      s.git_branch, s.cwd, s.cc_version, s.entrypoint, s.permission_mode, s.is_background, \
      s.user_msg_count, s.assistant_msg_count, s.tool_use_count, s.subagent_count, s.file_size, \
-     s.total_cost_usd, s.duration_ms, s.lines_added, s.lines_removed, s.pr_url, s.models";
+     s.total_cost_usd, s.duration_ms, s.lines_added, s.lines_removed, s.pr_url, s.models, \
+     s.cost_usd, s.tokens_in, s.tokens_out, s.tokens_cache_read, s.tokens_cache_write, s.unpriced_models, \
+     s.context_tokens, s.context_peak, s.context_model";
 
 impl Db {
     /// Open (or create) the index at `path`. Unreadable files are deleted and recreated; an old
@@ -169,7 +176,7 @@ impl Db {
     pub fn clear_all(&mut self) -> Result<()> {
         self.conn.execute_batch(
             "DELETE FROM messages; DELETE FROM session_files; DELETE FROM session_tool_counts;
-             DELETE FROM sessions; DELETE FROM projects; DELETE FROM index_state;
+             DELETE FROM sessions; DELETE FROM projects; DELETE FROM index_state; DELETE FROM api_usage;
              INSERT INTO messages_fts(messages_fts) VALUES ('rebuild');",
         )?;
         Ok(())
@@ -241,9 +248,10 @@ impl Db {
             "INSERT INTO sessions (id, id_known, project_id, file_path, source, transcript_missing, title, title_rank,
                 first_prompt, last_prompt, last_message, started_at, updated_at, git_branch, cwd, cc_version,
                 entrypoint, permission_mode, is_background, user_msg_count, assistant_msg_count, tool_use_count,
-                subagent_count, file_size, total_cost_usd, duration_ms, lines_added, lines_removed, pr_url, models)
+                subagent_count, file_size, total_cost_usd, duration_ms, lines_added, lines_removed, pr_url, models,
+                context_tokens, context_peak, context_model)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
-                ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)
+                ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)
              ON CONFLICT(id) DO UPDATE SET
                 id_known = excluded.id_known, project_id = excluded.project_id, file_path = excluded.file_path,
                 source = excluded.source, transcript_missing = excluded.transcript_missing, title = excluded.title,
@@ -256,7 +264,8 @@ impl Db {
                 subagent_count = excluded.subagent_count, file_size = excluded.file_size,
                 total_cost_usd = excluded.total_cost_usd, duration_ms = excluded.duration_ms,
                 lines_added = excluded.lines_added, lines_removed = excluded.lines_removed, pr_url = excluded.pr_url,
-                models = excluded.models",
+                models = excluded.models, context_tokens = excluded.context_tokens,
+                context_peak = excluded.context_peak, context_model = excluded.context_model",
             params![
                 s.id,
                 s.id_known,
@@ -288,6 +297,9 @@ impl Db {
                 s.lines_removed,
                 s.pr_url,
                 models,
+                s.context_tokens.map(|n| n as i64),
+                s.context_peak.map(|n| n as i64),
+                s.context_model,
             ],
         )?;
         self.conn.execute("DELETE FROM session_tool_counts WHERE session_id = ?1", [&s.id])?;
@@ -342,6 +354,10 @@ impl Db {
             args.push(since.into());
             sql.push_str(&format!(" AND s.updated_at >= ?{}", args.len()));
         }
+        if let Some(until) = filter.until_ms {
+            args.push(until.into());
+            sql.push_str(&format!(" AND s.updated_at < ?{}", args.len()));
+        }
         sql.push_str(match filter.order {
             Order::StartedDesc => " ORDER BY s.started_at IS NULL, s.started_at DESC, s.updated_at DESC, s.id",
             Order::UpdatedDesc => " ORDER BY s.updated_at DESC, s.id",
@@ -371,6 +387,7 @@ impl Db {
 
     pub fn delete_session(&self, id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
+        self.delete_usage(id, None)?;
         Ok(())
     }
 
@@ -466,30 +483,104 @@ impl Db {
         Ok(rows)
     }
 
+    // ---- api_usage ------------------------------------------------------------------------
+
+    /// Add API responses of a session's transcript (`agent` = "") or of one of its subagents.
+    /// A response already stored under the same id is replaced, keeping its earliest timestamp.
+    pub fn insert_usage(&self, session_id: &str, agent: &str, rows: &[UsageRow]) -> Result<()> {
+        let mut stmt = self.conn.prepare_cached(
+            "INSERT INTO api_usage (session_id, agent, msg_id, model, ts, input, cache_write_5m, cache_write_1h,
+                cache_read, output, web_search, fast, cost_usd)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+             ON CONFLICT(session_id, agent, msg_id) DO UPDATE SET
+                model = excluded.model, ts = min(api_usage.ts, excluded.ts), input = excluded.input,
+                cache_write_5m = excluded.cache_write_5m, cache_write_1h = excluded.cache_write_1h,
+                cache_read = excluded.cache_read, output = excluded.output, web_search = excluded.web_search,
+                fast = excluded.fast, cost_usd = excluded.cost_usd",
+        )?;
+        for u in rows {
+            stmt.execute(params![
+                session_id,
+                agent,
+                u.msg_id,
+                u.model,
+                u.ts,
+                u.input as i64,
+                u.cache_write_5m as i64,
+                u.cache_write_1h as i64,
+                u.cache_read as i64,
+                u.output as i64,
+                u.web_search as i64,
+                u.fast,
+                u.cost_usd,
+            ])?;
+        }
+        Ok(())
+    }
+
+    /// Drop a session's usage: all of it, or only what one file (`agent`) contributed.
+    pub fn delete_usage(&self, session_id: &str, agent: Option<&str>) -> Result<()> {
+        match agent {
+            Some(agent) => self.conn.execute("DELETE FROM api_usage WHERE session_id = ?1 AND agent = ?2", params![session_id, agent])?,
+            None => self.conn.execute("DELETE FROM api_usage WHERE session_id = ?1", [session_id])?,
+        };
+        Ok(())
+    }
+
+    /// Recompute a session's cost and token totals from its stored API responses.
+    pub fn refresh_session_usage(&self, session_id: &str) -> Result<()> {
+        let mut stmt = self.conn.prepare_cached(
+            "UPDATE sessions SET (cost_usd, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write) = (
+                SELECT sum(cost_usd), coalesce(sum(input), 0), coalesce(sum(output), 0), coalesce(sum(cache_read), 0),
+                    coalesce(sum(cache_write_5m + cache_write_1h), 0)
+                FROM api_usage WHERE session_id = ?1),
+             unpriced_models = (SELECT json_group_array(model) FROM
+                (SELECT DISTINCT model FROM api_usage WHERE session_id = ?1 AND cost_usd IS NULL ORDER BY model))
+             WHERE id = ?1",
+        )?;
+        stmt.execute([session_id])?;
+        Ok(())
+    }
+
+    /// Every stored API response of a session, in time order.
+    pub fn usage(&self, session_id: &str) -> Result<Vec<UsageRow>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT msg_id, model, ts, input, cache_write_5m, cache_write_1h, cache_read, output, web_search, fast, cost_usd
+             FROM api_usage WHERE session_id = ?1 ORDER BY ts, agent, msg_id",
+        )?;
+        let rows = stmt
+            .query_map([session_id], |r| {
+                Ok(UsageRow {
+                    msg_id: r.get(0)?,
+                    model: r.get(1)?,
+                    ts: r.get(2)?,
+                    input: r.get::<_, i64>(3)? as u64,
+                    cache_write_5m: r.get::<_, i64>(4)? as u64,
+                    cache_write_1h: r.get::<_, i64>(5)? as u64,
+                    cache_read: r.get::<_, i64>(6)? as u64,
+                    output: r.get::<_, i64>(7)? as u64,
+                    web_search: r.get::<_, i64>(8)? as u64,
+                    fast: r.get(9)?,
+                    cost_usd: r.get(10)?,
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        Ok(rows)
+    }
+
     // ---- index_state ----------------------------------------------------------------------
 
     pub fn index_state(&self, path: &Path) -> Result<Option<IndexState>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT session_id, size, mtime_ns, inode, indexed_offset FROM index_state WHERE path = ?1",
+            "SELECT session_id, agent, size, mtime_ns, inode, indexed_offset FROM index_state WHERE path = ?1",
         )?;
         Ok(stmt.query_row([path.to_string_lossy()], row_to_state).optional()?)
     }
 
     pub fn all_index_states(&self) -> Result<HashMap<PathBuf, IndexState>> {
-        let mut stmt = self.conn.prepare_cached("SELECT path, session_id, size, mtime_ns, inode, indexed_offset FROM index_state")?;
+        let mut stmt = self.conn.prepare_cached("SELECT path, session_id, agent, size, mtime_ns, inode, indexed_offset FROM index_state")?;
         let mut out = HashMap::new();
-        for row in stmt.query_map([], |r| {
-            Ok((
-                PathBuf::from(r.get::<_, String>(0)?),
-                IndexState {
-                    session_id: r.get(1)?,
-                    size: r.get::<_, i64>(2)? as u64,
-                    mtime_ns: r.get(3)?,
-                    inode: r.get::<_, Option<i64>>(4)?.map(|n| n as u64),
-                    indexed_offset: r.get::<_, i64>(5)? as u64,
-                },
-            ))
-        })? {
+        for row in stmt.query_map([], |r| Ok((PathBuf::from(r.get::<_, String>(0)?), row_to_state_at(r, 1)?)))? {
             let (path, state) = row?;
             out.insert(path, state);
         }
@@ -498,14 +589,15 @@ impl Db {
 
     pub fn set_index_state(&self, path: &Path, state: &IndexState) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO index_state (path, session_id, size, mtime_ns, inode, indexed_offset, indexed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(path) DO UPDATE SET session_id = excluded.session_id, size = excluded.size,
+            "INSERT INTO index_state (path, session_id, agent, size, mtime_ns, inode, indexed_offset, indexed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(path) DO UPDATE SET session_id = excluded.session_id, agent = excluded.agent, size = excluded.size,
                 mtime_ns = excluded.mtime_ns, inode = excluded.inode, indexed_offset = excluded.indexed_offset,
                 indexed_at = excluded.indexed_at",
             params![
                 path.to_string_lossy(),
                 state.session_id,
+                state.agent,
                 state.size as i64,
                 state.mtime_ns,
                 state.inode.map(|n| n as i64),
@@ -536,17 +628,26 @@ impl Db {
 }
 
 fn row_to_state(r: &Row) -> rusqlite::Result<IndexState> {
+    row_to_state_at(r, 0)
+}
+
+/// `session_id, agent, size, mtime_ns, inode, indexed_offset` starting at column `at`.
+fn row_to_state_at(r: &Row, at: usize) -> rusqlite::Result<IndexState> {
     Ok(IndexState {
-        session_id: r.get(0)?,
-        size: r.get::<_, i64>(1)? as u64,
-        mtime_ns: r.get(2)?,
-        inode: r.get::<_, Option<i64>>(3)?.map(|n| n as u64),
-        indexed_offset: r.get::<_, i64>(4)? as u64,
+        session_id: r.get(at)?,
+        agent: r.get(at + 1)?,
+        size: r.get::<_, i64>(at + 2)? as u64,
+        mtime_ns: r.get(at + 3)?,
+        inode: r.get::<_, Option<i64>>(at + 4)?.map(|n| n as u64),
+        indexed_offset: r.get::<_, i64>(at + 5)? as u64,
     })
 }
 
 fn row_to_session(r: &Row) -> rusqlite::Result<SessionSummary> {
     let models: Vec<String> = serde_json::from_str(&r.get::<_, String>(30)?).unwrap_or_default();
+    let unpriced: Vec<String> = serde_json::from_str(&r.get::<_, String>(36)?).unwrap_or_default();
+    let count = |ix: usize| -> rusqlite::Result<u64> { Ok(r.get::<_, i64>(ix)? as u64) };
+    let tokens = |ix: usize| -> rusqlite::Result<Option<u64>> { Ok(r.get::<_, Option<i64>>(ix)?.map(|n| n as u64)) };
     Ok(SessionSummary {
         id: r.get(0)?,
         id_known: r.get(1)?,
@@ -581,6 +682,15 @@ fn row_to_session(r: &Row) -> rusqlite::Result<SessionSummary> {
         tool_counts: BTreeMap::new(),
         files_touched: BTreeSet::new(),
         models: models.into_iter().collect(),
+        cost_usd: r.get(31)?,
+        tokens_in: count(32)?,
+        tokens_out: count(33)?,
+        tokens_cache_read: count(34)?,
+        tokens_cache_write: count(35)?,
+        unpriced_models: unpriced.into_iter().collect(),
+        context_tokens: tokens(37)?,
+        context_peak: tokens(38)?,
+        context_model: r.get(39)?,
     })
 }
 

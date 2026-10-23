@@ -302,8 +302,27 @@ impl AppRoot {
                     ))
                     .child(pair_row(
                         meta_pair("Size", mono_value(row.size_fmt.clone(), cx).into_any_element()),
-                        meta_pair("Cost", mono_value(row.cost_fmt.clone(), cx).into_any_element()),
+                        meta_pair(
+                            "Cost",
+                            h_flex()
+                                .gap(px(8.))
+                                .child(mono_value(row.cost_fmt.clone(), cx))
+                                .child(mono_value(format!("CC: {}", row.cc_cost_fmt).into(), cx).text_color(style::muted()))
+                                .into_any_element(),
+                        ),
                     ))
+                    .child(meta_pair("Tokens", mono_value(row.tokens_fmt.clone(), cx).into_any_element()))
+                    .child(meta_pair(
+                        "Context",
+                        h_flex()
+                            .gap(px(8.))
+                            .child(mono_value(row.context_fmt.clone(), cx))
+                            .child(mono_value(row.context_detail.clone(), cx).text_color(style::text_secondary()))
+                            .into_any_element(),
+                    ))
+                    .when(!row.unpriced.is_empty(), |el| {
+                        el.child(meta_pair("Unpriced", mono_value(row.unpriced.clone(), cx).text_color(style::muted()).into_any_element()))
+                    })
                     .child(pair_row(
                         meta_pair("Messages", mono_value(row.messages_fmt.clone(), cx).into_any_element()),
                         meta_pair("Duration", mono_value(row.duration_fmt.clone(), cx).into_any_element()),

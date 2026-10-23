@@ -23,10 +23,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_session_core::claude::paths::{ClaudeDir, default_db_path};
-use agent_session_core::format::human_size;
+use agent_session_core::format::{fmt_usd, human_size};
 use agent_session_core::index::ScanReport;
 use agent_session_core::search::Matcher;
 
+use chrono::NaiveDate;
+use gpui_kit::component::date_picker::{DatePickerEvent, DatePickerState};
 use gpui_kit::component::input::{Escape, InputEvent, InputState};
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::table::{ColumnSort, DataTable, TableEvent, TableState};
@@ -98,6 +100,10 @@ pub struct AppRoot {
     search_summary: Option<SearchSummary>,
     search_error: Option<SharedString>,
     range: RangePreset,
+    /// The Custom range once one was picked; until then Custom means this month so far.
+    custom_range: Option<(NaiveDate, NaiveDate)>,
+    /// Picks the Custom range; shown next to the Updated button while Custom is on.
+    date_picker: Entity<DatePickerState>,
     selected: Option<Arc<SessionRow>>,
     /// Selection to restore once its row shows up (saved state, or a row filtered away and back).
     wanted_id: Option<SharedString>,
@@ -147,9 +153,11 @@ impl AppRoot {
         let saved = ViewState::load(&state_path);
         let mut delegate = SessionTableDelegate::new();
         delegate.mode = saved.mode;
+        let (since_ms, until_ms) = saved.range.bounds(saved.custom_range);
         delegate.set_filter(Filter {
             project: saved.project_key.clone().map(Into::into),
-            since_ms: saved.range.since_ms(),
+            since_ms,
+            until_ms,
             show_empty: saved.show_empty,
             kinds: saved.kinds,
             hidden_projects: saved.hidden_projects.iter().cloned().map(Into::into).collect(),
@@ -163,6 +171,12 @@ impl AppRoot {
         // escape is handled by `clear_search` (the box propagates it), which also hands the focus back
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions"));
         let resizable = cx.new(|_| ResizableState::default());
+        let shown_range = saved.custom_range.unwrap_or_else(|| RangePreset::default_custom(chrono::Local::now().date_naive()));
+        let date_picker = cx.new(|cx| {
+            let mut picker = DatePickerState::range(window, cx).date_format("%Y-%m-%d");
+            picker.set_date(shown_range, window, cx);
+            picker
+        });
 
         let subscriptions = vec![
             cx.subscribe_in(&table, window, Self::on_table_event),
@@ -176,6 +190,14 @@ impl AppRoot {
             }),
             // header clicks sort inside the table; persist whatever changed once it settles
             cx.observe(&table, |this, _, cx| this.persist(cx)),
+            // a range is complete once both ends are picked (presets pick both at once)
+            cx.subscribe_in(&date_picker, window, |this, _, ev: &DatePickerEvent, window, cx| {
+                let DatePickerEvent::Change(date) = ev;
+                if let (Some(start), Some(end)) = (date.start(), date.end()) {
+                    this.set_custom_range(start, end, cx);
+                }
+                this.focus_table(window, cx);
+            }),
         ];
 
         let (store, events) = Store::spawn(paths.claude, paths.db.clone());
@@ -221,6 +243,8 @@ impl AppRoot {
             search_summary: None,
             search_error: None,
             range: saved.range,
+            custom_range: saved.custom_range,
+            date_picker,
             selected: None,
             wanted_id: saved.selected_id.clone().map(Into::into),
             detail: DetailState::default(),
@@ -361,6 +385,7 @@ impl AppRoot {
             sort: delegate.sort_state().filter(|(key, _)| key != "matches").and_then(|(key, sort)| Some((key.to_string(), SortDir::from_column(sort)?))),
             project_key: delegate.filter().project.as_ref().map(|p| p.to_string()),
             range: self.range,
+            custom_range: self.custom_range,
             show_empty: delegate.filter().show_empty,
             kinds: delegate.filter().kinds,
             hidden_projects: delegate.filter().hidden_projects.iter().map(|p| p.to_string()).collect(),
@@ -420,13 +445,13 @@ impl AppRoot {
                 let name = busiest.as_ref().map(|p| p.name.clone()).unwrap_or_default();
                 this.set_project(busiest.map(|p| p.key), cx);
                 this.table.update(cx, |table, cx| {
-                    table.delegate_mut().set_sort("prompts", ColumnSort::Descending);
+                    table.delegate_mut().set_sort("cost", ColumnSort::Descending);
                     table.refresh(cx);
                     table.scroll_to_row(0, cx);
                 });
                 this.select_row(0, cx);
                 this.set_detail_tab(DetailTab::Metadata, cx);
-                this.status = format!("autoplay: {name} · 30 days · sorted by Prompts desc").into();
+                this.status = format!("autoplay: {name} · 30 days · sorted by Cost desc").into();
                 cx.notify();
             })
             .ok();
@@ -508,7 +533,7 @@ impl AppRoot {
     }
 
     /// Keyboard focus to the table: arrows move the selection, `n` / `shift-n` step through hits.
-    fn focus_table(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_table(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = self.table.read(cx).focus_handle(cx).clone();
         handle.focus(window, cx);
     }
@@ -542,7 +567,7 @@ impl AppRoot {
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> StatusBar {
         let delegate = self.table.read(cx).delegate();
-        let (shown, total) = (delegate.ix.len(), delegate.rows.len());
+        let (shown, total, cost) = (delegate.ix.len(), delegate.rows.len(), delegate.shown_cost);
         let index = match &self.index_status {
             IndexStatus::Loading => "loading index…".into(),
             IndexStatus::Scanning { done, total } => format!("indexing {done} / {total} files").into(),
@@ -561,7 +586,7 @@ impl AppRoot {
             .font_family(style::mono(cx))
             .text_size(px(11.))
             .text_color(style::head_fg())
-            .left(format!("{shown} / {total} sessions"))
+            .left(format!("{shown} / {total} sessions · {}", fmt_usd(cost)))
             .child(center)
             .right(format!("{took}{}{first_rows}", self.db_info))
     }

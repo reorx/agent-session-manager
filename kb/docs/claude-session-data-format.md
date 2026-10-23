@@ -1,5 +1,6 @@
 ---
 created: 2026-09-08
+updated: 2026-10-23
 tags:
   - claude-code
   - data-format
@@ -26,7 +27,7 @@ tags:
 | `~/.claude/sessions/<pid>.json` | 当前存活进程的运行时信息 | 进程退出即删除，可用于判断"session 正在运行" |
 | `~/.claude/file-history/` | 文件修改备份，与 `file-history-*` 记录对应 | — |
 
-规模（本机）：85 个项目目录、654 份主 transcript + 239 份 subagent transcript、917MB；最大单文件 30MB；history.jsonl 11,520 行 / 3.8MB。Python `json.loads` 全量扫描 2.6s（页缓存热，328MB/s），Rust 预期快 5–10 倍。
+规模（本机，2026-10-23）：156 个项目目录、1,942 份主 transcript（2.9GB）+ 257 份 subagent transcript（196MB）；最大单文件 70MB；history.jsonl 已被 Claude Code 截短到 408 行。2026-09-08 时是 654 份、917MB，增长很快，估算性能时以最新数字为准。Rust 索引器冷启动全量扫描约 3.6s（页缓存热），其中写库约 3.3s。
 
 ### 项目路径编码
 
@@ -70,7 +71,7 @@ assistant 特有：`requestId`、`effort`、`message.model`、`message.id`、`me
 | type | 出现于多少 session | 字段 | 用途 |
 |---|---|---|---|
 | `last-prompt` | 585 / 654 | `lastPrompt`（截断到 ~200 字，末尾 `…`）、`leafUuid` | "最后一条用户消息"的快速来源；文件里可能多条，取最后一条 |
-| `cost-state` | 98 | `totalCostUSD`、`totalAPIDuration`、`totalToolDuration`、`totalLinesAdded/Removed`、`totalDuration`、`startTime`(ms)、`modelUsage{model: {inputTokens, outputTokens, thinkingTokens, cacheRead.., cacheCreation.., costUSD}}` | 费用/耗时列；多条取最后 |
+| `cost-state` | 1,636 份文件（2026-10-23） | `totalCostUSD`、`totalAPIDuration`、`totalToolDuration`、`totalLinesAdded/Removed`、`totalDuration`、`startTime`(ms)、`modelUsage{model: {inputTokens, outputTokens, thinkingTokens, cacheRead.., cacheCreation.., costUSD}}` | 费用/耗时列；多条取最后 |
 | `ai-title` | 5 | `aiTitle` | AI 生成的短标题（新版本才有） |
 | `custom-title` | 2 | `customTitle` | 用户 `/rename` 的标题 |
 | `agent-name` | 5 | `agentName` | 同 custom-title 语义 |
@@ -90,6 +91,17 @@ assistant 特有：`requestId`、`effort`、`message.model`、`message.id`、`me
 | `file-history-snapshot` / `file-history-delta` | 4,417 | 文件备份跟踪；`trackingPath` 可派生"本 session 修改过的文件列表" |
 | `queue-operation` | 1,478 | 排队输入（`operation: enqueue/dequeue`, `content`） |
 
+### 2.4 用量与费用
+
+费用和 context 占用都从 assistant 记录的 `message.usage` 算，结论来自 2026-10-23 的全量统计：
+
+- **一次 API 响应会写成多条记录。** 每个内容块（thinking、text、tool_use）各一条 assistant 记录，它们的 `message.id`、`requestId` 相同，`usage` 完全相同。本机 117,536 条 assistant 记录只对应 53,525 次响应，不去重 token 会多算约 2.2 倍。去重键依次取 `message.id` → `requestId` → 记录 `uuid`。增量索引可能把同一次响应的几条记录切在两次扫描之间，所以去重要跨扫描进行。
+- **`usage` 的字段**：`input_tokens`（未命中缓存的输入）、`cache_creation_input_tokens` 及其细分 `cache_creation.ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens`、`cache_read_input_tokens`、`output_tokens`（含 thinking）、`server_tool_use.web_search_requests`、`speed`（`standard` / `fast`）、`service_tier`、`inference_geo`。没有细分字段的旧记录，缓存写入全按 5 分钟算。本机 `speed: fast` 有 422 条，`web_search_requests` 全为 0，`service_tier` 全为 standard，`inference_geo` 只有 `global` 和 `not_available`（没有要加价 1.1 倍的 US-only）。
+- **`<synthetic>` 不是 API 调用**：`message.model == "<synthetic>"` 的记录是 Claude Code 自己写的（中断、报错），usage 全 0，不计价，也不算进模型列表。
+- **subagent 的花费不能忽略**：257 份 subagent transcript 有 5,545 次响应，cache read 6.16 亿 token、cache write 3,157 万 token，折合几百美元。它们的记录 `isSidechain = true`；主 transcript 里没有 sidechain 的 assistant 记录。
+- **`[1m]` 标记不可靠**：`message.model` 从不带 `[1m]`，`cost-state.modelUsage` 的键有时带（`claude-opus-5[1m]`）。带不带标记都有 session 超过 200K（最高 827K），所以 context 窗口按模型查表（Haiku 4.5 为 200K，当前其余模型 1M），不看标记。
+- **`cost-state` 不适合当费用来源**：1,636 份文件里有，其中 670 份 `totalCostUSD = 0`，更早的 session 没有这条记录；被 resume 过的 session 常常只记了最后一次运行（例：一个 session 的记录只覆盖了 32M cache read 里的 3.1M）。它确实包含 subagent 的费用，而且单次运行内的计算口径与官方价格一致（1 小时缓存写入按 2 倍输入价，两份抽样精确到小数点后 6 位）。按 usage 自算后，在 973 个 `cost-state` 非 0 的 session 上：61% 误差在 1% 以内、96% 在 10% 以内，合计相差 1.07%（自算偏低）。偏低推测来自 transcript 之外的调用（标题生成、auto mode 分类器、compact 等），未验证。
+
 ## 3. 派生字段（每个 session 一行）
 
 | 字段 | 来源 | 备注 |
@@ -108,7 +120,9 @@ assistant 特有：`requestId`、`effort`、`message.model`、`message.id`、`me
 | `message_count` | user+assistant 记录数 | |
 | `tool_use_count` / `tool_names` | tool_use block 聚合 | 可做 "用过 Bash/Edit" 过滤 |
 | `size_bytes` | 文件大小 | |
-| `cost_usd` / `models` | `cost-state` | 仅新版本有 |
+| `cost_usd` | assistant 记录的 `message.usage` × 价格表，subagent 计入父 session | 见 2.4；`cost-state.totalCostUSD` 另存作对照 |
+| `context_tokens` / `context_peak` | 最后一次 / 最大一次主线调用的输入 token（含缓存读写） | 除以模型窗口得到占用比例 |
+| `models` | `message.model` | 不含 `<synthetic>` |
 | `duration_ms` | `cost-state.totalDuration` 或 `turn_duration` 累计 | |
 | `permission_mode` | 最后一条 `permission-mode` | |
 | `is_background` | `sessionKind == bg` | |

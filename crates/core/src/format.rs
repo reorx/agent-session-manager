@@ -30,6 +30,24 @@ pub fn fmt_time(ms: Option<i64>) -> String {
     }
 }
 
+/// `$3.42`, two decimals (sub-cent costs show as `$0.00`).
+pub fn fmt_usd(usd: f64) -> String {
+    format!("${usd:.2}")
+}
+
+/// `512`, `41k`, `1.2M`, `1M` — token counts at a glance.
+pub fn fmt_tokens(n: u64) -> String {
+    if n < 1000 {
+        return n.to_string();
+    }
+    let k = (n as f64 / 1000.0).round();
+    if k < 1000.0 {
+        return format!("{k:.0}k");
+    }
+    let m = format!("{:.1}", n as f64 / 1e6);
+    format!("{}M", m.strip_suffix(".0").unwrap_or(&m))
+}
+
 /// Parse an RFC 3339 timestamp (`2026-09-01T08:00:01.000Z`) into unix ms.
 pub fn parse_ts(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp_millis())

@@ -3,7 +3,8 @@
 
 mod common;
 
-use agent_session_core::index::{Db, Indexer, ListFilter, Order, ScanEvent};
+use agent_session_core::claude::parse::parse_transcript;
+use agent_session_core::index::{Db, Indexer, ListFilter, Order, SCHEMA_VERSION, ScanEvent};
 use agent_session_core::model::{Role, SessionSummary, Source};
 use common::*;
 
@@ -22,6 +23,7 @@ fn first_scan_indexes_transcripts_and_fills_gaps_from_history() {
     let report = scan(&sb, &mut db);
     assert_eq!(report.files_seen, 4, "top-level *.jsonl only; subagents and memory are not sessions");
     assert_eq!(report.files_parsed, 4);
+    assert_eq!((report.subagents_seen, report.subagents_parsed), (1, 1), "subagents are scanned for their cost");
     assert_eq!(report.files_unchanged, 0);
     assert_eq!(report.history_sessions, 4, "S4, S6 and two anonymous beta sessions");
 
@@ -40,6 +42,7 @@ fn first_scan_indexes_transcripts_and_fills_gaps_from_history() {
 
     let s4 = db.session(S4).unwrap().unwrap();
     assert_eq!(s4.source, Source::History);
+    assert_eq!((s4.cost_usd, s4.tokens_in, s4.context_tokens), (None, 0, None), "history knows nothing of usage");
     assert_eq!(s4.user_msg_count, 4);
     assert_eq!(s4.first_prompt, "Fix the flaky test\n\nline1\nline2\nline3");
     assert!(db.session(S6).unwrap().is_some(), "project known only from history");
@@ -183,6 +186,8 @@ fn a_rewritten_file_is_reindexed_from_scratch() {
     assert_eq!(s1.title, None, "stale fields from the old content are gone");
     assert_eq!(s1.tool_use_count, 0);
     assert_eq!(db.messages(S1).unwrap().len(), 2);
+    assert_close(s1.cost_usd, HAIKU_REPLY + SUBAGENT, "the old main usage is gone, the subagent's stays");
+    assert_eq!(s1.context_model.as_deref(), Some("claude-haiku-4-5-20251001"));
 }
 
 #[test]
@@ -196,6 +201,7 @@ fn a_deleted_transcript_keeps_its_row_marked_missing_and_drops_its_messages() {
     let s1 = db.session(S1).unwrap().unwrap();
     assert!(s1.transcript_missing);
     assert_eq!(s1.user_msg_count, 3, "metadata gathered while the file existed is kept");
+    assert_close(s1.cost_usd, S1_MAIN + SUBAGENT, "and so is what it cost");
     assert!(db.messages(S1).unwrap().is_empty());
     assert!(db.index_state(&sb.transcript(ALPHA, S1)).unwrap().is_none());
     // a second scan does not report it again
@@ -229,10 +235,11 @@ fn schema_version_mismatch_and_corrupt_files_trigger_a_rebuild() {
     {
         let mut db = Db::open(&sb.db_path()).unwrap();
         scan(&sb, &mut db);
-        db.set_user_version_for_test(0);
+        db.set_user_version_for_test(SCHEMA_VERSION - 1);
     }
     let db = Db::open(&sb.db_path()).unwrap();
     assert!(db.list_sessions(&ListFilter::default()).unwrap().is_empty(), "old schema is dropped");
+    assert!(db.index_state(&sb.transcript(ALPHA, S1)).unwrap().is_none(), "so every file is parsed again");
     drop(db);
 
     std::fs::write(sb.db_path(), b"this is not a sqlite database").unwrap();
@@ -346,4 +353,141 @@ fn a_read_only_connection_searches_while_the_writer_keeps_the_index() {
     assert_eq!(reader.list_sessions(&Default::default()).unwrap().len(), db.list_sessions(&Default::default()).unwrap().len());
     assert!(reader.conn().execute("DELETE FROM sessions", []).is_err(), "the reader cannot write");
     assert!(Db::open_read_only(&sb.tmp.path().join("missing.sqlite")).is_err(), "and never creates an index");
+}
+
+/// Fixture costs: S1's own five API responses (Opus 5, one in fast mode), its subagent's single
+/// Sonnet 5 reply, and the Haiku 4.5 reply of S2.
+const S1_MAIN: f64 = 0.12194;
+const SUBAGENT: f64 = (50.0 * 2.0 + 1000.0 * 2.5 + 500.0 * 10.0) / 1e6;
+const HAIKU_REPLY: f64 = (10.0 * 1.0 + 20.0 * 5.0) / 1e6;
+
+fn assert_close(got: Option<f64>, want: f64, what: &str) {
+    let got = got.unwrap_or_else(|| panic!("{what}: no cost"));
+    assert!((got - want).abs() < 1e-9, "{what}: {got} != {want}");
+}
+
+fn subagent_path(sb: &Sandbox) -> std::path::PathBuf {
+    sb.root().join("projects").join(ALPHA).join(S1).join("subagents/agent-a1b2c3.jsonl")
+}
+
+fn reply(msg_id: &str, model: &str, input: u64, output: u64, sidechain: bool) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "assistant", "isSidechain": sidechain, "uuid": format!("u-{msg_id}-{input}"),
+            "timestamp": "2026-09-06T00:00:00.000Z", "requestId": format!("req-{msg_id}"),
+            "message": {"id": msg_id, "model": model, "role": "assistant", "content": [{"type": "text", "text": "ok"}],
+                        "usage": {"input_tokens": input, "output_tokens": output}},
+        })
+    )
+}
+
+#[test]
+fn sessions_carry_their_cost_tokens_and_context_with_subagents_counted_in() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    let s1 = db.session(S1).unwrap().unwrap();
+    assert_close(s1.cost_usd, S1_MAIN + SUBAGENT, "S1");
+    assert_eq!((s1.tokens_in, s1.tokens_out, s1.tokens_cache_read, s1.tokens_cache_write), (12 + 50, 1050 + 500, 89_000, 2900 + 1000));
+    assert_eq!((s1.context_tokens, s1.context_peak), (Some(14_305), Some(40_001)), "the subagent's calls are not the session's context");
+    assert_eq!(s1.context_model.as_deref(), Some("claude-opus-5"));
+    assert_eq!(s1.total_cost_usd, Some(1.2345), "Claude Code's own figure is still there");
+    assert!(s1.unpriced_models.is_empty());
+    assert_close(db.session(S2).unwrap().unwrap().cost_usd, HAIKU_REPLY, "S2 (its <synthetic> record is free)");
+    assert_eq!(db.session(S5).unwrap().unwrap().cost_usd, None, "a session without any API call has no cost");
+}
+
+#[test]
+fn a_response_cut_between_two_scans_is_counted_once() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    let path = sb.transcript(ALPHA, S2);
+    append(&path, &reply("msg-cut", "claude-haiku-4-5-20251001", 100, 10, false));
+    set_mtime(&path, MTIME_S2 + 1_000);
+    scan(&sb, &mut db);
+    append(&path, &reply("msg-cut", "claude-haiku-4-5-20251001", 100, 10, false));
+    set_mtime(&path, MTIME_S2 + 2_000);
+    let report = scan(&sb, &mut db);
+    assert_eq!(report.files_appended, 1);
+    let s2 = db.session(S2).unwrap().unwrap();
+    let full = parse_transcript(&path).unwrap().summary;
+    assert_close(s2.cost_usd, full.cost_usd.unwrap(), "incremental == full parse");
+    assert_close(s2.cost_usd, HAIKU_REPLY + (100.0 + 10.0 * 5.0) / 1e6, "the second half adds nothing");
+    assert_eq!(s2.tokens_in, 10 + 100);
+    assert_eq!((s2.context_tokens, s2.context_peak), (Some(100), Some(100)));
+}
+
+#[test]
+fn a_subagent_that_grows_raises_its_parents_cost_and_streams_the_parent_again() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan_streaming(&sb, &mut db);
+    append(&subagent_path(&sb), &reply("msg-sub-2", "claude-sonnet-5", 1_000_000, 0, true));
+    let mut streamed = Vec::new();
+    let report = Indexer::new(sb.claude.clone())
+        .scan_streaming(&mut db, &mut |ev| {
+            if let ScanEvent::Session(s) = ev {
+                streamed.push(s);
+            }
+        })
+        .unwrap();
+    assert_eq!((report.files_appended, report.subagents_parsed), (0, 1), "only the subagent file changed");
+    assert_eq!(streamed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [S1], "the parent row is sent once");
+    assert_close(streamed[0].cost_usd, S1_MAIN + SUBAGENT + 2.0, "a million Sonnet 5 input tokens");
+    assert_eq!(streamed[0].context_tokens, Some(14_305), "the context is still the main thread's");
+    assert!(scan_streaming(&sb, &mut db).is_empty(), "and the next scan is quiet again");
+}
+
+#[test]
+fn a_deleted_subagent_takes_its_cost_along_but_leaves_the_parent_alone() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    std::fs::remove_file(subagent_path(&sb)).unwrap();
+    let streamed = scan_streaming(&sb, &mut db);
+    assert_eq!(streamed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [S1]);
+    let s1 = db.session(S1).unwrap().unwrap();
+    assert_close(s1.cost_usd, S1_MAIN, "S1 without its subagent");
+    assert!(!s1.transcript_missing, "the session's own transcript is still there");
+    assert!(db.index_state(&subagent_path(&sb)).unwrap().is_none());
+    assert!(scan_streaming(&sb, &mut db).is_empty());
+}
+
+#[test]
+fn a_new_subagent_of_an_unchanged_session_is_picked_up() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    let dir = sb.root().join("projects").join(BETA).join(S3).join("subagents");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("agent-zz.jsonl"), reply("msg-zz", "claude-opus-5", 1_000_000, 0, true)).unwrap();
+    let report = scan(&sb, &mut db);
+    assert_eq!((report.subagents_seen, report.subagents_parsed), (2, 1));
+    let s3 = db.session(S3).unwrap().unwrap();
+    assert_close(s3.cost_usd, 2.0 * (10.0 * 5.0 + 20.0 * 25.0) / 1e6 + 5.0, "two own replies + a million Opus 5 input tokens");
+}
+
+#[test]
+fn rebuild_clears_the_usage_too() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    let before = db.session(S1).unwrap().unwrap().cost_usd;
+    Indexer::new(sb.claude.clone()).rebuild(&mut db, &mut |_| {}).unwrap();
+    assert_eq!(db.session(S1).unwrap().unwrap().cost_usd, before, "a rebuild counts every response exactly once again");
+}
+
+#[test]
+fn a_cleaned_up_session_keeps_what_its_subagents_cost() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    std::fs::remove_file(sb.transcript(ALPHA, S1)).unwrap();
+    std::fs::remove_dir_all(sb.root().join("projects").join(ALPHA).join(S1)).unwrap();
+    let streamed = scan_streaming(&sb, &mut db);
+    assert_eq!(streamed.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), [S1], "sent once, as history only");
+    assert!(streamed[0].transcript_missing);
+    assert_close(streamed[0].cost_usd, S1_MAIN + SUBAGENT, "Claude Code removed both files; the money was still spent");
 }

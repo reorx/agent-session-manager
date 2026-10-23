@@ -1,6 +1,6 @@
 ---
 created: 2026-09-28
-updated: 2026-09-28
+updated: 2026-10-23
 tags:
   - gpui
   - gpui-kit
@@ -181,7 +181,7 @@ use core::prelude::v1::test;
 
 需要自动驱动界面时，优先加环境变量控制的内置脚本（`ASM_SPIKE_AUTOPLAY=1`：启动后滚动并选中，再切过滤、排序和 tab）。它走的是和用户操作相同的代码路径，不依赖屏幕坐标。
 
-下拉菜单这类弹出层目前没有找到程序化打开的办法，只能用 cliclick 真点击。点击坐标是相对窗口的固定值，任何让控件移位的布局改动都要重新校对。详情面板的标题限制为单行也是这个原因：两行标题会把下面的 tab 和 chip 推下去 25px。
+下拉菜单这类弹出层目前没有找到程序化打开的办法，只能用 cliclick 真点击。点击坐标是相对窗口的固定值，任何让控件移位的布局改动都要重新校对；工具栏按钮的位置取决于左边按钮的标签长度（选了项目、出现日期选择器都会把右边的按钮推开）。脚本启动的窗口不在前台，第一次点击只会激活窗口；GPUI 按上一帧的悬停状态判定点中了什么，指针瞬移过去立刻点击可能落空。所以 `screenshot-clicks.sh` 先点一下标题栏，每次点击前先把指针移过去停 200ms。详情面板的标题限制为单行也是这个原因：两行标题会把下面的 tab 和 chip 推下去 25px。
 
 **不要用固定的 `sleep` 等界面就绪。** 新编译的二进制首次启动要几秒才出窗口，等不够就截到空窗口或上一帧的画面；`set -euo pipefail` 下这类失败经常没有任何输出，看起来就像脚本正常跑完了。做法是让 app 在每一步稳定后打一行标记（`autoplay-search: <step>`），脚本轮询窗口 id 和日志里的标记，超时就报错并指向 app 日志。`screenshot-search.sh` 是这个写法的参考。
 
@@ -202,6 +202,7 @@ use core::prelude::v1::test;
 | `TabBar::on_click` | 回调签名 `Fn(&usize, &mut Window, &mut App)`，可直接传 `cx.listener(..)` |
 | `StatusBar` | `.left(..)`、`.right(..)`，`.child(..)` 进中间区域 |
 | `date_picker` / `calendar` | 在 `component::date_picker` / `component::calendar` |
+| `DatePickerState::range(window, cx)` | 区间模式；`number_of_months`、`presets` 设在 `DatePicker` 元素上。只有起止两端都选好才发 `DatePickerEvent::Change`，第一下点击不发；快捷项直接发 `Change`。选完后它把焦点交给自己，订阅里要把焦点还给表格 |
 | `cx.theme()` | 需要导入 `component::ActiveTheme` |
 | `overflow_y_scrollbar()` | 在 `component::scroll::ScrollableElement` |
 | `Window::viewport_size()` | 无参 |

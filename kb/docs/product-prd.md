@@ -1,6 +1,6 @@
 ---
 created: 2026-09-15
-updated: 2026-09-28
+updated: 2026-10-23
 tags:
   - prd
   - product
@@ -39,13 +39,14 @@ tags:
 
 | 模块 | 状态 | 说明 |
 |---|---|---|
-| Session 表格 | ✅ | 7 列（Project / Preview / Started / Updated / Prompts / Size / Kind）、36px 两行、虚拟滚动、行选中、表头排序；Preview 列随窗口自适应 |
+| Session 表格 | ✅ | 9 列（Project / Preview / Started / Updated / Prompts / Cost / Ctx / Size / Kind）、36px 两行、虚拟滚动、行选中、表头排序；Preview 列随窗口自适应 |
+| 费用与 context | ✅ | 2026-10-23 完成：Cost 按 token 用量和官方价格自算（含 subagent），Ctx 是结束时的 context 占用；状态栏合计当前显示行的费用；`asm cost` 命令行同样可用，见 `../plans/2026-10-23-cost-context-columns.md` |
 | Preview 展示模式切换 | ✅ | 工具栏 Preview 下拉或 `cmd-1..4`，四种模式即时切换 |
-| 详情面板 | ✅ Metadata / 🟡 Conversation | 头部 + 两个 tab；Metadata 为真实数据（含 cost、时长、模型、权限模式、top 工具）；Conversation 暂时显示索引里的 user / assistant 文本（前 300 条），工具调用 / thinking 的折叠行要等 M4 直接读 transcript；尚无 Markdown 渲染。M4 方案已写好（`../plans/2026-09-28-m4-detail-panel.md`），尚未开工 |
+| 详情面板 | ✅ Metadata / 🟡 Conversation | 头部 + 两个 tab；Metadata 为真实数据（含自算费用与 Claude Code 记录的费用、token 用量、context、时长、模型、权限模式、top 工具）；Conversation 暂时显示索引里的 user / assistant 文本（前 300 条），工具调用 / thinking 的折叠行要等 M4 直接读 transcript；尚无 Markdown 渲染。M4 方案已写好（`../plans/2026-09-28-m4-detail-panel.md`），尚未开工 |
 | 分栏与折叠 | ✅ | 拖拽调宽，快捷键折叠 |
-| 状态栏 | ✅ | 左：显示数 / 总数；中：操作状态 + 索引状态（loading / indexing n / m / 完成摘要 / 错误）；右：消息数、DB 大小、首批行上屏耗时 |
+| 状态栏 | ✅ | 左：显示数 / 总数 · 显示行的费用合计；中：操作状态 + 索引状态（loading / indexing n / m / 完成摘要 / 错误）；右：消息数、DB 大小、首批行上屏耗时 |
 | 搜索框与范围切换 | ✅ | 搜索框（`cmd-f` 聚焦、Enter 回到表格、`esc` 清空）、Scope 多选、`.*` 正则开关、`Aa` 大小写、Labels 多选；选项重启后保留 |
-| 时间范围过滤 | ✅ 预设 / ⬜ 自定义区间 | Updated 下拉：Today / 3 / 7 / 30 days / Any time，即时过滤 |
+| 时间范围过滤 | ✅ | Updated 下拉：Today / 3 / 7 / 30 days / Any time / This month / Last month / 自定义起止日期，即时过滤 |
 | 项目过滤 | ✅ 单选 + 隐藏项目 | Project 下拉按最近活动列出真实项目与 session 数；可把噪音项目（如 CodexBar 的 `ClaudeProbe`）整个隐藏并随时恢复；多选、可搜索、worktree 聚合待做 |
 | Kind 过滤 | ✅ | Kind 多选下拉（CLI / SDK / BG / History，各带 session 数），默认全选，选择持久化 |
 | 更多过滤 | ⬜ | 最少 prompt 数的界面控件、使用过的工具、有 PR、有 subagent |
@@ -53,7 +54,7 @@ tags:
 | 真实数据读取与索引 | ✅ | 解析器、增量 SQLite 索引、history.jsonl 补位、损坏自动重建；界面热启动约 200ms 出表（5488 行），冷索引 1.27GB 约 4s 且表格流式填充；Index 菜单可手动 Scan / Rebuild |
 | 实时更新 | ⬜ | |
 | 快捷键与菜单 | ✅ 部分 | 退出、折叠详情面板、`cmd-f`、`cmd-1..4`、`cmd-shift-r` 重建索引；View 菜单可显示 / 隐藏没有 prompt 的空 session。启动后焦点在表格上，不需要先点击就能用快捷键 |
-| 设置与状态持久化 | ✅ 视图状态 / ⬜ 设置页 | 项目与时间过滤、排序、Preview 模式、空 session 开关、详情面板开合、选中行存 `state.json`，下次启动恢复 |
+| 设置与状态持久化 | ✅ 视图状态 / ⬜ 设置页 | 项目与时间过滤（含自定义区间）、排序、Preview 模式、空 session 开关、详情面板开合、选中行存 `state.json`，下次启动恢复 |
 | 精简 TXT 导出 | ✅ CLI / ⬜ GUI | 2026-10-10 完成 Transcript Reader：通过 Session ID、唯一前缀或文件路径导出用户输入、最终回复与工具计数，去掉思考和工具结果；GUI 待 M4 复用 core 接口，见 `../notes/2026-10-10-transcript-reader.md` |
 
 ## 3. 产品架构
@@ -85,10 +86,14 @@ tags:
 | Preview | 两行：第一行标题，第二行按展示模式显示的预览文本（灰色） | 否 |
 | Started / Updated | 首条消息时间 / 最后活动时间，`MM-DD HH:mm` | 是，Updated 为默认排序 |
 | Prompts | 用户消息数 | 是 |
+| Cost | session 整个生命周期的费用（含 subagent），如 `$3.42`；算不出来显示 `—` | 是；没有费用的视为最低，降序时排在最后 |
+| Ctx | 结束时 context 占用：最后一次主线调用的输入 token（含缓存）÷ 该模型的窗口，如 `41%`、`<1%` | 是；没有数据的视为最低，降序时排在最后 |
 | Size | 记录文件大小 | 是 |
 | Kind | 来源徽章：普通 CLI 不标记；**SDK** / **BG**（后台）/ **HIST**（记录已被清理，仅剩历史 prompt） | 是 |
 
-Cost、Branch、Tools、ID 不再作为列，只在详情面板的 Metadata 里显示（设计稿把表格收敛到 7 列）。Preview 列第一行是标题，第二行按展示模式显示灰色预览（换行显示为 `⏎`，截到 240 字）。没有任何 prompt 的空 session 默认隐藏，View 菜单可切换。
+Branch、Tools、ID 不作为列，只在详情面板的 Metadata 里显示（设计稿把表格收敛到 7 列，Cost 和 Ctx 是后加的）。
+
+**费用怎么算**：每次 API 调用的 token 用量（输入、输出、5 分钟 / 1 小时缓存写入、缓存读取、fast mode）乘以官方价格，subagent 的调用计入它所属的 session。Claude Code 自己也会记一个数（`cost-state`），但很多 session 没有这条记录或记成 0，被 resume 过的 session 往往只记了最后一次运行，所以只在详情里作为对照。本机实测：Claude Code 记了费用的 973 个 session 里 96% 与自算相差不到 10%，合计相差约 1%。自算不含记录文件之外的调用（标题生成、分类器等）。新模型上线后要更新价格表，在此之前它的调用不计价，详情里会列出这些模型。Preview 列第一行是标题，第二行按展示模式显示灰色预览（换行显示为 `⏎`，截到 240 字）。没有任何 prompt 的空 session 默认隐藏，View 菜单可切换。
 
 **交互**：单击选中并刷新详情面板；双击展开详情面板；表头点击三态排序（升 / 降 / 恢复默认），同值按更新时间倒序保持稳定；列宽可拖拽；键盘上下、Home / End、翻页导航。
 
@@ -106,7 +111,7 @@ Cost、Branch、Tools、ID 不再作为列，只在详情面板的 Metadata 里�
 
 工具栏左侧，多个条件叠加生效，结果实时更新（真实 5488 行 0–1ms，状态栏显示耗时）。过滤后保持原选中行，若它被滤掉则选中第一行。
 
-- **时间范围**：「Updated ▾」下拉，预设 Today / 3 days / 7 days / 30 days / Any time，已过滤数据。自定义日期区间、切换为 Started 待做。
+- **时间范围**：「Updated ▾」下拉，预设 Today / 3 days / 7 days / 30 days / Any time、This month / Last month，分隔线后是 Custom range…。选 Custom 后按钮右侧出现日期区间选择器（两个月并排，左侧有本月 / 上月 / 近 7 天 / 近 30 天快捷项，起止日都包含在内，首次默认本月 1 日到今天）；选完表格立即过滤，焦点回到表格。判断的是 session 的最后活动时间，费用仍按整个 session 计，不按天切分。切换为 Started 待做。
 - **项目**：「Project ▾」下拉，按最近活动列出所有项目与各自 session 数，单选。待做：可搜索（真实数据上百个项目，目前靠滚动）、多选、worktree 聚合。
 - **隐藏项目**（✅）：把整个项目从表格里排除，用于探针 / 监控工具产生的噪音目录（真实数据里 CodexBar 的 `ClaudeProbe` 一个目录就有 2571 条 History，隐藏后 5484 行降到 2913 行）。两个入口：选中某项目后 Project 下拉顶部出现 `Hide “<项目>”`（隐藏后项目筛选自动回到 All）；或选中一行后用 View 菜单的 "Hide Project of Selected Session"——噪音项目往往不活跃、在下拉里排得很靠后（ClaudeProbe 排第 82），从表格行直接隐藏更快。已隐藏的项目列在 Project 下拉顶部的 Hidden 区，点一下恢复；按钮显示 `All · 1 hidden` 提示有行被排除。隐藏是全局排除（与"显示空 session"同级）：Project 总数与 Kind 计数都不含隐藏项目。持久化到 `state.json`。
 - **Kind**（✅）：「Kind ▾」下拉，位于 Updated 之后，多选 CLI / SDK / BG / History，每项右侧是该 Kind 的 session 数（口径与 Project 下拉一致：遵循"显示空 session"开关，不受项目 / 时间过滤影响）。按钮显示 `All`、选中项短名（如 `CLI, SDK, BG`）或 `None`（表格为空）。默认全选，不隐藏任何来源；真实数据里 History 占 83%，取消它后 5479 行降到 932 行。
@@ -127,7 +132,7 @@ Cost、Branch、Tools、ID 不再作为列，只在详情面板的 Metadata 里�
 
 **头部**：标题、`id · project · branch · Kind 徽章`、Metadata / Conversation 分段 tab、右侧 `N prompts · N tools · size`。
 
-**Metadata tab**：Project、Branch、Path、ID、Started、Updated、Prompts、Tools、Size、Cost、Messages、Duration、Kind、Subagents、权限模式、Claude Code 版本、Models、Top tools、PR、Resume 命令，以及 First prompt / Last prompt / Last message 全文（各截到 2000 字）。
+**Metadata tab**：Project、Branch、Path、ID、Started、Updated、Prompts、Tools、Size、Cost（自算，旁边是 Claude Code 记录的 `CC: $x`）、Tokens（输入 / 输出 / 缓存读 / 缓存写）、Context（最终占用 / 窗口 · 峰值）、算不了价的模型（有才显示）、Messages、Duration、Kind、Subagents、权限模式、Claude Code 版本、Models、Top tools、PR、Resume 命令，以及 First prompt / Last prompt / Last message 全文（各截到 2000 字）。
 
 **当前的 Conversation**（M2 过渡实现）：显示索引里该 session 的 user / assistant 文本，最多 300 条、每条 4000 字，跳过 harness 注入的消息；底部说明未显示的内容。下面描述的工具调用 / thinking 折叠行界面已就位，M4 直接读 transcript 后启用。
 
@@ -144,7 +149,7 @@ Cost、Branch、Tools、ID 不再作为列，只在详情面板的 Metadata 里�
 
 第二段：
 
-- 头部增加 token 用量、修改过的文件列表（折叠）
+- 头部增加修改过的文件列表（折叠）
 - 操作按钮：复制 session ID、复制 `claude --resume <id>`、在 Finder 显示记录文件、打开项目目录、导出 TXT。"在终端打开"方案里默认不做，只复制命令
 - 助手正文 Markdown 渲染，长消息默认折叠 5 行。搜索时有命中的消息会退回带高亮的纯文本显示
 - 工具卡片展开后显示说明（`#`）与命令（`$`），长命令重新排版；连续工具调用分组（设计稿 `groupTools`）需先核对设计稿
@@ -170,7 +175,7 @@ M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebui
 
 ### 4.8 状态栏 ✅ 部分
 
-22px 等宽字体。左：当前显示 N / 总 M 个 session；中：最近一次操作状态（过滤耗时等）+ 索引状态（`loading index…` / `indexing 598 / 941 files` / `index up to date · 941 files checked in 0.07s` / 错误信息）；右：已索引消息数、DB 大小、首批行上屏耗时。搜索时中间显示「N sessions · M matches」，右侧最前面是搜索耗时。待补充：生效过滤 chip。
+22px 等宽字体。左：当前显示 N / 总 M 个 session 与这 N 个 session 的费用合计（搜索时只合计命中的）；中：最近一次操作状态（过滤耗时等）+ 索引状态（`loading index…` / `indexing 598 / 941 files` / `index up to date · 941 files checked in 0.07s` / 错误信息）；右：已索引消息数、DB 大小、首批行上屏耗时。搜索时中间显示「N sessions · M matches」，右侧最前面是搜索耗时。待补充：生效过滤 chip。
 
 ### 4.9 设置 ⬜
 
@@ -179,7 +184,7 @@ M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebui
 ## 5. 核心使用流程
 
 1. **启动**：热启动直接显示表格；首次启动看到索引进度，行逐步出现。
-2. **缩小范围**：选项目、选时间段，表格即时收窄；状态栏显示 N / M。
+2. **缩小范围**：选项目、选时间段，表格即时收窄；状态栏显示 N / M 和这些 session 的费用合计。按 Cost 或 Ctx 排序找出最贵、context 最满的 session。
 3. **找到目标**：按列排序，或输入关键词搜索，Preview 列显示命中片段。
 4. **查看**：单击行，右侧看摘要与消息流；搜索时直接定位到命中处。
 5. **回到对话**：复制 resume 命令或直接在终端打开，继续这个 session。

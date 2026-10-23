@@ -6,10 +6,11 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use agent_session_core::format::{fmt_datetime, fmt_time};
+use agent_session_core::format::{fmt_datetime, fmt_time, fmt_tokens, fmt_usd};
+use agent_session_core::pricing::context_window;
 use agent_session_core::model::{MessageRow, Role, SessionSummary};
 use agent_session_core::search::Matcher;
-use chrono::{Days, Local, TimeZone};
+use chrono::{Datelike, Days, Local, Months, NaiveDate, TimeZone};
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
 
@@ -76,7 +77,20 @@ pub struct SessionRow {
     pub prompts_fmt: SharedString,
     pub size: u64,
     pub size_fmt: SharedString,
+    /// Priced from token usage, subagents included.
+    pub cost: Option<f64>,
     pub cost_fmt: SharedString,
+    /// What Claude Code recorded itself (`cost-state`), for comparison.
+    pub cc_cost_fmt: SharedString,
+    /// Last main-thread prompt as a share of the model's context window.
+    pub context_pct: Option<f32>,
+    /// `41%`, `<1%` or a dash.
+    pub context_fmt: SharedString,
+    /// `412k / 1M · peak 655k`.
+    pub context_detail: SharedString,
+    pub tokens_fmt: SharedString,
+    /// Models whose calls are left out of `cost` (no known price); empty when there are none.
+    pub unpriced: SharedString,
     pub branch: SharedString,
     pub tools: u32,
     pub tools_fmt: SharedString,
@@ -136,6 +150,35 @@ fn format_duration(ms: Option<i64>) -> SharedString {
     }
 }
 
+fn format_cost(usd: Option<f64>) -> SharedString {
+    usd.map_or(NONE.into(), |c| fmt_usd(c).into())
+}
+
+fn format_context(pct: Option<f32>) -> SharedString {
+    match pct {
+        Some(p) if p < 0.01 => "<1%".into(),
+        Some(p) => format!("{:.0}%", p * 100.0).into(),
+        None => NONE.into(),
+    }
+}
+
+fn context_detail(s: &SessionSummary) -> SharedString {
+    let Some(tokens) = s.context_tokens else { return NONE.into() };
+    let mut text = fmt_tokens(tokens);
+    if let Some(window) = s.context_model.as_deref().and_then(context_window) {
+        text.push_str(&format!(" / {}", fmt_tokens(window)));
+    }
+    if let Some(peak) = s.context_peak {
+        text.push_str(&format!(" · peak {}", fmt_tokens(peak)));
+    }
+    text.into()
+}
+
+fn tokens_summary(s: &SessionSummary) -> SharedString {
+    let t = fmt_tokens;
+    format!("in {} · out {} · cache read {} · write {}", t(s.tokens_in), t(s.tokens_out), t(s.tokens_cache_read), t(s.tokens_cache_write)).into()
+}
+
 fn project_name(s: &SessionSummary) -> String {
     let path = s.project_path.as_deref().or(s.cwd.as_deref());
     match path.and_then(|p| Path::new(p).file_name()) {
@@ -168,6 +211,7 @@ impl Kind {
 impl SessionRow {
     pub fn from_summary(s: &SessionSummary) -> SessionRow {
         let short_id = if s.id_known { s.id.chars().take(8).collect() } else { "(unknown)".to_string() };
+        let context_pct = s.context_ratio().map(|r| r as f32);
         let resume = if s.id_known { format!("claude --resume {}", s.id) } else { NONE.to_string() };
         SessionRow {
             id: s.id.clone().into(),
@@ -190,7 +234,14 @@ impl SessionRow {
             prompts_fmt: s.user_msg_count.to_string().into(),
             size: s.file_size.unwrap_or(0),
             size_fmt: format_size(s.file_size),
-            cost_fmt: s.total_cost_usd.map_or(NONE.into(), |c| format!("${c:.2}").into()),
+            cost: s.cost_usd,
+            cost_fmt: format_cost(s.cost_usd),
+            cc_cost_fmt: format_cost(s.total_cost_usd),
+            context_pct,
+            context_fmt: format_context(context_pct),
+            context_detail: context_detail(s),
+            tokens_fmt: tokens_summary(s),
+            unpriced: s.unpriced_models.iter().cloned().collect::<Vec<_>>().join(", ").into(),
             branch: or_none(s.git_branch.as_deref()),
             tools: s.tool_use_count,
             tools_fmt: s.tool_use_count.to_string().into(),
@@ -377,12 +428,26 @@ pub enum RangePreset {
     Days30,
     #[default]
     Any,
+    ThisMonth,
+    LastMonth,
+    /// A picked start and end day, both included.
+    Custom,
 }
 
 impl RangePreset {
-    pub const ALL: [RangePreset; 5] =
-        [RangePreset::Today, RangePreset::Days3, RangePreset::Days7, RangePreset::Days30, RangePreset::Any];
+    /// Menu order; a separator goes before `Custom`.
+    pub const ALL: [RangePreset; 8] = [
+        RangePreset::Today,
+        RangePreset::Days3,
+        RangePreset::Days7,
+        RangePreset::Days30,
+        RangePreset::Any,
+        RangePreset::ThisMonth,
+        RangePreset::LastMonth,
+        RangePreset::Custom,
+    ];
 
+    /// Button value.
     pub fn label(self) -> &'static str {
         match self {
             RangePreset::Today => "Today",
@@ -390,23 +455,51 @@ impl RangePreset {
             RangePreset::Days7 => "7 days",
             RangePreset::Days30 => "30 days",
             RangePreset::Any => "Any time",
+            RangePreset::ThisMonth => "This month",
+            RangePreset::LastMonth => "Last month",
+            RangePreset::Custom => "Custom",
         }
     }
 
-    /// Lower bound (ms since epoch) for `updated_at`, or `None` for no filter.
-    pub fn since_ms(self) -> Option<i64> {
-        let days = match self {
-            RangePreset::Today => 0,
-            RangePreset::Days3 => 2,
-            RangePreset::Days7 => 6,
-            RangePreset::Days30 => 29,
-            RangePreset::Any => return None,
-        };
-        let today = Local::now().date_naive();
-        let start = today.checked_sub_days(Days::new(days)).unwrap_or(today);
-        let start = start.and_hms_opt(0, 0, 0)?.and_local_timezone(Local).single()?;
-        Some(start.timestamp_millis())
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            RangePreset::Custom => "Custom range…",
+            other => other.label(),
+        }
     }
+
+    /// The range Custom starts with: this month up to today.
+    pub fn default_custom(today: NaiveDate) -> (NaiveDate, NaiveDate) {
+        (today.with_day(1).unwrap_or(today), today)
+    }
+
+    /// `[since, until)` for `updated_at` (ms since epoch, local days), `None` for an open end.
+    pub fn bounds(self, custom: Option<(NaiveDate, NaiveDate)>) -> (Option<i64>, Option<i64>) {
+        self.bounds_on(Local::now().date_naive(), custom)
+    }
+
+    pub fn bounds_on(self, today: NaiveDate, custom: Option<(NaiveDate, NaiveDate)>) -> (Option<i64>, Option<i64>) {
+        let days_back = |days: u64| (local_midnight(today.checked_sub_days(Days::new(days)).unwrap_or(today)), None);
+        let month = today.with_day(1).unwrap_or(today);
+        match self {
+            RangePreset::Today => days_back(0),
+            RangePreset::Days3 => days_back(2),
+            RangePreset::Days7 => days_back(6),
+            RangePreset::Days30 => days_back(29),
+            RangePreset::Any => (None, None),
+            RangePreset::ThisMonth => (local_midnight(month), None),
+            RangePreset::LastMonth => (month.checked_sub_months(Months::new(1)).and_then(local_midnight), local_midnight(month)),
+            RangePreset::Custom => {
+                let (start, end) = custom.unwrap_or_else(|| Self::default_custom(today));
+                (local_midnight(start), end.succ_opt().and_then(local_midnight))
+            }
+        }
+    }
+}
+
+/// Start of `date` in local time (the earlier one when a DST change repeats midnight).
+fn local_midnight(date: NaiveDate) -> Option<i64> {
+    Some(date.and_hms_opt(0, 0, 0)?.and_local_timezone(Local).earliest()?.timestamp_millis())
 }
 
 /// Filter applied to the table rows before sorting.
@@ -415,6 +508,8 @@ pub struct Filter {
     /// `project_key` of the only project to show.
     pub project: Option<SharedString>,
     pub since_ms: Option<i64>,
+    /// Exclusive upper bound for `updated_at`.
+    pub until_ms: Option<i64>,
     /// Sessions that never got a human prompt are hidden unless this is set.
     pub show_empty: bool,
     pub kinds: KindSet,
@@ -425,7 +520,8 @@ pub struct Filter {
 impl Filter {
     pub fn matches(&self, row: &SessionRow) -> bool {
         let project_ok = self.project.as_ref().is_none_or(|p| row.project_key == *p);
-        let since_ok = self.since_ms.is_none_or(|since| row.updated_at >= since);
+        let since_ok = self.since_ms.is_none_or(|since| row.updated_at >= since)
+            && self.until_ms.is_none_or(|until| row.updated_at < until);
         let shown = (self.show_empty || row.prompts > 0) && !self.hidden_projects.contains(&row.project_key);
         project_ok && since_ok && shown && self.kinds.contains(row.kind)
     }
@@ -682,7 +778,9 @@ pub mod tests {
         let r = SessionRow::from_summary(&s);
         assert_eq!((r.size_fmt.as_ref(), r.size), ("—", 0));
         assert_eq!((r.started_fmt.as_ref(), r.started_at), ("—", i64::MIN));
-        assert_eq!(r.cost_fmt, "—");
+        assert_eq!((r.cost_fmt.as_ref(), r.cost), ("—", None));
+        assert_eq!((r.cc_cost_fmt.as_ref(), r.context_fmt.as_ref(), r.context_pct), ("—", "—", None));
+        assert_eq!(r.context_detail, "—");
         assert_eq!(r.short_id, "(unknown)");
         assert_eq!(r.resume, "—", "an anonymous history session cannot be resumed");
     }
@@ -692,7 +790,7 @@ pub mod tests {
         let mut s = summary("s", "/p/a", 5000);
         s.file_size = Some(3 * 1024 * 1024 + 512 * 1024);
         s.duration_ms = Some(3_900_000);
-        s.total_cost_usd = Some(1.966);
+        s.cost_usd = Some(1.966);
         s.tool_counts = [("Bash".to_string(), 7), ("Read".to_string(), 12), ("Edit".to_string(), 7)].into();
         let r = SessionRow::from_summary(&s);
         assert_eq!(r.size_fmt, "3.5 MB");
@@ -934,5 +1032,89 @@ pub mod tests {
         assert_eq!(SessionRow::from_summary(&s).transcript_path.as_deref(), Some(Path::new("/tmp/x.jsonl")));
         s.transcript_missing = true;
         assert_eq!(SessionRow::from_summary(&s).transcript_path, None);
+    }
+
+    #[test]
+    fn cost_is_the_priced_one_and_claude_codes_figure_is_kept_for_comparison() {
+        let mut s = summary("s", "/p/a", 5000);
+        (s.cost_usd, s.total_cost_usd) = (Some(3.4219), Some(3.5));
+        (s.tokens_in, s.tokens_out, s.tokens_cache_read, s.tokens_cache_write) = (12, 1050, 89_000, 2900);
+        let r = SessionRow::from_summary(&s);
+        assert_eq!((r.cost, r.cost_fmt.as_ref(), r.cc_cost_fmt.as_ref()), (Some(3.4219), "$3.42", "$3.50"));
+        assert_eq!(r.tokens_fmt, "in 12 · out 1k · cache read 89k · write 3k");
+        assert_eq!(r.unpriced, "");
+        s.unpriced_models = ["claude-opus-9".to_string()].into();
+        assert_eq!(SessionRow::from_summary(&s).unpriced, "claude-opus-9");
+    }
+
+    #[test]
+    fn context_is_a_share_of_the_models_window() {
+        let mut s = summary("s", "/p/a", 5000);
+        (s.context_tokens, s.context_peak, s.context_model) = (Some(412_000), Some(655_000), Some("claude-opus-5".into()));
+        let r = SessionRow::from_summary(&s);
+        assert_eq!((r.context_fmt.as_ref(), r.context_detail.as_ref()), ("41%", "412k / 1M · peak 655k"));
+        assert!((r.context_pct.unwrap() - 0.412).abs() < 1e-6);
+        s.context_tokens = Some(4_000);
+        assert_eq!(SessionRow::from_summary(&s).context_fmt, "<1%");
+        (s.context_tokens, s.context_model) = (Some(150_000), Some("claude-haiku-4-5-20251001".into()));
+        assert_eq!(SessionRow::from_summary(&s).context_fmt, "75%", "Haiku 4.5 has a 200K window");
+        s.context_model = Some("claude-opus-9".into());
+        let r = SessionRow::from_summary(&s);
+        assert_eq!((r.context_fmt.as_ref(), r.context_pct), ("—", None), "no window, no share");
+        assert_eq!(r.context_detail, "150k · peak 655k");
+    }
+
+    fn day(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    }
+
+    fn midnight(date: NaiveDate) -> Option<i64> {
+        Some(date.and_hms_opt(0, 0, 0).unwrap().and_local_timezone(Local).earliest().unwrap().timestamp_millis())
+    }
+
+    #[test]
+    fn day_presets_have_only_a_lower_bound() {
+        let today = day(2026, 10, 23);
+        assert_eq!(RangePreset::Today.bounds_on(today, None), (midnight(today), None));
+        assert_eq!(RangePreset::Days7.bounds_on(today, None), (midnight(day(2026, 10, 17)), None), "today and the 6 days before");
+        assert_eq!(RangePreset::Any.bounds_on(today, None), (None, None));
+    }
+
+    #[test]
+    fn month_presets_cover_whole_calendar_months() {
+        let today = day(2026, 10, 23);
+        assert_eq!(RangePreset::ThisMonth.bounds_on(today, None), (midnight(day(2026, 10, 1)), None));
+        assert_eq!(RangePreset::LastMonth.bounds_on(today, None), (midnight(day(2026, 9, 1)), midnight(day(2026, 10, 1))));
+        assert_eq!(
+            RangePreset::LastMonth.bounds_on(day(2026, 1, 5), None),
+            (midnight(day(2025, 12, 1)), midnight(day(2026, 1, 1))),
+            "January looks back into last year"
+        );
+    }
+
+    #[test]
+    fn a_custom_range_includes_its_last_day_and_defaults_to_this_month_so_far() {
+        let today = day(2026, 10, 23);
+        let range = (day(2026, 9, 10), day(2026, 9, 20));
+        assert_eq!(RangePreset::Custom.bounds_on(today, Some(range)), (midnight(day(2026, 9, 10)), midnight(day(2026, 9, 21))));
+        assert_eq!(RangePreset::default_custom(today), (day(2026, 10, 1), today));
+        assert_eq!(RangePreset::Custom.bounds_on(today, None), (midnight(day(2026, 10, 1)), midnight(day(2026, 10, 24))));
+        assert_eq!(RangePreset::Days3.bounds_on(today, Some(range)), (midnight(day(2026, 10, 21)), None), "only Custom reads the range");
+    }
+
+    #[test]
+    fn the_filter_has_an_exclusive_upper_bound() {
+        let filter = Filter { since_ms: Some(10_000), until_ms: Some(20_000), ..Default::default() };
+        assert!(filter.matches(&row("a", "/p/a", 10_000)), "the lower bound is in");
+        assert!(filter.matches(&row("b", "/p/a", 19_999)));
+        assert!(!filter.matches(&row("c", "/p/a", 20_000)), "the upper bound is the next day's midnight: out");
+        assert!(!filter.matches(&row("d", "/p/a", 9_999)));
+    }
+
+    #[test]
+    fn the_range_button_reads_custom_while_its_menu_entry_invites_to_pick() {
+        assert_eq!(RangePreset::Custom.label(), "Custom");
+        assert_eq!(RangePreset::Custom.menu_label(), "Custom range…");
+        assert_eq!(RangePreset::LastMonth.menu_label(), "Last month");
     }
 }

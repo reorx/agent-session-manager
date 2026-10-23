@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use agent_session_core::claude::paths::default_db_path;
 use anyhow::Result;
+use chrono::NaiveDate;
 use gpui_kit::component::table::ColumnSort;
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,9 @@ pub struct ViewState {
     pub sort: Option<(String, SortDir)>,
     pub project_key: Option<String>,
     pub range: RangePreset,
+    /// Start and end day of the Custom range, both included (`YYYY-MM-DD` on disk); `None` until
+    /// one is picked.
+    pub custom_range: Option<(NaiveDate, NaiveDate)>,
     pub show_empty: bool,
     pub kinds: KindSet,
     /// `project_key`s hidden from the table.
@@ -59,6 +63,7 @@ impl Default for ViewState {
             sort: None,
             project_key: None,
             range: RangePreset::default(),
+            custom_range: None,
             show_empty: false,
             kinds: KindSet::default(),
             hidden_projects: Vec::new(),
@@ -107,7 +112,8 @@ mod tests {
             mode: DisplayMode::LastMessage,
             sort: Some(("prompts".into(), SortDir::Desc)),
             project_key: Some("-Users-me-Code-alpha".into()),
-            range: RangePreset::Days7,
+            range: RangePreset::Custom,
+            custom_range: Some((NaiveDate::from_ymd_opt(2026, 9, 10).unwrap(), NaiveDate::from_ymd_opt(2026, 9, 20).unwrap())),
             show_empty: true,
             kinds,
             hidden_projects: vec!["-Users-me-Code-probe".into()],
@@ -122,6 +128,8 @@ mod tests {
         };
         state.save(&path).unwrap();
         assert_eq!(ViewState::load(&path), state);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"2026-09-10\""), "dates are stored as YYYY-MM-DD: {text}");
         assert!(!ViewState::load(&path).kinds.contains(Kind::History));
     }
 
@@ -143,6 +151,7 @@ mod tests {
         assert_eq!(state.mode, DisplayMode::Title);
         assert!(state.detail_visible);
         assert_eq!(state.range, RangePreset::Any);
+        assert_eq!(state.custom_range, None, "a file written before custom ranges has none");
         assert_eq!(state.kinds, KindSet::default(), "a file written before the Kind filter shows every kind");
         assert_eq!(state.kinds.label(), "All");
         assert!(state.hidden_projects.is_empty(), "a file written before projects could be hidden hides none");

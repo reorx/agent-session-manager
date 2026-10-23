@@ -19,12 +19,14 @@ pub const PROJECT_W: f32 = 110.;
 pub const STARTED_W: f32 = 88.;
 pub const UPDATED_W: f32 = 88.;
 pub const PROMPTS_W: f32 = 58.;
+pub const COST_W: f32 = 62.;
+pub const CTX_W: f32 = 44.;
 pub const SIZE_W: f32 = 60.;
 pub const KIND_W: f32 = 46.;
 /// Only there while a search is active.
 pub const MATCHES_W: f32 = 64.;
-const FIXED_COLS_W: f32 = PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + SIZE_W + KIND_W;
-pub const PREVIEW_MIN_W: f32 = 240.;
+const FIXED_COLS_W: f32 = PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + COST_W + CTX_W + SIZE_W + KIND_W;
+pub const PREVIEW_MIN_W: f32 = 200.;
 pub const ROW_H: f32 = 36.;
 
 const PREVIEW_COL: usize = 1;
@@ -44,6 +46,8 @@ pub struct SessionTableDelegate {
     /// Hits of the active search by session id; only these sessions are shown while it is `Some`.
     search: Option<HashMap<SharedString, Arc<RowHit>>>,
     sort: Option<(SharedString, ColumnSort)>,
+    /// Cost of the rows in `ix` (the status bar shows it).
+    pub shown_cost: f64,
     pub last_filter_ms: u128,
 }
 
@@ -59,6 +63,8 @@ impl SessionTableDelegate {
             col("started", "Started", STARTED_W).sortable(),
             col("updated", "Updated", UPDATED_W).sortable().descending(),
             col("prompts", "Prompts", PROMPTS_W).text_right().sortable(),
+            col("cost", "Cost", COST_W).text_right().sortable(),
+            col("context", "Ctx", CTX_W).text_right().sortable(),
             col("size", "Size", SIZE_W).text_right().sortable(),
             col("kind", "Kind", KIND_W).sortable(),
         ];
@@ -71,6 +77,7 @@ impl SessionTableDelegate {
             filter: Filter::default(),
             search: None,
             sort: None,
+            shown_cost: 0.0,
             last_filter_ms: 0,
         }
     }
@@ -179,6 +186,7 @@ impl SessionTableDelegate {
     fn recompute(&mut self) {
         let t = Instant::now();
         self.ix = (0..self.rows.len()).filter(|i| self.shows(&self.rows[*i])).collect();
+        self.shown_cost = self.ix.iter().filter_map(|i| self.rows[*i].cost).fold(0.0, |a, b| a + b);
         match self.sort.clone() {
             Some((key, sort)) => self.sort(&key, sort),
             None => self.sort_by_updated_desc(),
@@ -224,6 +232,8 @@ impl SessionTableDelegate {
             "started" => a.started_at.cmp(&b.started_at),
             "updated" => a.updated_at.cmp(&b.updated_at),
             "prompts" => a.prompts.cmp(&b.prompts),
+            "cost" => cmp_missing_low(a.cost, b.cost, f64::total_cmp),
+            "context" => cmp_missing_low(a.context_pct, b.context_pct, f32::total_cmp),
             "size" => a.size.cmp(&b.size),
             "kind" => (a.kind as u8).cmp(&(b.kind as u8)),
             _ => Ordering::Equal,
@@ -272,8 +282,24 @@ impl SessionTableDelegate {
             .child(div().flex_1().min_w_0().truncate().text_color(style::text_secondary()).child(StyledText::new(hit.snippet.clone()).with_highlights(marks)))
     }
 
-    fn mono_cell(&self, text: SharedString, color: Hsla, cx: &App) -> AnyElement {
-        div().font_family(style::mono(cx)).text_size(px(11.)).whitespace_nowrap().text_color(color).child(text).into_any_element()
+    /// `right`: the column is declared `text_right` (numbers); `DataTable` leaves cell alignment to the delegate.
+    fn mono_cell(&self, text: SharedString, color: Hsla, right: bool, cx: &App) -> AnyElement {
+        div()
+            .font_family(style::mono(cx))
+            .text_size(px(11.))
+            .whitespace_nowrap()
+            .text_color(color)
+            .when(right, |el| el.w_full().text_right())
+            .child(text)
+            .into_any_element()
+    }
+}
+
+/// A missing value sorts below any present one.
+fn cmp_missing_low<T: Copy>(a: Option<T>, b: Option<T>, cmp: impl Fn(&T, &T) -> Ordering) -> Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) => cmp(&a, &b),
+        (a, b) => a.is_some().cmp(&b.is_some()),
     }
 }
 
@@ -304,12 +330,14 @@ impl TableDelegate for SessionTableDelegate {
             .flex()
             .items_center()
             .text_size(px(11.))
+            .when(column.align == TextAlign::Right, |el| el.justify_end())
             .when(is_sorted, |el| el.text_color(style::text()).font_weight(FontWeight::SEMIBOLD))
             .child(column.name.clone())
     }
 
     fn render_td(&mut self, row_ix: usize, col_ix: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
         let row = self.row(row_ix).clone();
+        let right = self.columns[col_ix].align == TextAlign::Right;
         match self.columns[col_ix].key.as_ref() {
             "project" => div().truncate().child(row.project.clone()).into_any_element(),
             "preview" => {
@@ -328,12 +356,14 @@ impl TableDelegate for SessionTableDelegate {
             }
             MATCHES_KEY => {
                 let count = self.matches_of(&row).to_string();
-                self.mono_cell(count.into(), style::text(), cx)
+                self.mono_cell(count.into(), style::text(), right, cx)
             }
-            "started" => self.mono_cell(row.started_fmt.clone(), style::text_secondary(), cx),
-            "updated" => self.mono_cell(row.updated_fmt.clone(), style::text(), cx),
-            "prompts" => self.mono_cell(row.prompts_fmt.clone(), style::text(), cx),
-            "size" => self.mono_cell(row.size_fmt.clone(), style::text_secondary(), cx),
+            "started" => self.mono_cell(row.started_fmt.clone(), style::text_secondary(), right, cx),
+            "updated" => self.mono_cell(row.updated_fmt.clone(), style::text(), right, cx),
+            "prompts" => self.mono_cell(row.prompts_fmt.clone(), style::text(), right, cx),
+            "cost" => self.mono_cell(row.cost_fmt.clone(), style::text(), right, cx),
+            "context" => self.mono_cell(row.context_fmt.clone(), style::text_secondary(), right, cx),
+            "size" => self.mono_cell(row.size_fmt.clone(), style::text_secondary(), right, cx),
             "kind" => match style::kind_badge(row.kind, cx) {
                 Some(badge) => div().child(badge).into_any_element(),
                 None => div().into_any_element(),
@@ -510,5 +540,52 @@ mod tests {
         assert_eq!(d.sort_state(), None);
         d.set_sort("preview", ColumnSort::Ascending);
         assert_eq!(d.sort_state(), None, "Preview is not sortable");
+    }
+
+    fn priced(id: &str, project: &str, updated_at: i64, cost: Option<f64>, context: Option<u64>) -> Arc<SessionRow> {
+        let mut s = summary(id, project, updated_at);
+        s.cost_usd = cost;
+        (s.context_tokens, s.context_model) = (context, Some("claude-opus-5".into()));
+        Arc::new(SessionRow::from_summary(&s))
+    }
+
+    #[test]
+    fn cost_and_context_columns_sit_after_prompts() {
+        let d = SessionTableDelegate::new();
+        assert_eq!(keys(&d), ["project", "preview", "started", "updated", "prompts", "cost", "context", "size", "kind"]);
+        assert_eq!(FIXED_COLS_W, PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + COST_W + CTX_W + SIZE_W + KIND_W);
+    }
+
+    #[test]
+    fn cost_and_context_sort_the_most_first_and_rows_without_data_last() {
+        let mut d = SessionTableDelegate::new();
+        d.set_rows(vec![
+            priced("a", "/p/x", 100, Some(1.0), Some(100_000)),
+            priced("b", "/p/x", 200, None, None),
+            priced("c", "/p/x", 300, Some(5.0), Some(50_000)),
+            priced("d", "/p/x", 400, Some(0.5), Some(900_000)),
+        ]);
+        d.set_sort("cost", ColumnSort::Descending);
+        assert_eq!(ids(&d), ["c", "a", "d", "b"]);
+        d.set_sort("context", ColumnSort::Descending);
+        assert_eq!(ids(&d), ["d", "a", "c", "b"]);
+        d.set_sort("cost", ColumnSort::Ascending);
+        assert_eq!(ids(&d), ["b", "d", "a", "c"], "no cost sorts below any cost");
+    }
+
+    #[test]
+    fn the_shown_cost_adds_up_the_rows_on_screen() {
+        let mut d = SessionTableDelegate::new();
+        d.set_rows(vec![priced("a", "/p/x", 100, Some(1.0), None), priced("b", "/p/y", 200, Some(2.5), None), priced("c", "/p/x", 300, None, None)]);
+        assert_eq!(d.shown_cost, 3.5);
+        d.set_filter(Filter { project: Some("-p-x".into()), ..Default::default() });
+        assert_eq!(d.shown_cost, 1.0, "the filter narrows it");
+        d.set_search(true);
+        d.add_hits(vec![("c".into(), hit(1))]);
+        assert_eq!(d.shown_cost, 0.0, "while searching only the sessions with hits count");
+        d.add_hits(vec![("a".into(), hit(3))]);
+        assert_eq!(d.shown_cost, 1.0);
+        d.upsert(vec![priced("a", "/p/x", 400, Some(4.0), None)]);
+        assert_eq!(d.shown_cost, 4.0, "a row streamed in again brings its new cost");
     }
 }

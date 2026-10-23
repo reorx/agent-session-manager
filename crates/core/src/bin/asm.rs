@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use agent_session_core::claude::paths::{ClaudeDir, default_db_path, encode_project_path, expand_user};
-use agent_session_core::format::{fmt_datetime, fmt_time, human_size};
+use agent_session_core::format::{fmt_datetime, fmt_time, fmt_tokens, fmt_usd, human_size};
 use agent_session_core::index::{Db, Indexer, ListFilter, Progress};
 use agent_session_core::model::{Role, SessionSummary};
 use agent_session_core::search::fts::{FtsQuery, FtsRoles, search_sessions};
@@ -57,6 +57,8 @@ enum Cmd {
     },
     /// Search message text (regex over transcripts; --index for full-text search over the index)
     Search(SearchArgs),
+    /// What sessions cost (priced from token usage, subagents included) and how full their context got
+    Cost(CostArgs),
     /// Index statistics
     Stats,
 }
@@ -116,6 +118,60 @@ struct SearchArgs {
     no_scan: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CostSort {
+    Cost,
+    Context,
+}
+
+#[derive(Args)]
+struct CostArgs {
+    /// Project directory, or a substring of project directory names (default: all projects)
+    #[arg(short = 'p', long)]
+    project: Option<String>,
+    /// Only sessions updated on or after this local date (YYYY-MM-DD)
+    #[arg(long)]
+    since: Option<chrono::NaiveDate>,
+    /// Only sessions updated on or before this local date (YYYY-MM-DD)
+    #[arg(long)]
+    until: Option<chrono::NaiveDate>,
+    #[arg(long, value_enum, default_value_t = CostSort::Cost)]
+    sort: CostSort,
+    #[arg(short = 'n', long, default_value_t = 30)]
+    limit: usize,
+    /// Compare with the cost Claude Code recorded itself (`cost-state`) instead of listing
+    #[arg(long)]
+    compare: bool,
+    #[arg(long)]
+    no_scan: bool,
+}
+
+const COST_TITLE_LEN: usize = 60;
+
+/// Local midnight of `date`, unix ms.
+fn local_midnight(date: chrono::NaiveDate) -> Option<i64> {
+    use chrono::TimeZone;
+    chrono::Local.from_local_datetime(&date.and_hms_opt(0, 0, 0)?).earliest().map(|dt| dt.timestamp_millis())
+}
+
+fn project_name(s: &SessionSummary) -> &str {
+    let path = s.project_path.as_deref().or(s.cwd.as_deref()).unwrap_or(&s.project_key);
+    path.trim_end_matches('/').rsplit('/').next().unwrap_or(path)
+}
+
+/// `Iterator::sum` of no floats is `-0.0`, which prints as `$-0.00`.
+fn sum(values: impl Iterator<Item = f64>) -> f64 {
+    values.fold(0.0, |a, b| a + b)
+}
+
+fn context_cell(s: &SessionSummary) -> String {
+    match s.context_ratio() {
+        Some(r) if r < 0.01 => "<1%".into(),
+        Some(r) => format!("{:.0}%", r * 100.0),
+        None => "—".into(),
+    }
+}
+
 struct Palette {
     reset: &'static str,
     bold: &'static str,
@@ -172,6 +228,7 @@ fn main() -> ExitCode {
         Cmd::List(args) => app.list(args),
         Cmd::Session { id, limit, no_scan } => app.session(&id, limit, no_scan),
         Cmd::Search(args) => app.search(args),
+        Cmd::Cost(args) => app.cost(args),
         Cmd::Stats => app.stats(),
     };
     let _ = app.out.flush();
@@ -416,6 +473,97 @@ impl App {
             writeln!(self.out, "\n{}{}{} {}[{role}]{} {}", p.blue, fmt_time(Some(hit.first_ts)), p.reset, p.role(role), p.reset, p.highlight(&hit.first, ""))?;
         }
         writeln!(self.out, "\n{}{total} matches{} in {} sessions ({:.1} ms)", self.pal.bold, self.pal.reset, hits.len(), elapsed.as_secs_f64() * 1000.0)?;
+        Ok(())
+    }
+
+    fn cost(&mut self, args: CostArgs) -> Result<()> {
+        let db = self.open_db(!args.no_scan)?;
+        let project_keys = match &args.project {
+            Some(arg) => Some(self.resolve_project_keys(arg, &db)?),
+            None => None,
+        };
+        let filter = ListFilter {
+            project_keys,
+            since_ms: args.since.and_then(local_midnight),
+            until_ms: args.until.and_then(|d| d.succ_opt()).and_then(local_midnight),
+            ..Default::default()
+        };
+        let mut sessions = db.list_sessions(&filter)?;
+        if args.compare {
+            return self.compare_costs(&sessions, args.limit);
+        }
+        let key = |s: &SessionSummary| match args.sort {
+            CostSort::Cost => s.cost_usd,
+            CostSort::Context => s.context_ratio(),
+        };
+        sessions.sort_by(|a, b| {
+            key(b).unwrap_or(f64::NEG_INFINITY).total_cmp(&key(a).unwrap_or(f64::NEG_INFINITY)).then_with(|| b.updated_at.cmp(&a.updated_at))
+        });
+        let (bold, dim, reset) = (self.pal.bold, self.pal.dim, self.pal.reset);
+        writeln!(self.out, "{bold}{:>9} {:>9} {:>5}  {:<16}  {:<8}  {:<16}  TITLE{reset}", "COST", "CC", "CTX", "UPDATED", "SESSION", "PROJECT")?;
+        let usd = |c: Option<f64>| c.map_or_else(|| "—".to_string(), fmt_usd);
+        for s in sessions.iter().take(args.limit) {
+            let id: String = if s.id_known { s.id.chars().take(8).collect() } else { "(none)".into() };
+            let title = agent_session_core::claude::clean::one_line(s.display_title(), COST_TITLE_LEN);
+            writeln!(
+                self.out,
+                "{:>9} {dim}{:>9}{reset} {:>5}  {}  {id:<8}  {:<16}  {title}",
+                usd(s.cost_usd),
+                usd(s.total_cost_usd),
+                context_cell(s),
+                fmt_datetime(Some(s.updated_at)),
+                project_name(s),
+            )?;
+        }
+        let total = sum(sessions.iter().filter_map(|s| s.cost_usd));
+        let cc = sum(sessions.iter().filter_map(|s| s.total_cost_usd));
+        let shown = if sessions.len() > args.limit { format!(" (top {} shown)", args.limit) } else { String::new() };
+        writeln!(self.out, "\n{bold}{} sessions · {}{reset} {dim}(CC {}){reset}{shown}", sessions.len(), fmt_usd(total), fmt_usd(cc))?;
+        let tokens = |f: fn(&SessionSummary) -> u64| fmt_tokens(sessions.iter().map(f).sum());
+        writeln!(
+            self.out,
+            "{dim}tokens: in {} · out {} · cache read {} · cache write {}{reset}",
+            tokens(|s| s.tokens_in),
+            tokens(|s| s.tokens_out),
+            tokens(|s| s.tokens_cache_read),
+            tokens(|s| s.tokens_cache_write)
+        )?;
+        let unpriced: std::collections::BTreeSet<&str> = sessions.iter().flat_map(|s| s.unpriced_models.iter().map(String::as_str)).collect();
+        if !unpriced.is_empty() {
+            writeln!(self.out, "{dim}not priced (unknown models): {}{reset}", unpriced.into_iter().collect::<Vec<_>>().join(", "))?;
+        }
+        Ok(())
+    }
+
+    /// How far the priced cost is from what Claude Code recorded, over the sessions where it
+    /// recorded something.
+    fn compare_costs(&mut self, sessions: &[SessionSummary], limit: usize) -> Result<()> {
+        let pairs: Vec<(&SessionSummary, f64, f64)> =
+            sessions.iter().filter_map(|s| Some((s, s.cost_usd.unwrap_or(0.0), s.total_cost_usd.filter(|c| *c > 0.0)?))).collect();
+        let n = pairs.len();
+        let off = |ours: f64, cc: f64| (ours - cc) / cc;
+        let bucket = |lo: f64, hi: f64| pairs.iter().filter(|(_, o, c)| (lo..hi).contains(&off(*o, *c).abs())).count();
+        let lower = pairs.iter().filter(|(_, o, c)| off(*o, *c) <= -0.10).count();
+        let higher = pairs.iter().filter(|(_, o, c)| off(*o, *c) >= 0.10).count();
+        let pct = |k: usize| if n == 0 { 0.0 } else { k as f64 * 100.0 / n as f64 };
+        writeln!(self.out, "sessions with a cost recorded by Claude Code: {n}")?;
+        for (label, k) in [("within 1%", bucket(0.0, 0.01)), ("1–10% off", bucket(0.01, 0.10)), (">10% lower", lower), (">10% higher", higher)] {
+            writeln!(self.out, "  {label:<12} {k:>6}  ({:.1}%)", pct(k))?;
+        }
+        let ours = sum(pairs.iter().map(|(_, o, _)| *o));
+        let cc = sum(pairs.iter().map(|(_, _, c)| *c));
+        let diff = if cc > 0.0 { (ours - cc) / cc * 100.0 } else { 0.0 };
+        writeln!(self.out, "total: {} priced here vs {} recorded ({diff:+.2}%)", fmt_usd(ours), fmt_usd(cc))?;
+        let all = sum(sessions.iter().filter_map(|s| s.cost_usd));
+        writeln!(self.out, "all {} sessions in range: {} priced here", sessions.len(), fmt_usd(all))?;
+        let mut worst = pairs.clone();
+        worst.sort_by(|a, b| (b.1 - b.2).abs().total_cmp(&(a.1 - a.2).abs()));
+        if !worst.is_empty() && limit > 0 {
+            writeln!(self.out, "\nlargest differences:")?;
+        }
+        for (s, o, c) in worst.iter().take(limit) {
+            writeln!(self.out, "  {:>9} vs {:>9}  {:+6.1}%  {}  {}", fmt_usd(*o), fmt_usd(*c), off(*o, *c) * 100.0, &s.id[..s.id.len().min(8)], project_name(s))?;
+        }
         Ok(())
     }
 }

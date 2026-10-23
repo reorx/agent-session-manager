@@ -3,7 +3,9 @@
 
 use std::time::Duration;
 
+use chrono::{Datelike, Days, Local, Months, NaiveDate};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_kit::component::date_picker::{DatePicker, DateRangePreset};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex};
@@ -17,6 +19,7 @@ use crate::AppRoot;
 pub const TOOLBAR_H: f32 = 36.;
 const CONTROL_H: f32 = 22.;
 const MENU_ITEM_H: f32 = 24.;
+const DATE_PICKER_W: f32 = 190.;
 /// Typing pause before a search starts.
 pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 
@@ -130,8 +133,16 @@ impl AppRoot {
     pub fn set_range(&mut self, range: RangePreset, cx: &mut Context<Self>) {
         self.range = range;
         let mut filter = self.current_filter(cx);
-        filter.since_ms = range.since_ms();
+        (filter.since_ms, filter.until_ms) = range.bounds(self.custom_range);
         self.apply_filter(filter, cx);
+        // the range is saved even when the filter came out the same (Custom over the same days)
+        self.persist(cx);
+    }
+
+    /// A range picked in the date picker: both days included.
+    pub fn set_custom_range(&mut self, start: NaiveDate, end: NaiveDate, cx: &mut Context<Self>) {
+        self.custom_range = Some((start, end));
+        self.set_range(RangePreset::Custom, cx);
     }
 
     pub fn toggle_kind(&mut self, kind: Kind, cx: &mut Context<Self>) {
@@ -404,8 +415,11 @@ impl AppRoot {
         move |menu, _, _| {
             let mut menu = menu.min_w(px(180.));
             for preset in RangePreset::ALL {
+                if preset == RangePreset::Custom {
+                    menu = menu.separator();
+                }
                 let this = this.clone();
-                menu = menu.item(menu_item(preset.label().into(), "".into(), false, preset == current, move |cx| {
+                menu = menu.item(menu_item(preset.menu_label().into(), "".into(), false, preset == current, move |cx| {
                     this.update(cx, |app, cx| app.set_range(preset, cx)).ok();
                 }));
             }
@@ -470,6 +484,13 @@ impl AppRoot {
             .child(trigger("project", "Project", project_label, cx).dropdown_menu(self.project_menu(cx)))
             .child(trigger("scope", "Scope", self.search_opts.scope.label().into(), cx).dropdown_menu(self.scope_menu(cx)))
             .child(trigger("range", "Updated", self.range.label().into(), cx).dropdown_menu(self.range_menu(cx)))
+            .when(self.range == RangePreset::Custom, |el| {
+                el.child(
+                    div().w(px(DATE_PICKER_W)).child(
+                        DatePicker::new(&self.date_picker).small().number_of_months(2).presets(date_presets(Local::now().date_naive())),
+                    ),
+                )
+            })
             .child(trigger("kind", "Kind", filter.kinds.label().into(), cx).dropdown_menu(self.kind_menu(cx)))
             .child(
                 div().ml(px(4.)).w(px(220.)).child(
@@ -501,4 +522,17 @@ impl AppRoot {
                     .dropdown_menu_with_anchor(Anchor::TopRight, self.preview_menu(cx)),
             )
     }
+}
+
+/// Shortcuts beside the calendar of the Custom range.
+fn date_presets(today: NaiveDate) -> Vec<DateRangePreset> {
+    let month = today.with_day(1).unwrap_or(today);
+    let last_month = month.checked_sub_months(Months::new(1)).unwrap_or(month);
+    let back = |days: u64| today.checked_sub_days(Days::new(days)).unwrap_or(today);
+    vec![
+        DateRangePreset::range("This month", month, today),
+        DateRangePreset::range("Last month", last_month, month.pred_opt().unwrap_or(month)),
+        DateRangePreset::range("Last 7 days", back(6), today),
+        DateRangePreset::range("Last 30 days", back(29), today),
+    ]
 }

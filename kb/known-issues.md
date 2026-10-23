@@ -2,11 +2,14 @@
 
 > 当前 app 已知、待后续处理的问题：缺陷、简化实现、未验收项、待建流程。只反映最新状态——解决了就删掉条目，经过记到 `kb/sessions/`。
 
-## 回归验证：parity 在没有开始时间的空 session 上因排序差异失败
+## 回归验证：parity 因两处与解析无关的差异一直返回失败，真正的回归会被淹没
 
-- 记录：2026-10-10（`kb/notes/2026-10-10-transcript-reader.md`）
-- `make parity` 的 `list-code-30d` 比对出现两组空 session 顺序相反，内容相同，其他 20 组通过。没有 started_at 的并列项在 Rust 和 Python 中排序不同，导致整套验证返回失败；本次未改排序实现。
-- 处理方向：明确无 started_at 的并列排序契约，统一参考脚本与 Rust，或只在 parity 比较中归一化该类并列项。原始差异在 `tmp/2026-10-10-python-parity/list-code-30d.diff`。
+- 记录：2026-10-10（`kb/notes/2026-10-10-transcript-reader.md`），2026-10-23 补充第二处
+- `make parity` 在本机稳定失败 2 组（`list-code-30d`、`list-tenderbuddy`），2026-10-23 用改动前后的二进制各跑一次，差异逐字相同：
+  1. 没有 started_at 的空 session 并列时，Rust 和 Python 排序不同
+  2. 只有 `memory/` 或 `sessions-index.json`、没有任何 transcript 的项目目录，Python 会列成 `(0 sessions, 0 with transcript)`，`asm` 不列（它的项目表只收有 session 的项目）
+- 另外 search 组偶尔因为比对期间有 session 正在写入而失败，重跑即过。
+- 处理方向：统一两边的规则，或在 parity 比较里归一化这两类差异。差异样本在 `tmp/2026-10-23-python-parity/`。
 
 ## CLI：`asm --db` 帮助文本里的默认索引路径与实际不符
 
@@ -63,8 +66,22 @@
 - 全文索引按三个字符切词，更短的词查不了，改走 `LIKE`。现在 21MB 消息文本要 16–20ms，离 100ms 的目标还有 5 倍余量。
 - 处理方向：消息文本超过 100MB 再考虑。届时可选另建两字索引，或把文本读进内存扫描。
 
-## 文档：数据格式调研里的本机规模数字已过时
+## 费用：自算费用不含记录文件之外的 API 调用，个别 session 偏低 10% 以上
 
-- 记录：2026-09-28（M4 方案调研时实测）
-- `kb/docs/claude-session-data-format.md` 写的是 654 份主 transcript、最大单文件 30MB；现在是 1159 份、最大 70MB，subagent transcript 368 份。不影响功能，但按这些数字估算性能会偏乐观。
-- 处理方向：下次改动该文档时重新统计。
+- 记录：2026-10-23（`kb/plans/2026-10-23-cost-context-columns.md`）
+- Cost 列按 transcript 里每次 API 响应的 usage 计价。在 973 个 Claude Code 自己记了费用（`cost-state`）的 session 上，96% 与它相差不到 10%，但有 22 个自算偏低超过 10%，合计偏低约 1%。推测是标题生成、auto mode 分类器、compact 等不写进 transcript 的调用，未验证。按项目或月份看合计时，结果会比实际账单略低。
+- 处理方向：找一个偏低的 session，对照 Claude Code 的调用记录确认缺的是哪类调用；如果是固定开销，可以按调用次数补估。
+
+## 费用：价格表写在代码里，新模型上线后它的调用不计价，表格不提示
+
+- 记录：2026-10-23（有意的简化；`crates/core/src/pricing.rs`）
+- 价格表按 2026-10-23 的官方价格页写死。Claude Code 用上表里没有的模型后，这些调用的费用不计入，表格里的 Cost 只显示其余部分，看不出少了；只有详情 Metadata 的 Unpriced 一行列出模型名。`asm cost` 会在末尾列出未计价的模型。
+- 处理方向：表格的 Cost 单元格在有未计价调用时加标记；新模型发布后更新 `pricing.rs` 并提升 `SCHEMA_VERSION`。
+
+## 截图：autoplay 第二步在真实数据上让主线程空转，`make screenshot` 的第 3 张停在第一步
+
+- 记录：2026-10-23（费用列实机验收时发现；诊断在 `tmp/2026-10-23-cost-context/diag/`）
+- `ASM_SPIKE_AUTOPLAY=1` 的第二步（清项目 → 30 天 → 选最忙项目 → 排序 → 选第一行）之后，主线程 CPU 100%，`state.json` 被反复重写，画面不再更新。`sample` 显示主线程一直在 `flush_effects` → 表格的 `TableEvent` 订阅 → `on_table_event` → `select_row` → `persist` 里转。用改动前的 HEAD 在同一份数据上也复现，所以不是费用列引入的，是当天的数据触发的。手动操作（过滤后排序再选行）会不会进同样的循环没有验证。
+- 影响：`make screenshot` 只有前两张可用；如果手动操作也能触发，app 会卡死。
+- 处理方向：在 `keyboard_tests.rs` 里按 autoplay 的步骤写复现测试，查清 `select_row` 与表格 `SelectRow` 事件之间为什么来回触发（例如 `set_selected_row` 发出的行号与传入的不一致），再修。
+
