@@ -2,12 +2,6 @@
 
 > 当前 app 已知、待后续处理的问题：缺陷、简化实现、未验收项、待建流程。只反映最新状态——解决了就删掉条目，经过记到 `kb/sessions/`。
 
-## 回归验证：parity 因空 session 的并列顺序一直有 1 组失败
-
-- 记录：2026-10-10（`kb/notes/2026-10-10-transcript-reader.md`），2026-10-23 查明原因（`tmp/2026-10-23-followups/report.md`）
-- `make parity` 的 `list-code-30d` 里，两个都没有 started_at 的空 session 顺序相反，其余 20 组通过。原因在 Python 参考脚本：它按 `glob('*.jsonl')` 的目录遍历顺序收集 transcript，之后只按 `started` 做稳定排序，没有次关键字，所以并列项的顺序取决于文件系统；Rust 按 updated 降序。只要它一直红，真正的回归就看不出来。另外 search 组偶尔因为比对期间有 session 正在写入而失败，重跑即过。
-- 处理方向：定一个两边共用的并列排序键（例如 started 降序、updated 降序、id），同时改 Python 脚本（`~/Code/scripts`，不在本仓库）和 Rust，并补测试。要改参考脚本，需要用户同意。
-
 ## CLI：`asm --db` 帮助文本里的默认索引路径与实际不符
 
 - 记录：2026-09-28（精简 AGENTS.md 时核对代码发现）
@@ -74,10 +68,3 @@
 - 记录：2026-10-23（有意的简化；`crates/core/src/pricing.rs`）
 - 价格表按 2026-10-23 的官方价格页写死。Claude Code 用上表里没有的模型后，这些调用的费用不计入，表格里的 Cost 只显示其余部分，看不出少了；只有详情 Metadata 的 Unpriced 一行列出模型名。`asm cost` 会在末尾列出未计价的模型。
 - 处理方向：表格的 Cost 单元格在有未计价调用时加标记；新模型发布后更新 `pricing.rs` 并提升 `SCHEMA_VERSION`。
-
-## 表格：点表头排序后，选中高亮停在原来的行号上，和详情面板对不上
-
-- 记录：2026-10-23（选中事件修复时读源码发现；`tmp/2026-10-23-followups/report.md`），**未实机验证**
-- gpui-component 表格的表头排序（`TableState::perform_sort`）只重排 delegate 的行，不改 `selected_row`；`AppRoot` 对表格的 observe 只保存视图状态。所以点表头后，高亮停在原来的行号上，那一行已经换成了另一个 session，详情面板仍显示原来的 session。和「选中跟着 session 走」的规则不一致。
-- 处理方向：先用 cliclick 点表头实机确认；确认后在表格排序变化时按 session id 重新定位选中（走 `after_rows_changed`），并在 `keyboard_tests.rs` 补测试。
-

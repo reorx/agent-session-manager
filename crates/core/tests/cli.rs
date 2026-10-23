@@ -234,3 +234,21 @@ fn cost_compare_reports_how_far_the_priced_cost_is_from_claude_codes_own() {
     assert!(text.contains("  >10% lower        1  (100.0%)\n"), "{text}");
     assert!(text.contains("total: $0.13 priced here vs $1.23 recorded (-89.51%)\n"), "{text}");
 }
+
+#[test]
+fn list_orders_sessions_without_a_prompt_by_last_update_then_by_id_like_the_reference() {
+    // The reference script and `asm` share this order, so `make parity` never depends on how a
+    // directory happens to be listed.
+    let sb = sandbox();
+    let empty = |sid: &str, mtime: i64| {
+        let path = sb.transcript(ALPHA, sid);
+        std::fs::write(&path, format!("{{\"type\":\"permission-mode\",\"permissionMode\":\"plan\",\"sessionId\":\"{sid}\"}}\n")).unwrap();
+        set_mtime(&path, mtime);
+    };
+    empty("aaaaaaaa-0000-4000-8000-000000000001", MTIME_S5 + 3_600_000);
+    empty("ffffffff-0000-4000-8000-000000000002", MTIME_S5);
+    let out = asm(&sb).args(["list", "alpha"]).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    let no_prompt: Vec<&str> = text.lines().filter(|l| l.starts_with("?  ")).map(|l| l.split_whitespace().nth(1).unwrap()).collect();
+    assert_eq!(no_prompt, ["aaaaaaaa-0000-4000-8000-000000000001", S5, "ffffffff-0000-4000-8000-000000000002"], "{text}");
+}

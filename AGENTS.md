@@ -22,7 +22,7 @@ M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，方案在 `kb
 - 量搜索耗时：`ASM_BENCH_DB=<索引副本> cargo test -p agent-session-manager real_index_timings -- --ignored --nocapture`（`ASM_BENCH_QUERIES`、`ASM_BENCH_REGEX` 可换查询）。不要用截图脚本日志里的耗时，刚唤醒屏幕后的数字可以偏高 4–8 倍
 - `make asm ARGS="…"`：跑 `asm` CLI（`index` / `list` / `session` / `search [--index]` / `cost [--compare]` / `stats`，参数看 `--help`）。`cost --compare` 统计自算费用与 `cost-state` 的偏差，改价格表或用量解析后跑一次
 - `make transcript-reader ARGS="SESSION_ID -o session.txt"`：导出用户输入、最终回复及工具计数；也支持唯一 ID 前缀或 JSONL 路径，不依赖索引。
-- `make parity`：在真实 `~/.claude` 上把 `asm` 与 Python 脚本逐字比对；改解析器、清理逻辑、`regex.rs` 或输出格式后必须跑
+- `make parity`：在真实 `~/.claude` 上把 `asm` 与 Python 脚本逐字比对；改解析器、清理逻辑、`regex.rs` 或输出格式后必须跑。两边的列表顺序一致：开始时间降序，并列时按更新时间降序、再按 id；改排序要两边一起改（脚本旁有 `test_claude_session_search.py`）。比对期间有 session 正在写入时 search 组偶尔失败，重跑即过
 - `make screenshot`（autoplay，3 张）、`make screenshot-clicks`（cliclick 真点击，16 张，最后 4 张是自定义区间与日期选择器；坐标在 `scripts/screenshot-clicks.sh`，改布局后要校对）、`make screenshot-search`（`ASM_SEARCH_AUTOPLAY=1`，app 自己走完搜索流程，脚本等日志标记后截 7 张）。输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改），跑在真实索引上，但用一次性的 `state.json` 保证从默认视图开始
 - 构建产物在 `~/Library/Caches/cargo-target`（全局 cargo 配置），不在 `./target`；`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒
 - 环境变量：`ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（默认 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`）、`ASM_STATE`（仅 app，默认为索引同目录的 `state.json`）。验收时把 `ASM_DB` / `ASM_STATE` 指到 `tmp/`，可反复测冷启动而不动真实索引

@@ -180,6 +180,7 @@ impl AppRoot {
             picker
         });
 
+        let mut observed_sort = table.read(cx).delegate().sort_state();
         let subscriptions = vec![
             cx.subscribe_in(&table, window, Self::on_table_event),
             cx.subscribe_in(&search, window, |this, _, ev: &InputEvent, window, cx| match ev {
@@ -190,8 +191,17 @@ impl AppRoot {
                 }
                 _ => {}
             }),
-            // header clicks sort inside the table; persist whatever changed once it settles
-            cx.observe(&table, |this, _, cx| this.persist(cx)),
+            // Header sorting changes row positions without changing TableState's selected
+            // index. Keep the session selected, and record the sort BEFORE notifying again
+            // through after_rows_changed so that this observer cannot feed itself forever.
+            cx.observe(&table, move |this, table, cx| {
+                let sort = table.read(cx).delegate().sort_state();
+                if sort != observed_sort {
+                    observed_sort = sort;
+                    this.after_rows_changed(cx);
+                }
+                this.persist(cx);
+            }),
             // a range is complete once both ends are picked (presets pick both at once)
             cx.subscribe_in(&date_picker, window, |this, _, ev: &DatePickerEvent, window, cx| {
                 let DatePickerEvent::Change(date) = ev;

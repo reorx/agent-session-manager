@@ -94,6 +94,95 @@ fn search_done(app: &AppRoot, _: &App) -> bool {
     app.search_summary.is_some()
 }
 
+fn sort_like_header(cx: &mut TestAppContext, h: &Harness, key: &str) {
+    use gpui_kit::component::table::{ColumnSort, TableDelegate};
+    let (table, col, sort) = h.app.read_with(cx, |app, cx| {
+        let delegate = app.table.read(cx).delegate();
+        let col = (0..delegate.columns_count(cx)).find(|ix| delegate.column(*ix, cx).key == key).unwrap();
+        let sort = match delegate.column(col, cx).sort.unwrap() {
+            ColumnSort::Default => ColumnSort::Descending,
+            ColumnSort::Descending => ColumnSort::Ascending,
+            ColumnSort::Ascending => ColumnSort::Default,
+        };
+        (app.table.clone(), col, sort)
+    });
+    // TableState::perform_sort is private. Use its delegate entry point with the same
+    // direction cycle and notification, without calling AppRoot's selection repair.
+    // Native icon hit testing and TableState's header arrows are verified on the desktop.
+    in_window(cx, h, |window, cx| {
+        table.update(cx, |table, cx| {
+            table.delegate_mut().perform_sort(col, sort, window, cx);
+            cx.notify();
+        });
+    });
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn header_sort_keeps_the_selected_session_in_all_three_directions(cx: &mut TestAppContext) {
+    use gpui_kit::component::table::ColumnSort;
+    let h = launch(cx);
+    let id = h.app.update(cx, |app, cx| {
+        app.selection_event_count = Some(0);
+        app.select_row(0, cx);
+        app.selected.as_ref().unwrap().id.clone()
+    });
+    for sort in [Some(ColumnSort::Descending), Some(ColumnSort::Ascending), None] {
+        sort_like_header(cx, &h, "prompts");
+        let position = h.app.read_with(cx, |app, cx| {
+            let delegate = app.table.read(cx).delegate();
+            assert_eq!(delegate.sort_state().map(|(_, dir)| dir), sort);
+            assert_eq!(app.selected.as_ref().unwrap().id, id, "detail must keep its session");
+            delegate.position_of(&id).unwrap()
+        });
+        assert_selection_settled(cx, &h, position);
+    }
+}
+
+#[gpui_kit::test]
+fn header_sort_on_an_empty_table_does_not_create_a_selection(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    h.app.update(cx, |app, cx| {
+        app.selection_event_count = Some(0);
+        app.set_project(Some("no-such-project".into()), cx);
+    });
+    for _ in 0..3 {
+        sort_like_header(cx, &h, "prompts");
+        h.app.read_with(cx, |app, cx| {
+            assert!(app.selected.is_none());
+            assert!(app.saved.selected_id.is_none());
+            assert_eq!(app.table.read(cx).selected_row(), None);
+            assert_eq!(app.selection_event_count, Some(0));
+        });
+    }
+}
+
+#[gpui_kit::test]
+fn matches_header_sort_keeps_the_selected_session_and_detail_hit(cx: &mut TestAppContext) {
+    use gpui_kit::component::table::ColumnSort;
+    let h = launch(cx);
+    press(cx, &h, "cmd-f");
+    type_text(cx, &h, "e");
+    press(cx, &h, "enter");
+    wait_until(cx, &h, "multiple search results", |app, cx| search_done(app, cx) && shown_rows(app, cx) > 1);
+    wait_until(cx, &h, "selected result messages", |app, _| app.detail.hit_position().is_some());
+    let (id, hit) = h.app.update(cx, |app, _| {
+        app.selection_event_count = Some(0);
+        (app.selected.as_ref().unwrap().id.clone(), app.detail.hit_position())
+    });
+    for sort in [Some(ColumnSort::Descending), Some(ColumnSort::Ascending), None] {
+        sort_like_header(cx, &h, "matches");
+        let position = h.app.read_with(cx, |app, cx| {
+            let delegate = app.table.read(cx).delegate();
+            assert_eq!(delegate.sort_state().map(|(_, dir)| dir), sort);
+            assert_eq!(app.selected.as_ref().unwrap().id, id);
+            assert_eq!(app.detail.hit_position(), hit, "sorting must not clear or reload the detail");
+            delegate.position_of(&id).unwrap()
+        });
+        assert_selection_settled(cx, &h, position);
+    }
+}
+
 fn assert_selection_settled(cx: &mut TestAppContext, h: &Harness, row: usize) {
     cx.run_until_parked();
     h.app.read_with(cx, |app, cx| {
