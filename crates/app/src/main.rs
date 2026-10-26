@@ -4,7 +4,8 @@
 //! detail panel with Metadata / Conversation tabs, status bar. Sessions come from `crates/core`
 //! through `store` (index load, then a streaming incremental scan). Set `ASM_SPIKE_AUTOPLAY=1`
 //! to scroll / select / filter / sort automatically after launch (used by `make screenshot`),
-//! `ASM_SEARCH_AUTOPLAY=1` to run a scripted search session (`make screenshot-search`);
+//! `ASM_SEARCH_AUTOPLAY=1` to run a scripted search session (`make screenshot-search`),
+//! `ASM_DETAIL_AUTOPLAY=1` to tour the Conversation tab (`make screenshot-detail`);
 //! `ASM_CLAUDE_DIR`, `ASM_DB` and `ASM_STATE` point the app at other data.
 
 mod conversation;
@@ -19,6 +20,7 @@ mod store;
 mod style;
 mod table;
 mod toolbar;
+mod turn_cards;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,9 +39,10 @@ use gpui_kit::component::table::{ColumnSort, DataTable, TableEvent, TableState};
 use gpui_kit::component::{ResizableState, Root, Sizable, h_resizable, resizable_panel, v_flex};
 use gpui_kit::*;
 
-use crate::detail::{DETAIL_W, DetailState, DetailTab};
+use crate::conversation::{Card, ConversationView};
+use crate::detail::{DETAIL_W, DetailState, DetailTab, Load};
 use crate::model::{DisplayMode, Filter, Kind, ProjectEntry, RangePreset, SessionRow, kind_counts, project_entries, split_hidden};
-use crate::search::{SearchOptions, SearchSummary, Searcher};
+use crate::search::{SearchMode, SearchOptions, SearchSummary, Searcher};
 use crate::settings::{SortDir, ViewState, default_state_path};
 use crate::store::{Store, StoreEvent, StoreRequest};
 use crate::table::{PREVIEW_MIN_W, ROW_H, SessionTableDelegate};
@@ -83,6 +86,15 @@ enum IndexStatus {
     Failed(SharedString),
 }
 
+/// A session being opened in the detail panel, for the `detail:` timing line: from
+/// `select_row` to the first frame that shows its conversation.
+struct DetailTiming {
+    short_id: SharedString,
+    started: Instant,
+    /// Transcript size, read and build time, once the conversation arrived.
+    loaded: Option<(u64, Duration, Duration)>,
+}
+
 pub struct AppRoot {
     claude: ClaudeDir,
     favorites: agent_session_core::favorites::FavoritesDir,
@@ -116,6 +128,12 @@ pub struct AppRoot {
     /// Selection to restore once its row shows up (saved state, or a row filtered away and back).
     wanted_id: Option<SharedString>,
     detail: DetailState,
+    /// `Conversation` events of any other read are stale.
+    conversation_seq: u64,
+    /// `Matcher::pattern()` the last read of the selected session was asked to mark; the same
+    /// search run again (a filter change, a reload) does not read the transcript again.
+    conversation_pattern: Option<String>,
+    detail_timing: Option<DetailTiming>,
     detail_visible: bool,
     status: SharedString,
     index_status: IndexStatus,
@@ -277,6 +295,9 @@ impl AppRoot {
             selected: None,
             wanted_id: saved.selected_id.clone().map(Into::into),
             detail: DetailState::default(),
+            conversation_seq: 0,
+            conversation_pattern: None,
+            detail_timing: None,
             detail_visible: saved.detail_visible,
             status: "".into(),
             index_status: IndexStatus::Loading,
@@ -301,6 +322,8 @@ impl AppRoot {
             this._autoplay = Some(this.autoplay(window, cx));
         } else if std::env::var_os("ASM_SEARCH_AUTOPLAY").is_some() {
             this._autoplay = Some(this.search_autoplay(window, cx));
+        } else if std::env::var_os("ASM_DETAIL_AUTOPLAY").is_some() {
+            this._autoplay = Some(this.detail_autoplay(window, cx));
         }
         this
     }
@@ -332,13 +355,11 @@ impl AppRoot {
                     self.db_info = format!("{} messages · DB {}", stats.messages, human_size(stats.db_bytes)).into();
                     data_changed = true;
                 }
-                StoreEvent::Messages { session_id, messages } => {
-                    if self.selected.as_ref().is_some_and(|row| row.id == session_id) {
-                        self.detail.set_messages(messages, self.matcher.as_ref());
+                StoreEvent::Conversation { seq, session_id, conversation, read, build } => {
+                    if seq == self.conversation_seq && self.selected.as_ref().is_some_and(|row| row.id == session_id) {
+                        self.show_conversation(conversation, read, build);
                     }
                 }
-                // nothing asks for these yet: the detail panel switches to `Store::read_conversation` in M4a step 5
-                StoreEvent::Conversation { .. } => {}
                 StoreEvent::FavoriteChanged { id, favorite } => {
                     use gpui_kit::component::WindowExt;
                     window.push_notification(format!("{} {}", if favorite { "已收藏" } else { "已取消收藏" }, id), cx);
@@ -407,8 +428,7 @@ impl AppRoot {
         if let Some(row) = row {
             let same_session = self.selected.as_ref().is_some_and(|old| old.id == row.id);
             if !same_session {
-                self.detail.clear();
-                self.store.request(StoreRequest::Messages(row.id.to_string()));
+                self.open_conversation(&row);
             }
             self.wanted_id = None;
             self.selected = Some(row);
@@ -422,6 +442,54 @@ impl AppRoot {
         self.selected = None;
         self.wanted_id = None;
         self.detail.clear();
+        self.detail_timing = None;
+    }
+
+    /// A session was selected: nothing of the last one stays in the detail panel while the
+    /// reader thread reads its transcript. A history-only session has none to read.
+    fn open_conversation(&mut self, row: &SessionRow) {
+        if row.transcript_path.is_none() {
+            self.detail.clear();
+            self.detail_timing = None;
+            return;
+        }
+        self.detail.begin_loading();
+        self.detail_timing = Some(DetailTiming { short_id: row.short_id.clone(), started: Instant::now(), loaded: None });
+        self.read_conversation(row);
+    }
+
+    /// Ask the reader thread for `row`'s conversation, marked for the current search.
+    pub(crate) fn read_conversation(&mut self, row: &SessionRow) {
+        let Some(path) = row.transcript_path.clone() else { return };
+        self.conversation_pattern = self.matcher.as_ref().map(|m| m.pattern().to_string());
+        self.conversation_seq = self.store.read_conversation(row.id.to_string(), path, row.project_path.to_string(), self.matcher.clone());
+    }
+
+    /// The selected session's conversation arrived. Read again for another search, it keeps
+    /// what the user opened.
+    fn show_conversation(&mut self, conversation: Result<Arc<ConversationView>, String>, read: Duration, build: Duration) {
+        match conversation {
+            Ok(view) => {
+                if let Some(timing) = self.detail_timing.as_mut().filter(|t| t.loaded.is_none()) {
+                    timing.loaded = Some((view.bytes, read, build));
+                }
+                let keep_open = self.detail.has_conversation();
+                self.detail.set_conversation(view, keep_open);
+            }
+            Err(message) => {
+                eprintln!("detail: {message}");
+                self.detail_timing = None;
+                self.detail.fail(message);
+            }
+        }
+    }
+
+    /// Called while the first frame showing a newly selected conversation paints:
+    /// `detail: 5f6eea99 66.7 MB read 18.2ms build 0.3ms first frame 41.0ms`.
+    pub(crate) fn report_first_frame(&mut self) {
+        let Some(DetailTiming { short_id, started, loaded: Some((bytes, read, build)) }) = self.detail_timing.take_if(|t| t.loaded.is_some()) else { return };
+        let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+        println!("detail: {short_id} {} read {:.1}ms build {:.1}ms first frame {:.1}ms", human_size(bytes), ms(read), ms(build), ms(started.elapsed()));
     }
 
     /// Snapshot of everything worth restoring on the next launch.
@@ -580,6 +648,185 @@ impl AppRoot {
                 cx.background_executor().timer(Duration::from_millis(1500)).await;
             }
         })
+    }
+
+    /// Scripted tour of the Conversation tab for screenshots (`make screenshot-detail`). Once the
+    /// start-up scan is over, every step waits for the detail panel (and a running search) to
+    /// settle, prints `autoplay-detail: <step>` (or `… skipped`) and holds the view for a capture.
+    /// `ASM_AUTOPLAY_SESSION` (id prefix; default: the listed session with the most tool calls),
+    /// `ASM_AUTOPLAY_REGEX` (default `cargo (test|build)`) and `ASM_AUTOPLAY_SPECIAL` (a session
+    /// with compactions, AUTO cards, interruptions; the step is skipped without it) steer it.
+    fn detail_autoplay(&self, window: &Window, cx: &mut Context<Self>) -> Task<()> {
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        let session = var("ASM_AUTOPLAY_SESSION");
+        let regex = var("ASM_AUTOPLAY_REGEX").unwrap_or_else(|| "cargo (test|build)".into());
+        let special = var("ASM_AUTOPLAY_SPECIAL");
+        // false: nothing to do, the step is skipped
+        type Step = Box<dyn FnOnce(&mut AppRoot, &mut Window, &mut Context<AppRoot>) -> bool>;
+        let steps: Vec<(&str, Step)> = vec![
+            ("conversation", Box::new(move |this, _, cx| this.autoplay_select(session.as_deref(), cx))),
+            ("steps-open", Box::new(|this, _, cx| this.autoplay_open_longest_turn(cx))),
+            ("step-open", Box::new(|this, _, cx| this.autoplay_open_a_tool_step(cx))),
+            (
+                "expand-all",
+                Box::new(|this, _, cx| {
+                    this.detail.expand_all(true);
+                    this.detail.scroll_to_card(0);
+                    cx.notify();
+                    true
+                }),
+            ),
+            (
+                "search-hit",
+                Box::new(move |this, window, cx| {
+                    if this.search_opts.mode != SearchMode::Regex {
+                        this.toggle_regex(cx);
+                    }
+                    this.set_query(&regex, window, cx);
+                    true
+                }),
+            ),
+            (
+                "next-hit",
+                Box::new(|this, _, cx| {
+                    this.step_hit(true, cx);
+                    true
+                }),
+            ),
+            (
+                "special",
+                Box::new(move |this, window, cx| {
+                    let Some(prefix) = special else { return false };
+                    this.clear_search(window, cx);
+                    this.autoplay_select(Some(&prefix), cx)
+                }),
+            ),
+            (
+                "big-session",
+                Box::new(|this, window, cx| {
+                    this.clear_search(window, cx);
+                    this.autoplay_select(Some("5f6eea99"), cx)
+                }),
+            ),
+        ];
+        cx.spawn_in(window, async move |this, cx| {
+            // sessions are picked from the table: let the start-up scan fill it first
+            for _ in 0..1200 {
+                let scanning = this.update(cx, |this, _| matches!(this.index_status, IndexStatus::Loading | IndexStatus::Scanning { .. }));
+                if !scanning.unwrap_or(false) {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_millis(100)).await;
+            }
+            cx.background_executor().timer(Duration::from_millis(500)).await;
+            for (name, step) in steps {
+                let Ok(ran) = this.update_in(cx, |this, window, cx| step(this, window, cx)) else { return };
+                if !ran {
+                    println!("autoplay-detail: {name} skipped");
+                    continue;
+                }
+                // past the search debounce, then until the search and the reads it causes are done
+                cx.background_executor().timer(Duration::from_millis(400)).await;
+                for _ in 0..100 {
+                    if this.update(cx, |this, _| this.detail_settled()).unwrap_or(true) {
+                        break;
+                    }
+                    cx.background_executor().timer(Duration::from_millis(100)).await;
+                }
+                this.update(cx, |this, cx| {
+                    match name {
+                        // what the stats line says while the mouse is on a tick
+                        "conversation" => this.autoplay_hover_a_tick(),
+                        "special" => this.autoplay_scroll_to_special(),
+                        // every turn is there, however long the session: show its very end
+                        "big-session" => this.detail.list.scroll_to_end(),
+                        _ => {}
+                    }
+                    cx.notify();
+                })
+                .ok();
+                cx.background_executor().timer(Duration::from_millis(500)).await;
+                println!("autoplay-detail: {name}");
+                cx.background_executor().timer(Duration::from_millis(1500)).await;
+            }
+        })
+    }
+
+    /// No search or conversation read is under way.
+    fn detail_settled(&self) -> bool {
+        let searching = self.searching() && self.search_summary.is_none() && self.search_error.is_none();
+        let reading = match self.detail.load {
+            Load::Loading => true,
+            Load::Ready => self.detail.pattern() != self.conversation_pattern.as_deref(),
+            Load::Idle | Load::Failed(_) => false,
+        };
+        !searching && !reading
+    }
+
+    /// Put the mouse, as far as the detail state knows, on a tick of the first turn with steps:
+    /// its first failed tool call, else its middle step.
+    fn autoplay_hover_a_tick(&mut self) {
+        let Some(view) = self.detail.view.clone() else { return };
+        let turn = view.cards.iter().enumerate().find_map(|(ix, c)| match c {
+            Card::Turn(t) if !t.steps.is_empty() => Some((ix, t)),
+            _ => None,
+        });
+        if let Some((card, turn)) = turn {
+            let step = turn.steps.iter().position(|s| s.error).unwrap_or(turn.steps.len() / 2);
+            self.detail.hover_tick = Some((card, step));
+        }
+    }
+
+    /// Scroll to the card before the first interrupted or failed one (else the first
+    /// compaction), so the special cards share the screen.
+    fn autoplay_scroll_to_special(&mut self) {
+        let Some(view) = self.detail.view.clone() else { return };
+        let failed = view.cards.iter().position(|c| matches!(c, Card::Turn(t) if t.status == crate::conversation::Status::Failed));
+        let special = failed.or_else(|| view.cards.iter().position(|c| matches!(c, Card::Compact(_))));
+        if let Some(card) = special {
+            self.detail.scroll_to_card(card.saturating_sub(1));
+        }
+    }
+
+    /// Select the listed session whose id starts with `prefix`, or the one with the most tool
+    /// calls; scrolled into view.
+    fn autoplay_select(&mut self, prefix: Option<&str>, cx: &mut Context<Self>) -> bool {
+        let delegate = self.table.read(cx).delegate();
+        let listed = 0..delegate.ix.len();
+        let target = match prefix {
+            Some(prefix) => listed.clone().find(|ix| delegate.row(*ix).id.starts_with(prefix)),
+            None => listed.max_by_key(|ix| delegate.row(*ix).tools),
+        };
+        let Some(target) = target else { return false };
+        self.table.update(cx, |table, cx| table.scroll_to_row(target, cx));
+        self.select_row(target, cx);
+        true
+    }
+
+    /// Open the turn with the most steps and scroll to it.
+    fn autoplay_open_longest_turn(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(view) = self.detail.view.clone() else { return false };
+        let longest = view.cards.iter().enumerate().filter_map(|(ix, c)| if let Card::Turn(t) = c { Some((ix, t.steps.len())) } else { None }).max_by_key(|(_, steps)| *steps);
+        let Some((card, steps)) = longest.filter(|(_, steps)| *steps > 0) else { return false };
+        if !self.detail.open_turns.contains(&card) {
+            self.detail.toggle_turn(card);
+        }
+        self.detail.scroll_to_card(card);
+        self.status = format!("autoplay: turn card {card} with {steps} steps").into();
+        cx.notify();
+        true
+    }
+
+    /// In the open turn, open its first failed tool call (or else its first tool call) the way a
+    /// click on its tick does.
+    fn autoplay_open_a_tool_step(&mut self, cx: &mut Context<Self>) -> bool {
+        let (Some(view), Some(&card)) = (self.detail.view.clone(), self.detail.open_turns.iter().next()) else { return false };
+        let Some(Card::Turn(turn)) = view.cards.get(card) else { return false };
+        let tools = || turn.steps.iter().enumerate().filter(|(_, s)| s.kind == crate::conversation::TickKind::Tool);
+        let Some((step, _)) = tools().find(|(_, s)| s.error).or_else(|| tools().next()) else { return false };
+        self.detail.point_at(card, step);
+        cx.notify();
+        true
     }
 
     /// Put `query` into the search box and search for it (a programmatic `set_value` emits no

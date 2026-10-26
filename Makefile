@@ -57,6 +57,9 @@ screenshot-clicks: build ## Like screenshot, but drive dropdowns / tabs / rows w
 screenshot-search: build ## Run the scripted search session (text, next hit, CJK, regex, Tools scope, sort, cleared) and capture 7 screenshots; types and clicks nothing
 	scripts/screenshot-search.sh "$(BIN)" "$(SHOT_DIR)"
 
+screenshot-detail: build ## Tour the Conversation tab (turn cards, steps, search hits, special cards, the 70MB session) and capture up to 8 screenshots; types and clicks nothing
+	scripts/screenshot-detail.sh "$(BIN)" "$(SHOT_DIR)"
+
 bin: ## Print the path of the debug binary
 	@echo "$(BIN)"
 
@@ -80,4 +83,4 @@ parity: ## Diff asm against the Python reference script on the real ~/.claude (o
 clean: ## Remove this project's build artifacts only (the target dir is shared across projects)
 	cargo clean -p $(APP) -p $(CORE)
 
-.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search bin asm transcript-reader build-transcript-reader parity clean
+.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search screenshot-detail bin asm transcript-reader build-transcript-reader parity clean

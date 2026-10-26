@@ -1,6 +1,6 @@
 ---
 created: 2026-09-28
-updated: 2026-10-26
+updated: 2026-10-27
 tags:
   - architecture
   - threads
@@ -21,7 +21,7 @@ tags:
 | 线程 | 持有 | 工作 |
 |---|---|---|
 | 主线程 | 全部行、过滤排序后的顺序、选中、视图状态 | 渲染；过滤与排序；应用后台事件 |
-| `asm-store` | 索引的读写连接 | 读索引、扫描并写索引、按 session 取消息 |
+| `asm-store` | 索引的读写连接 | 读索引、扫描并写索引、收藏与目录迁移 |
 | `asm-search` | 索引的只读连接 | 文本搜索查全文索引；正则搜索扫 transcript 文件 |
 | `asm-reader` | 无（不碰索引） | 给详情面板直接读一个 session 的记录文件，转换成回合卡 |
 | rayon 线程池 | 无 | 扫描时并行解析文件，正则搜索时并行扫文件 |
@@ -51,7 +51,6 @@ store 线程启动后先自己走完一遍固定流程，然后才开始处理�
 | `Progress` | 已处理与总文件数 | 状态栏进度 |
 | `Session` | 扫描刚写入的一行（新增或有变化） | 按 session id 新增或替换 |
 | `ScanDone` | 扫描报告、消息数、索引大小 | 状态栏摘要 |
-| `Messages` | 一个 session 的消息（索引里的文本） | 该 session 仍被选中才采用 |
 | `Conversation` | 读取线程读好的回合卡（`ConversationView`）或出错信息，带 `seq` 和读取 / 转换耗时 | 见下文"详情的读取" |
 | `FavoriteChanged` | 收藏 / 取消收藏完成 | 通知提示；行沿 Session / Loaded 更新 |
 | `FavoritesDirChanged` | 新目录、迁移与跳过数 | 更新路径并通知 |
@@ -101,7 +100,7 @@ store 线程启动后先自己走完一遍固定流程，然后才开始处理�
 
 ### 扫描期间请求要排队
 
-store 线程是单循环，扫描进行中到达的请求要等扫描结束。目前受影响的是详情面板的消息：冷启动或 Rebuild 期间选中一行，Conversation 要等扫描完才出现（已登记在 `kb/known-issues.md`）。读取线程已经有了（下一节），详情面板改用它之后（M4a 步骤 5，`kb/plans/2026-10-26-m4a-turn-cards-spec.md`）这个问题就消失，`Messages` 请求随之删除。
+store 线程是单循环，扫描进行中到达的请求（收藏、取消收藏、换收藏目录）要等扫描结束。详情面板不受影响：它的对话走读取线程（下一节），冷启动或 Rebuild 期间选中一行，对话照常出现。
 
 ## 详情的读取
 
@@ -111,6 +110,17 @@ store 线程是单循环，扫描进行中到达的请求要等扫描结束。�
 - **转换也在读取线程上做。** 卡片上的全部字符串（时间、用时、统计行、结果摘要、折叠位置）都在转换时算好，主线程只拿 `Arc<ConversationView>` 生成行表（`conversation::rows`）和绘制。记录文件读完就在读取线程上释放，内存里只留截断后的文本。release 下 70MB 的 `5f6eea99` 读取约 18ms、转换 0.2ms；465 次工具调用的 `4e5802b6` 读取 21ms、转换 1.1ms
 - **`ConversationView.pattern` 记着读取时用的 `Matcher::pattern()`**（带大小写标记）。搜索词变了要重读才能重新标记（详情里没有全文的缓存）；pattern 相同就不必重读
 - **读不了文件不会带走线程。** 文件被删、没有权限时，事件里是 `Err(说明)`，下一个请求照常处理
+
+界面这一侧（`main.rs`、`toolbar.rs`）：
+
+| 时机 | 做什么 |
+|---|---|
+| 选中换了 session | 详情清空成骨架（`DetailState::begin_loading`，上一个 session 的内容不留在屏幕上），带当前搜索的 `Matcher` 发请求，记下返回的 `seq` 和这次请求的 pattern。没有记录文件的 history session 不发请求，直接显示说明 |
+| 收到 `Conversation` | `seq` 等于最新一次请求、`session_id` 是当前选中的才用。屏幕上已经有这个 session 的对话（为新搜索重读）就保留展开状态，否则全部折叠；都停在第一个命中位置，没有搜索时回到顶部 |
+| 搜索重跑（`run_search`） | 新 `Matcher::pattern()` 和最近一次请求的 pattern 不同才重读；过滤变化、扫描后整表重读引起的重搜 pattern 不变，不读文件（`keyboard_tests.rs` 有测试）。重读期间旧内容留在屏幕上 |
+| 读取失败 | 对话区显示事件里的说明 |
+
+每次换 session，第一帧画出对话时 stdout 打一行 `detail: <短 id> <大小> read <ms> build <ms> first frame <ms>`，起点是 `select_row`，终点是这一帧的 paint（列表后面的一个 `canvas` 在 paint 阶段打这行）。debug 下 70MB 的 `5f6eea99` 约 read 21ms、build 0.7ms、first frame 50–70ms。
 
 ## 收藏与目录切换
 
@@ -164,7 +174,7 @@ store 线程是单循环，扫描进行中到达的请求要等扫描结束。�
 
 表格的 `SelectRow` 事件是通知，不是命令：表格先改好自己的选中行再发事件，事件要等当前 update 结束才处理。一次 update 里选了两次，就会排两个事件，只有和表格当前选中行一致的那个才处理，旧的丢掉。如果旧事件也照做，选中会被拉回旧行、再发一个事件，两个事件来回触发，主线程空转（autoplay 第二步曾因此卡死）。
 
-详情面板只在选中的 session 换了之后才重新请求消息。同一个 session 的行被扫描更新时，详情不重新加载。消息返回时如果选中已经换成别的 session，结果丢弃。
+详情面板只在选中的 session 换了之后才重新读对话。同一个 session 的行被扫描更新、点表头重排时，详情不重新加载（`keyboard_tests.rs` 的 `matches_header_sort_keeps_the_selected_session_and_detail_hit`）。对话返回时如果选中已经换成别的 session，或者之后又发过请求，结果丢弃。
 
 ## 键盘焦点
 
@@ -210,8 +220,10 @@ store 线程是单循环，扫描进行中到达的请求要等扫描结束。�
 
 - `crates/app/src/store.rs` — store 线程、读取线程、请求与事件类型；文件头注释有启动顺序，测试断言了冷启动、热启动、Rebuild 的事件序列，以及读取在扫描期间照常返回、新请求取代旧请求
 - `crates/app/src/conversation.rs` — 回合卡的转换（`build`）与行表（`rows`、`card_rows`、`row_of`、`fold`）；`real_transcript_timings` 是量真实文件读取与转换耗时的 ignored 测试
+- `crates/app/src/detail.rs` — 详情的状态（`DetailState`：加载状态、行表、展开 / 折叠、命中位置与停靠）
+- `crates/app/src/turn_cards.rs` — 回合卡的绘制（`list` 的每一行），刻度的悬停与点击
 - `crates/app/src/search.rs` — 搜索线程、取代机制、结果上限
-- `crates/app/src/main.rs` — 两个接收任务、事件的成批应用、选中规则（`after_rows_changed`）、保存（`persist`）
+- `crates/app/src/main.rs` — 两个接收任务、事件的成批应用、选中规则（`after_rows_changed`）、对话的请求与采用（`open_conversation`、`show_conversation`）、保存（`persist`）
 - `crates/app/src/toolbar.rs` — 过滤条件的应用、搜索的防抖与重跑
 - `crates/app/src/table.rs` — 全部行与过滤排序后的顺序、搜索对象的生成
 - `crates/app/src/settings.rs` — 视图状态的读写与容错测试

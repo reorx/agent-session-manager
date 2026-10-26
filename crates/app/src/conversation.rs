@@ -6,9 +6,6 @@
 //! Every string a card shows is made here, once, on the reader thread (`store.rs`); rendering
 //! only picks them up, like `render_td` does for the table.
 
-// The detail panel renders these from M4a step 4 on; drop this then.
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::ops::Range;
 
@@ -121,6 +118,21 @@ pub struct Folded {
     /// What the unfold link says: `Show all · 18 lines`, or `+ 40 more lines · 4.1 KB` under a
     /// tool output. Empty when `fold` is `None`.
     pub more: SharedString,
+    /// `text` up to the fold (all of it without one), so rendering does not cut strings; the
+    /// hits are all inside it when there is a fold.
+    pub short: SharedString,
+}
+
+impl Folded {
+    fn new(text: &str, hits: Vec<Range<usize>>, fold: Option<usize>, more: SharedString) -> Folded {
+        // a fold right after a blank line would leave an empty line above the unfold link
+        let short = fold.map(|at| {
+            let end = hits.iter().map(|hit| hit.end).fold(text[..at].trim_end().len(), usize::max);
+            SharedString::from(text[..end].to_string())
+        });
+        let text: SharedString = text.to_string().into();
+        Folded { short: short.unwrap_or_else(|| text.clone()), text, hits, fold, more }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,6 +224,15 @@ pub enum Row {
     Tail(usize),
     /// A compaction divider.
     Compact(usize),
+}
+
+impl Row {
+    /// The card this row is a section of.
+    pub fn card(self) -> usize {
+        match self {
+            Row::Head(card) | Row::Step(card, _) | Row::Tail(card) | Row::Compact(card) => card,
+        }
+    }
 }
 
 pub fn build(conv: &Conversation, project_path: &str, today: NaiveDate) -> ConversationView {
@@ -531,22 +552,22 @@ fn output_folded(r: &ToolResult) -> Folded {
             format!("+ {} more · {size}", chars_label(m.chars.saturating_sub(m.text[..at].chars().count())))
         }
     });
-    Folded { text: m.text.clone().into(), hits: m.hits.clone(), fold, more: more.into() }
+    Folded::new(&m.text, m.hits.clone(), fold, more.into())
 }
 
 /// A prompt, reply or process text folded at `max_lines`.
 fn folded(m: &Marked, max_lines: usize) -> Folded {
     let fold = fold(&m.text, &m.hits, max_lines, FOLD_CHARS);
-    Folded { text: m.text.clone().into(), hits: m.hits.clone(), fold, more: show_all(fold, m.lines, m.chars, max_lines) }
+    Folded::new(&m.text, m.hits.clone(), fold, show_all(fold, m.lines, m.chars, max_lines))
 }
 
 fn plain_folded(text: &str, max_lines: usize) -> Folded {
     let fold = fold(text, &[], max_lines, FOLD_CHARS);
-    Folded { text: text.to_string().into(), hits: Vec::new(), fold, more: show_all(fold, text.lines().count(), text.chars().count(), max_lines) }
+    Folded::new(text, Vec::new(), fold, show_all(fold, text.lines().count(), text.chars().count(), max_lines))
 }
 
 fn whole(m: &Marked) -> Folded {
-    Folded { text: m.text.clone().into(), hits: m.hits.clone(), fold: None, more: SharedString::default() }
+    Folded::new(&m.text, m.hits.clone(), None, SharedString::default())
 }
 
 /// `Show all · 18 lines`, or `Show all · 2.0k chars` when the fold cut one long line.
@@ -626,7 +647,7 @@ fn time_label(ts: Option<i64>, day: NaiveDate) -> SharedString {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use agent_session_core::claude::conversation::read_conversation;
     use agent_session_core::model::{Attachment, Reply};
@@ -634,23 +655,23 @@ mod tests {
 
     const PROJECT: &str = "/Users/me/Code/alpha";
 
-    fn at(month: u32, day: u32, h: u32, m: u32, s: u32) -> Option<i64> {
+    pub fn at(month: u32, day: u32, h: u32, m: u32, s: u32) -> Option<i64> {
         Local.with_ymd_and_hms(2026, month, day, h, m, s).single().map(|t| t.timestamp_millis())
     }
 
-    fn today() -> NaiveDate {
+    pub fn today() -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 10, 17).unwrap()
     }
 
-    fn text(t: &str) -> Marked {
+    pub fn text(t: &str) -> Marked {
         Marked::new(t, usize::MAX, None)
     }
 
-    fn marked(t: &str, needle: &str) -> Marked {
+    pub fn marked(t: &str, needle: &str) -> Marked {
         Marked::new(t, usize::MAX, Some(&Matcher::regex(needle, false)))
     }
 
-    fn turn(number: Option<u32>, ts: Option<i64>, prompt: &str, steps: Vec<Step>) -> Turn {
+    pub fn turn(number: Option<u32>, ts: Option<i64>, prompt: &str, steps: Vec<Step>) -> Turn {
         Turn {
             number,
             origin: None,
@@ -665,7 +686,7 @@ mod tests {
         }
     }
 
-    fn tool(name: &str, arg: &str, result: Option<(&str, bool)>) -> Step {
+    pub fn tool(name: &str, arg: &str, result: Option<(&str, bool)>) -> Step {
         let result = result.map(|(out, is_error)| {
             let output = text(out);
             ToolResult { bytes: out.len(), lines: output.lines, output, is_error }
@@ -673,28 +694,28 @@ mod tests {
         Step { ts: None, kind: StepKind::Tool(ToolCall { name: name.into(), arg: arg.into(), input: Vec::new(), result }) }
     }
 
-    fn says(t: &str) -> Step {
+    pub fn says(t: &str) -> Step {
         Step { ts: None, kind: StepKind::Text(text(t)) }
     }
 
-    fn thinks(t: &str) -> Step {
+    pub fn thinks(t: &str) -> Step {
         Step { ts: None, kind: StepKind::Thinking(text(t)) }
     }
 
-    fn conv(items: Vec<ConvItem>) -> Conversation {
+    pub fn conv(items: Vec<ConvItem>) -> Conversation {
         Conversation { items, bytes: 0, skipped_lines: 0 }
     }
 
-    fn view_of(items: Vec<ConvItem>) -> ConversationView {
+    pub fn view_of(items: Vec<ConvItem>) -> ConversationView {
         build(&conv(items), PROJECT, today())
     }
 
-    fn turn_card(view: &ConversationView, ix: usize) -> &TurnCard {
+    pub fn turn_card(view: &ConversationView, ix: usize) -> &TurnCard {
         let Card::Turn(card) = &view.cards[ix] else { panic!("card {ix} is not a turn") };
         card
     }
 
-    fn lines(n: usize) -> String {
+    pub fn lines(n: usize) -> String {
         (1..=n).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n")
     }
 
@@ -981,6 +1002,12 @@ mod tests {
         assert_eq!(card.prompt.more, "Show all · 18 lines");
         let Tail::Reply { text: reply, .. } = &card.tail else { panic!("expected a reply") };
         assert_eq!((reply.text[..reply.fold.unwrap()].lines().count(), reply.more.as_ref()), (REPLY_LINES, "Show all · 14 lines"));
+
+        let paragraphs = "one\ntwo\nthree\nfour\nfive\n\nsix\nseven";
+        let view = view_of(vec![ConvItem::Turn(Turn { reply: Some(Reply { ts: None, text: text(paragraphs) }), ..turn(Some(1), None, "p", vec![]) })]);
+        let Tail::Reply { text: reply, .. } = &turn_card(&view, 0).tail else { panic!("expected a reply") };
+        assert_eq!(reply.short, "one\ntwo\nthree\nfour\nfive", "a fold after a blank line leaves no empty line above the link");
+        assert_eq!(reply.text, paragraphs);
 
         let view = view_of(vec![ConvItem::Turn(turn(Some(1), None, &wide, vec![]))]);
         assert_eq!(turn_card(&view, 0).prompt.more, "Show all · 2.0k chars", "a fold by characters counts characters");

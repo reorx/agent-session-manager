@@ -197,7 +197,12 @@ impl AppRoot {
     pub fn run_search(&mut self, cx: &mut Context<Self>) {
         self.query = self.search.read(cx).value().trim().to_string().into();
         self.matcher = self.search_opts.matcher(&self.query);
-        self.detail.set_matcher(self.matcher.as_ref());
+        // the conversation is marked when it is read: read it again only for another search
+        // (this runs on filter changes and reloads too, with the same one)
+        let pattern = self.matcher.as_ref().map(|m| m.pattern().to_string());
+        if pattern != self.conversation_pattern && let Some(row) = self.selected.clone() {
+            self.read_conversation(&row);
+        }
         self.search_summary = None;
         self.search_error = None;
         if self.query.is_empty() {

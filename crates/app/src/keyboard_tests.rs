@@ -317,7 +317,8 @@ fn enter_searches_at_once_and_n_steps_through_the_hits_while_the_table_has_the_f
     assert_eq!(focus(cx, &h), (false, true), "enter hands the focus to the table");
     // no clock moved: the search did not wait for the typing pause
     wait_until(cx, &h, "the search started by enter", search_done);
-    wait_until(cx, &h, "the messages of the session with hits", |app, cx| hit(app, cx) == Some((1, 3)));
+    // hits count by place (a prompt, a step, a reply, a summary): one in each of turns 1, 2 and 4
+    wait_until(cx, &h, "the conversation of the session with hits", |app, cx| hit(app, cx) == Some((1, 3)));
 
     press(cx, &h, "n");
     assert_eq!(h.app.read_with(cx, hit), Some((2, 3)));
@@ -334,6 +335,29 @@ fn enter_searches_at_once_and_n_steps_through_the_hits_while_the_table_has_the_f
     assert_eq!(h.app.read_with(cx, hit), Some((1, 3)));
     press(cx, &h, "cmd-g");
     assert_eq!(h.app.read_with(cx, hit), Some((2, 3)), "cmd-g steps from anywhere");
+}
+
+#[gpui_kit::test]
+fn rerunning_the_same_search_does_not_reread_the_conversation(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    press(cx, &h, "cmd-f");
+    type_text(cx, &h, "parser");
+    press(cx, &h, "enter");
+    wait_until(cx, &h, "the search started by enter", search_done);
+    wait_until(cx, &h, "the conversation marked for it", |app, _| app.detail.hit_position().is_some());
+    let (seq, id) = h.app.read_with(cx, |app, _| (app.conversation_seq, app.selected.as_ref().unwrap().id.clone()));
+
+    // a filter change searches again, with the same query
+    h.app.update(cx, |app, cx| app.toggle_empty_sessions(cx));
+    wait_until(cx, &h, "the search after the filter change", search_done);
+    h.app.read_with(cx, |app, _| {
+        assert_eq!(app.selected.as_ref().unwrap().id, id);
+        assert_eq!(app.conversation_seq, seq, "the same search marks the same places: nothing to read again");
+        assert!(app.detail.hit_position().is_some());
+    });
+
+    in_window(cx, &h, |window, cx| h.app.update(cx, |app, cx| app.set_query("parse", window, cx)));
+    assert_ne!(h.app.read_with(cx, |app, _| app.conversation_seq), seq, "another query reads the transcript again");
 }
 
 #[gpui_kit::test]

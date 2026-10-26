@@ -1,6 +1,6 @@
 ---
 created: 2026-09-28
-updated: 2026-10-23
+updated: 2026-10-27
 tags:
   - gpui
   - gpui-kit
@@ -133,13 +133,31 @@ Root
 - 高亮样式（背景色、前景色）和其他色值一样集中在 `style.rs`
 - 放在会截断的单元格里时，截断发生在右侧，排在后面的高亮可能被裁掉。表格的片段因此让首个命中尽量靠前
 
-## 滚动到某个子元素
+## 不定高的长列表：`list` 与 `ListState`
 
-详情面板的"跳到下一个命中"靠 `ScrollHandle`：滚动容器用 `.track_scroll(&handle)` 挂上句柄，之后 `scroll_to_top_of_item(n)` 把第 n 个子元素滚到顶部，`set_offset` 回到开头。
+详情面板的对话用 GPUI 核心的 `list(state, render_item)`，不用组件库的 `v_virtual_list`：后者要预先给出每一项的高度，自动换行的文本算不出来。`list` 只布局看得见的项（加上 `ListState::new` 的 overdraw 那一段），量出的高度缓存在 `ListState` 里，视口外的项按估算高度算。源码在 `gpui-pre-0.3.5/src/elements/list.rs`。
 
-序号数的是滚动容器的**直接子元素**。消息必须直接挂在滚动容器下，中间不能再包一层；消息前面若有别的子元素（如"跳过了 n 条"的说明），序号要相应后移。
+**一项是卡片的一段，不是一张卡。** 界面持有一张行表 `Vec<Row>`（`conversation::Row`：卡头、一步、卡尾、compact 分隔线），列表的第 n 项就是行表的第 n 行。卡片的外观由各行拼成：卡头画上边框和上圆角，卡尾画下边框和下圆角，中间的行只画左右边框。展开 200 步的回合是 200 个小项，每帧只布局看得见的那几个，命中也能定位到具体某一步。
 
-这个办法要求所有子元素都真实渲染，只适合条数有上限的列表。
+| 要做的事 | 做法 |
+|---|---|
+| 整张表换掉（换 session、换搜索） | 先改行表，再 `list.reset(rows.len())`：所有项变成未测量，滚动回到开头 |
+| 展开 / 收起一个回合 | 只替换变了的那几行：比较这张卡新旧两份行表，去掉相同的头尾，`list.splice(from..to, 新行数)`，行表做同样的 `splice`。插在视口上方的行会把滚动位置一起后移，视口里的项不动（`detail.rs` 的测试锁住了这一点）。整张卡都 `splice` 的话，视口顶端那一项会被重置到开头，看着会跳 |
+| 一行的内容变了高度（展开一步、Show all） | `list.remeasure_items(ix..ix + 1)`。不要对它 `splice`：理由同上 |
+| 滚到某一行 | `list.scroll_to(ListOffset { item_ix, offset_in_item: px(0.) })`；回到开头用 `ListOffset::default()`，滚到最后用 `scroll_to_end()` |
+| 滚动条 | 外层容器 `.vertical_scrollbar(&list_state)`，`ListState` 实现了 `ScrollbarHandle` |
+
+`ListState` 内部是 `Rc<RefCell<..>>`，克隆就是同一份状态；它不需要窗口就能构造、`splice`、`scroll_to`，`logical_scroll_top()` 在纯逻辑测试里可以断言。
+
+**回调里拿 `AppRoot`。** `list` 的回调签名是 `FnMut(usize, &mut Window, &mut App) -> AnyElement`，拿到的不是 `Context<AppRoot>`。渲染时先 `let view = cx.entity();`，回调里 `view.update(cx, |this, cx| this.render_row(ix, window, cx))`，这样行里照常能用 `cx.listener(..)`。回调在 `AppRoot::render` 返回之后的布局阶段才执行，那时实体没有被借用，`update` 不会冲突。可见的项每帧都重新 render，所以悬停这类只改外观、不改高度的状态，`cx.notify()` 就够了。
+
+**行里的元素 id 要按内容取，不按行号。** 每一项是单独布局的根，不同项里同名的 id（例如 `"tick"`）会共用交互状态。用 `ElementId::NamedInteger(name, (card << 32) | step)`。
+
+**跳到文字中间的某个位置。** `scroll_to` 只能把一行的顶端对齐到视口顶端，而一行可能是一段很长的 prompt 或工具输出，命中在几屏之下。`list` 支持子元素在 prepaint 里调用 `window.request_autoscroll(bounds)`：它会在同一帧里调整滚动位置，让这块区域进入视口（区域在下方时底边对齐视口底边），然后重新布局。本项目的做法（`turn_cards.rs::reveal_marker`）：停靠时置一个一次性的标记，含当前命中的那段文字后面跟一个零尺寸的 `canvas`，它的 prepaint 读同一段 `StyledText` 的 `TextLayout::position_for_index(命中起点)`，命中离文字顶端超过 240px 才请求一块从命中上方三行开始、约一个列表高的区域，请求完清掉标记。`position_for_index` 在文字没有布局或 prepaint 之前会 panic，放在后面的兄弟元素的 prepaint 里调用正好避开：兄弟元素按顺序 prepaint，轮到 `canvas` 时前面的文字已经布局完了。只量不画的项（overdraw）不会调用 prepaint，标记留给真正画出来的那一帧。
+
+**首帧时间。** 要知道"内容画出来"的时刻，在列表后面放一个 `canvas`，用它的 paint 回调打点：paint 按元素顺序进行，轮到它时列表已经画完。`window.on_next_frame` 不合适：回调在下一帧**开始**、绘制之前执行。
+
+定高、条数有上限的内容（Metadata）仍用普通滚动容器：`.overflow_y_scrollbar()`，或 `.track_scroll(&ScrollHandle)` 加 `.vertical_scrollbar(&handle)`。
 
 ## 元素函数的返回类型
 
@@ -181,9 +199,9 @@ use core::prelude::v1::test;
 
 需要自动驱动界面时，优先加环境变量控制的内置脚本（`ASM_SPIKE_AUTOPLAY=1`：启动后滚动并选中，再切过滤、排序和 tab）。它走的是和用户操作相同的代码路径，不依赖屏幕坐标。
 
-下拉菜单这类弹出层目前没有找到程序化打开的办法，只能用 cliclick 真点击。点击坐标是相对窗口的固定值，任何让控件移位的布局改动都要重新校对；工具栏按钮的位置取决于左边按钮的标签长度（选了项目、出现日期选择器都会把右边的按钮推开）。脚本启动的窗口不在前台，第一次点击只会激活窗口；GPUI 按上一帧的悬停状态判定点中了什么，指针瞬移过去立刻点击可能落空。所以 `screenshot-clicks.sh` 先点一下标题栏，每次点击前先把指针移过去停 200ms。详情面板的标题限制为单行也是这个原因：两行标题会把下面的 tab 和 chip 推下去 25px。
+下拉菜单这类弹出层目前没有找到程序化打开的办法，只能用 cliclick 真点击。点击坐标是相对窗口的固定值，任何让控件移位的布局改动都要重新校对；工具栏按钮的位置取决于左边按钮的标签长度（选了项目、出现日期选择器都会把右边的按钮推开）。脚本启动的窗口不在前台，第一次点击只会激活窗口；GPUI 按上一帧的悬停状态判定点中了什么，指针瞬移过去立刻点击可能落空。所以 `screenshot-clicks.sh` 先点一下标题栏，每次点击前先把指针移过去停 200ms。详情面板的标题限制为单行也是这个原因：两行标题会把下面的 tab 和对话顶栏推下去 25px。
 
-**不要用固定的 `sleep` 等界面就绪。** 新编译的二进制首次启动要几秒才出窗口，等不够就截到空窗口或上一帧的画面；`set -euo pipefail` 下这类失败经常没有任何输出，看起来就像脚本正常跑完了。做法是让 app 在每一步稳定后打一行标记（`autoplay-search: <step>`），脚本轮询窗口 id 和日志里的标记，超时就报错并指向 app 日志。`screenshot-search.sh` 是这个写法的参考。
+**不要用固定的 `sleep` 等界面就绪。** 新编译的二进制首次启动要几秒才出窗口，等不够就截到空窗口或上一帧的画面；`set -euo pipefail` 下这类失败经常没有任何输出，看起来就像脚本正常跑完了。做法是让 app 在每一步稳定后打一行标记（`autoplay-search: <step>`），脚本轮询窗口 id 和日志里的标记，超时就报错并指向 app 日志。`screenshot-search.sh` 是这个写法的参考；`screenshot-detail.sh`（`ASM_DETAIL_AUTOPLAY`，详情面板的 8 步）同样写法，没有可做的步骤打 `autoplay-detail: <step> skipped`，脚本跳过不截。
 
 **脚本里"挑一个最有代表性的"要从当前可见的行里算，不要从全量数据里算。** 真实数据的分布很不均匀，按 session 数挑"最忙的项目"会稳定挑中某个工具批量产生的 history session，截出来的图说明不了任何功能。autoplay 选项目就是从过滤后的索引向量里取的。
 
@@ -220,6 +238,7 @@ use core::prelude::v1::test;
 - `crates/app/src/table.rs` — 表格 delegate
 - `crates/app/src/style.rs` — 色值与主题安装
 - `crates/app/src/toolbar.rs` — 下拉菜单、搜索框与开关、搜索的防抖
-- `crates/app/src/detail.rs` — 详情面板、命中高亮与跳转
+- `crates/app/src/detail.rs` — 详情面板的标题与 Metadata，对话的状态（行表、展开 / 折叠、命中位置与停靠）
+- `crates/app/src/turn_cards.rs` — 回合卡的绘制：`list` 的行、刻度的悬停与点击、命中的定位标记
 - [GPUI 框架调研](gpui-framework-research.md) — 心智模型、组件目录、选型理由
 - 设计稿链接与界面改版记录：`kb/notes/2026-09-16-design-refactor.md`

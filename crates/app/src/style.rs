@@ -92,20 +92,94 @@ pub fn expanded_bg() -> Hsla {
 pub fn row_hover() -> Hsla {
     hex(0xf7f7f8)
 }
-pub fn chip_border() -> Hsla {
-    hex(0xc9c9ce)
-}
 pub fn white() -> Hsla {
     hex(0xffffff)
 }
+/// The `·` between the session id, project and branch in the detail header.
+pub fn dot_sep() -> Hsla {
+    hex(0xc4c4c8)
+}
+
+// Turn cards (M4 mockups 1–4: `project/{Main,Expanded,Search,Special}.dc.html`)
+pub fn conversation_bg() -> Hsla {
+    hex(0xf3f3f5)
+}
+pub fn card_border() -> Hsla {
+    hex(0xe3e3e6)
+}
+/// Between a card's head and its steps or reply.
+pub fn step_border() -> Hsla {
+    hex(0xf0f0f2)
+}
+/// Between two step rows.
+pub fn step_sep() -> Hsla {
+    hex(0xf4f4f6)
+}
+/// Top edge of an open step's input / output box.
+pub fn expanded_border() -> Hsla {
+    hex(0xf2f2f4)
+}
+/// The prompt block of an AUTO card (a turn's is `user_bg`).
+pub fn auto_bg() -> Hsla {
+    hex(0xf6f6f8)
+}
+/// The step a tick click opened, and its box.
+pub fn lit_bg() -> Hsla {
+    hex(0xeaf1fe)
+}
+pub fn lit_box_bg() -> Hsla {
+    hex(0xf5f8fe)
+}
+/// Status lamps: ended with a reply / interrupted or API error / no reply.
+pub fn turn_ok() -> Hsla {
+    hex(0x16a34a)
+}
+pub fn turn_err() -> Hsla {
+    hex(0xdc2626)
+}
+pub fn turn_off() -> Hsla {
+    hex(0xc4c4c8)
+}
+/// Text of errors: `1 error`, `interrupted`, a failed tool's result and output.
+pub fn error_text() -> Hsla {
+    hex(0xc81e1e)
+}
+pub fn api_error_fg() -> Hsla {
+    hex(0xb91c1c)
+}
+pub fn api_error_bg() -> Hsla {
+    hex(0xfef2f2)
+}
+pub fn api_error_border() -> Hsla {
+    hex(0xfbd5d5)
+}
+/// A tool call's tick (a failed one is `turn_err`); process text is a `muted` dot.
+pub fn tick() -> Hsla {
+    hex(0xb4b4bb)
+}
+/// Ring of a thinking's hollow tick.
+pub fn tick_thinking() -> Hsla {
+    hex(0xa8a8b0)
+}
+/// The lines either side of `context compacted`.
+pub fn compact_rule() -> Hsla {
+    hex(0xd6d6db)
+}
 
 // Search (not in the mockup): hits are marked like a text marker, the hit the detail panel is
-// parked on gets the stronger one; toggled toolbar buttons carry the accent.
+// parked on gets the stronger one; toggled toolbar buttons carry the accent. Hit badges and the
+// rings of ticks with hits use the same two colors.
+pub fn hit_bg() -> Hsla {
+    hex(0xfde68a)
+}
+pub fn hit_current_bg() -> Hsla {
+    hex(0xfdba74)
+}
 pub fn hit_highlight() -> HighlightStyle {
-    HighlightStyle { background_color: Some(hex(0xfde68a)), color: Some(text()), ..Default::default() }
+    HighlightStyle { background_color: Some(hit_bg()), color: Some(text()), ..Default::default() }
 }
 pub fn hit_current_highlight() -> HighlightStyle {
-    HighlightStyle { background_color: Some(hex(0xfdba74)), color: Some(text()), ..Default::default() }
+    HighlightStyle { background_color: Some(hit_current_bg()), color: Some(text()), ..Default::default() }
 }
 pub fn toggle_on_bg() -> Hsla {
     hex(0xe3ecfb)
@@ -117,6 +191,11 @@ pub fn toggle_on_fg() -> Hsla {
 /// Monospace font family (the theme picks `Menlo` on macOS and falls back if missing).
 pub fn mono(cx: &App) -> SharedString {
     cx.theme().mono_font_family.clone()
+}
+
+/// The UI font, for text inside a monospace row (thinking rows, links in mono lines).
+pub fn sans(cx: &App) -> SharedString {
+    cx.theme().font_family.clone()
 }
 
 /// Kind badge: 9px uppercase mono, filled for SDK / BG, outlined for History.

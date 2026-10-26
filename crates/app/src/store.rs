@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use agent_session_core::claude::conversation::read_conversation;
 use agent_session_core::claude::paths::ClaudeDir;
 use agent_session_core::index::{Db, IndexStats, Indexer, ListFilter, Order, Progress, ScanEvent, ScanReport};
-use agent_session_core::model::{MessageRow, SessionSummary};
+use agent_session_core::model::SessionSummary;
 use agent_session_core::search::Matcher;
 use anyhow::{Result, anyhow, ensure};
 use agent_session_core::{config, favorites::{self, FavoritesDir}};
@@ -34,7 +34,6 @@ pub enum StoreRequest {
     SetFavoritesDir(Option<PathBuf>),
     Scan,
     Rebuild,
-    Messages(String),
 }
 
 #[derive(Debug)]
@@ -45,10 +44,8 @@ pub enum StoreEvent {
     /// One session written by the running scan (new or changed).
     Session(SessionSummary),
     ScanDone { report: ScanReport, stats: IndexStats },
-    Messages { session_id: String, messages: Vec<MessageRow> },
     /// A transcript read for the detail panel (`Store::read_conversation`), already built into
     /// cards. `read` is the file read, `build` the conversion; both ran on the reader thread.
-    #[allow(dead_code)] // until the detail panel asks for conversations (M4a step 5)
     Conversation { seq: u64, session_id: String, conversation: Result<Arc<ConversationView>, String>, read: Duration, build: Duration },
     FavoriteChanged { id: String, favorite: bool },
     FavoritesDirChanged { dir: PathBuf, moved: usize, skipped: usize },
@@ -58,9 +55,7 @@ pub enum StoreEvent {
 
 pub struct Store {
     requests: mpsc::Sender<StoreRequest>,
-    #[allow(dead_code)] // until the detail panel asks for conversations (M4a step 5)
     reads: mpsc::Sender<ReadRequest>,
-    #[allow(dead_code)]
     latest: Arc<AtomicU64>,
 }
 
@@ -97,7 +92,6 @@ impl Store {
     /// Read a transcript for the detail panel on the reader thread, superseding any read that
     /// has not started yet. Returns the `seq` the `Conversation` event carries; events of older
     /// requests are stale from now on.
-    #[allow(dead_code)] // until the detail panel asks for conversations (M4a step 5)
     pub fn read_conversation(&self, session_id: String, path: PathBuf, project_path: String, matcher: Option<Matcher>) -> u64 {
         let seq = self.latest.fetch_add(1, Ordering::SeqCst) + 1;
         self.reads.send(ReadRequest { seq, session_id, path, project_path, matcher }).ok();
@@ -157,7 +151,6 @@ fn run(claude: ClaudeDir, db_path: PathBuf, favorites: FavoritesDir, requests: m
             StoreRequest::SetFavoritesDir(dir) => worker.set_favorites_dir(dir),
             StoreRequest::Scan => worker.scan(false),
             StoreRequest::Rebuild => worker.scan(true),
-            StoreRequest::Messages(id) => worker.messages(id),
         };
         if let Err(e) = result {
             events.send_blocking(StoreEvent::Failed(format!("{e:#}"))).ok();
@@ -233,12 +226,6 @@ impl Worker {
         if changed {
             self.load()?;
         }
-        Ok(())
-    }
-
-    fn messages(&self, session_id: String) -> Result<()> {
-        let messages = self.db.messages(&session_id)?;
-        self.events.send_blocking(StoreEvent::Messages { session_id, messages })?;
         Ok(())
     }
 }
@@ -328,15 +315,10 @@ mod tests {
     }
 
     #[test]
-    fn messages_of_a_session_are_served_on_request_and_a_rebuild_streams_everything_again() {
+    fn a_rebuild_streams_everything_again() {
         let dir = tempfile::tempdir().unwrap();
         let (store, events) = spawn(fixture_claude(), dir.path().join("index.sqlite"));
         until_settled(&events);
-
-        store.request(StoreRequest::Messages(S1.into()));
-        let StoreEvent::Messages { session_id, messages } = events.recv_blocking().unwrap() else { panic!("expected Messages") };
-        assert_eq!(session_id, S1);
-        assert_eq!(messages.len(), 10);
 
         store.request(StoreRequest::Rebuild);
         let seen = until_settled(&events);
