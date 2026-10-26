@@ -421,7 +421,7 @@ pub struct HitPlace { pub item: usize, pub part: Part }
 
 ## 实施结果与差异
 
-2026-10-27 完成并验收：提交 `200a567`（core）、`2d8543b`（store 与转换）、`baaed71` + `be96d1a`（界面与返工 r1），验收见 [验收总结](../sessions/2026-10-27-asm-m4a-accept.md)。截断常量（`ENTRY_CHARS` / `RESULT_CHARS` / `INPUT_FIELD_CHARS` / `HIT_LEAD_CHARS`）和折叠常量都没改。下面逐条列出实现与本 spec 不同的地方，理由在链接的出处。
+2026-10-27 完成并验收：提交 `200a567`（core）、`2d8543b`（store 与转换）、`baaed71` + `be96d1a` + `f976862`（界面与返工 r1、r2），验收见 [验收总结](../sessions/2026-10-27-asm-m4a-accept.md)。截断常量（`ENTRY_CHARS` / `RESULT_CHARS` / `INPUT_FIELD_CHARS` / `HIT_LEAD_CHARS`）和折叠常量都没改。下面逐条列出实现与本 spec 不同的地方，理由在链接的出处。
 
 core（[出处](../sessions/2026-10-26-asm-m4a-core.md#注意事项与自己的决定)）：
 
@@ -455,6 +455,9 @@ store 与转换（[出处](../sessions/2026-10-26-asm-m4a-store.md#和-spec-不�
 - 键盘测试 "parser" 的期望值仍是 `(1, 3)`：按命中位置数在 fixture 上也是 3
 - `run_search` 比较最近一次请求的 pattern，不是屏幕上视图的 pattern
 - 被截过的文本，折叠链接只数保留下来的部分（`Show 401 lines · cut, 20,000 of 24,999 chars`、`+ 47 more lines · cut, 3,000 of 16,319 chars`），整段显示时末尾加 `cut · showing X of Y chars`；为此 core 的 `Marked` 多一个 `kept`
+- task-notification 的 AUTO 卡折叠时只显示 `<summary>`（摘要里没说到的 `<status>` 接在后面），Show all 打开整条原文；有命中在摘要外时直接整段显示（[返工 r2](../sessions/2026-10-27-asm-m4a-ui.md#返工-r2)）
+- MCP 工具 `mcp__<server>__<tool>` 在步骤行、统计行和悬停说明里只写 `<tool>`，完整名写在展开后的 input 上方；长工具名把名称列撑宽（最多 168px），不截断（同上）
+- 整段显示的文字同样去掉结尾空行，"Show all · N lines" 按去掉之后的行数算（同上）
 
 验收（[出处](../sessions/2026-10-27-asm-m4a-accept.md#和-spec-不同的地方)）：
 

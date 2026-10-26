@@ -27,6 +27,24 @@
 - core 的 `ToolResult` 只记文字输出，工具结果里的图片 block 被丢掉。Read 一张图片的步骤结果摘要是空的，展开后只有 input、没有 output，看不出读没读成功、图多大。`5f6eea99` 的 112 次工具调用里有 79 次是这样。
 - 处理方向：core 解析工具结果时像 prompt 附件一样记下图片（`ToolResult` 加 attachments），app 在结果摘要和 output 里显示 `image · 230 KB`。
 
+## 详情：记录文件不在页缓存里时，打开 70MB 的 session 首帧约 150–160ms，偶发超过 200ms
+
+- 记录：2026-10-27（M4a 验收；`kb/sessions/2026-10-27-asm-m4a-accept.md`"实测数字"，数据在 `tmp/2026-10-27-m4a-turn-cards/accept/timing/cold-*.log`）
+- 200ms 的目标是在页缓存热时量的（release 45–79ms）。先用 `tmp/2026-10-27-m4a-turn-cards/accept/evict.py` 把 `5f6eea99` 逐出页缓存再打开：release 首帧 152 / 161 / 356ms，时间几乎全在读取（119–335ms）。本机这个文件读过一两分钟后再查就已经不在页缓存里，所以打开一个好一阵没看的大 session 多半是冷的，用户会看到骨架停留一下。只量了这一个文件。
+- 处理方向（推测，未验证）：映射后 `madvise(MADV_SEQUENTIAL | MADV_WILLNEED)` 让内核预读，或者改成大块顺序 `read`；先在 `asm session --conversation` 上对比冷读取耗时。
+
+## 表格：Size 列在 1000 MB 以上时首位被截掉
+
+- 记录：2026-10-27（M4a 验收时在合成的 4GB 记录文件上看到；`tmp/2026-10-27-m4a-turn-cards/accept/states-shots/crop-size.png`）
+- `model.rs::format_size` 只有 KB 和 MB 两档，4 GiB 的文件写成 `4096.0 MB`，60px 宽的 Size 列放不下，左边被截掉，显示成 `096.0 MB`，看上去比实际小 40 多倍，按 Size 排序的结果却是对的。本机现在最大的记录文件 70MB，还没有真实 session 碰到。
+- 处理方向：1000 MB 起改写成 `1.0 GB`。
+
+## 表格与详情：粘贴内容的 `<pasted_content id="…">` 标签原样显示
+
+- 记录：2026-10-27（M4a 验收；`tmp/2026-10-27-m4a-turn-cards/accept/r1/c/1-conversation.png`）
+- 用户粘贴的长文本在记录里包在 `<pasted_content id="9c86">…</pasted_content>` 里。表格 Preview 列、详情标题和回合卡 prompt 的第一行都是这个标签，真正的内容要往下看；本机 2061 个 session 里有 72 个的第一条 prompt 以它开头（`tmp/2026-10-27-m4a-turn-cards/accept/pasted-count.py`）。
+- 处理方向（推测）：显示时剥掉标签外壳、保留内容，必要时加一个 `pasted` 小标签。First prompt / Preview 的文字也进 `asm list` 的输出，和 Python 脚本逐字比对（`make parity`），所以只在 app 显示层改，或者两边一起改。
+
 ## 导出：用户按 Esc 打断时留下的标记被当成一条用户输入导出
 
 - 记录：2026-10-26（写 M4 plan 时在真实数据上核对发现；85 个记录文件里有这种标记）

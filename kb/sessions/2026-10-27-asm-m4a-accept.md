@@ -13,7 +13,7 @@ tags:
 
 ## 协调者摘要（asm-m4a-accept）
 
-- 结果：12 条验收标准 11 条通过，第 6 条部分通过（AUTO 卡显示原始 XML、compact 的展开链接折行，见"交给协调者" 1、2）。打开速度 release 70MB 首帧 45–79ms（页缓存热），达标
+- 结果：12 条验收标准全部通过。第 6 条初验部分通过（AUTO 卡显示原始 XML、compact 的展开链接折行），`f976862` 修好后复验通过（见末尾"复验 r1"）。打开速度 release 70MB 首帧 45–79ms（页缓存热），达标
 - 提交：三个截图脚本、Makefile 一行、spec / product-prd / PRD §3 / known-issues 和本总结同一个提交
 - 测试：`cargo test --workspace` core 161、app 100 全过（2 ignored）；`make parity` 21/21（前两次各有 1 条因正在写入的 session 失败，第三次前台跑全过）
 - 证据都在 `tmp/2026-10-27-m4a-turn-cards/accept/`：`detail*/`、`clicks/`（20 张）、`search/`（7 张）、`states-shots/`、`cold-scan/`、`thinking/`、`showall/`、`timing/`；截图全部用 Read 看过（裁出的详情面板或 2×2 拼图，`sheets/`）
@@ -34,7 +34,7 @@ tags:
 | 3 | 折叠卡片的各项；超出部分能 Show all 展开 | 截图对照画稿 1；真实点击 Show all | 通过 | `detail/1-conversation.png`、`showall/2-show-all.png` |
 | 4 | 悬停一格刻度改写统计行；点一格展开并滚到这一步 | `screenshot-clicks.sh` 的 cliclick 悬停和点击 | 通过（"35 / 120  Read  9-湖北…/10.jpg"；点后 TURN 1 展开、滚到第 35 步并展开） | `clicks/17-tick-hover.png`、`clicks/20-tick-click.png` |
 | 5 | Show steps 后每步一行；工具行看 input / output；thinking 看全文；过程文字直接显示 | autoplay 截图；真实点击 Show steps、工具行、thinking 行 | 通过 | `detail/2…4-*.png`、`clicks/18-show-steps.png`、`clicks/19-tool-row-open.png`、`thinking/2-thinking-open.png` |
-| 6 | 打断、API 错误、无回复、AUTO、compact 按画稿 4 | core 测试；三个 special session 截图 | **部分通过**：打断、API 错误、无回复、AUTO 的来源标签都对；AUTO 卡正文是原始 XML，compact 链接的 `▸` 折到第二行 | `detail/7-special.png`（API 错误）、`detail-run2/7-special.png`（打断）、`detail-run3/7-special.png`（compact）、`clicks/1-initial.png`（no reply） |
+| 6 | 打断、API 错误、无回复、AUTO、compact 按画稿 4 | core 测试；三个 special session 截图；`f976862` 后复验 | 通过（复验 r1）：初验时 AUTO 卡正文是原始 XML、compact 链接的 `▸` 折到第二行，修好后 AUTO 卡折成一句摘要，compact 链接在一行 | `r1/a/7-special.png`（AUTO 摘要、API 错误）、`r1/c/7-special.png`（打断、AUTO）、`r1/b/7-special.png`（compact）、`clicks/1-initial.png`（no reply） |
 | 7 | 粘贴图片的 prompt 显示占位和大小 | core 测试；截图 | 通过（`image · 231 KB`） | `detail-run2/1-conversation.png` |
 | 8 | 正则命中工具输出时停在那一步、已展开、高亮；`n` / `⇧N` / `⌘G` / `⇧⌘G` / ▲▼ 循环 | 步骤 4 的命中测试、键盘测试；autoplay `search-hit` / `next-hit` | 通过（▲▼ 未用真实鼠标点） | `detail/6-next-hit.png`、`cargo-test.log` |
 | 9 | 超过 300 条消息的 session 能看到最后一个回合 | 本机索引里消息最多的 session 只有 186 条，另造 350 回合（700 条消息）的记录文件，借 `big-session` 步骤滚到底 | 通过（TURN 350） | `detail-350/8-big-session.png`、`detail/8-big-session.png` |
@@ -123,3 +123,25 @@ tags:
 - [产品 PRD](../docs/product-prd.md) — 更新状态表、§4.5、§6
 - [原始 PRD](../plans/2026-09-08-agent-session-manager-prd.md) — 更新 §3 M4 一行
 - [Known Issues](../known-issues.md) — 删 3 条、加 2 条
+
+## 复验 r1
+
+任务：`tmp/m4-detail-panel/tasks/asm-m4a-accept-r1.md`。复验 asm-m4a-ui 返工 r2（`f976862`，只改 app，`git diff 6ad896a f976862 -- crates/core` 为空，所以没有重跑 parity）。
+
+- `make test`：core 161、app 103 全过，2 ignored（`r1/make-test.log`）
+- 三轮 `make screenshot-detail`（各 8 步都到），截图在 `tmp/2026-10-27-m4a-turn-cards/accept/r1/{a,b,c}/`，24 张全部 Read 过（裁出的详情面板和 `sheets/r1-*.png` 拼图）：
+  - `a`：`ASM_AUTOPLAY_SESSION=8b127723 ASM_AUTOPLAY_STEP=thinking ASM_AUTOPLAY_SPECIAL=943071b0`
+  - `b`：`ASM_AUTOPLAY_SESSION=6711e3e2 ASM_AUTOPLAY_STEP=mcp ASM_AUTOPLAY_SPECIAL=6965d04a`
+  - `c`：`ASM_AUTOPLAY_SESSION=35fec037 ASM_AUTOPLAY_SPECIAL=abf68944`
+
+| 原条目 | 结论 | 证据 |
+|---|---|---|
+| 1 compact 链接折行 | 通过：`summary · 9.2k chars ▸`、`summary · 14k chars ▸` 都在一行 | `r1/b/crop/7-special.png` |
+| 2 AUTO 卡是原始 XML | 通过：三张 task-notification 卡折成 `Background command "Monitor …" completed (exit code 0)` 加 `Show all · 7 lines`；auto-continuation 卡照常显示正文 | `r1/a/crop/7-special.png`、`r1/c/7-special.png` |
+| 4 整段显示留着结尾空行 | 通过：和初验同一段 thinking（原文以 `\n\n` 结尾），展开框底部紧接下一行 | `r1/a/crop/3-step-open.png` 对 `thinking/crop-2.png` |
+| 5 工具名被截断 | 通过：`request_access`、`screenshot`、`list_windows`、`get_window_state`、`ToolSearch`、`ListAgents` 完整；展开的一步在 input 上方写 `mcp__computer-use__request_access`；统计行 `press_key 20 · list_windows 13 · type_text 11` | `r1/b/crop/3-step-open.png`、`sheets/r1-steps-open-bc.png` |
+
+其余画面没有回退：compact 分隔线、打断卡（`r1/c/7-special.png`）、API 错误框（`r1/a/7-special.png`）、正则命中停在工具输出且已展开（三轮的 5、6 张）、`5f6eea99` 滚到底（三轮的 8 张）、Expand all（4 张）都与初验一致。
+
+验收表第 6 条改为通过，`kb/docs/product-prd.md` §4.5 补了 AUTO 摘要和 MCP 工具名两句；spec"实施结果与差异"补了 r2 的三条。known-issues 按协调者的处理登记了三条："记录文件不在页缓存里时打开 70MB 首帧约 150–160ms""Size 列在 1000 MB 以上时首位被截掉""`<pasted_content>` 标签原样显示"。登记 Size 那条时核对截图，实际看到的是 4GB 文件的 `4096.0 MB` 被截成 `096.0 MB`（`states-shots/crop-size.png`），"交给协调者"第 6 条写的 `024.2 MB` 是记错了。
+
