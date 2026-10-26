@@ -7,6 +7,7 @@
 //! `ASM_SEARCH_AUTOPLAY=1` to run a scripted search session (`make screenshot-search`);
 //! `ASM_CLAUDE_DIR`, `ASM_DB` and `ASM_STATE` point the app at other data.
 
+mod conversation;
 mod detail;
 mod favorites;
 #[cfg(test)]
@@ -336,6 +337,8 @@ impl AppRoot {
                         self.detail.set_messages(messages, self.matcher.as_ref());
                     }
                 }
+                // nothing asks for these yet: the detail panel switches to `Store::read_conversation` in M4a step 5
+                StoreEvent::Conversation { .. } => {}
                 StoreEvent::FavoriteChanged { id, favorite } => {
                     use gpui_kit::component::WindowExt;
                     window.push_notification(format!("{} {}", if favorite { "已收藏" } else { "已取消收藏" }, id), cx);

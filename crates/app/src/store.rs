@@ -5,17 +5,28 @@
 //! incremental scan, streaming `Progress` and every written `Session` (cold start fills the
 //! table this way) → `ScanDone` → a second `Loaded` when the scan changed anything, so rows that
 //! were streamed before their project's path was known end up exact.
+//!
+//! A second thread, `asm-reader`, reads transcripts for the detail panel straight from the file
+//! (no `Db`), so a conversation shows up while a scan holds the store thread. Its requests
+//! supersede each other like searches do (`seq`, see `search.rs`), and its `Conversation` events
+//! go out on the same channel.
 
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use agent_session_core::claude::conversation::read_conversation;
 use agent_session_core::claude::paths::ClaudeDir;
 use agent_session_core::index::{Db, IndexStats, Indexer, ListFilter, Order, Progress, ScanEvent, ScanReport};
 use agent_session_core::model::{MessageRow, SessionSummary};
+use agent_session_core::search::Matcher;
 use anyhow::{Result, anyhow, ensure};
 use agent_session_core::{config, favorites::{self, FavoritesDir}};
 use async_channel::{Receiver, Sender};
+use chrono::Local;
+
+use crate::conversation::{self, ConversationView};
 
 pub enum StoreRequest {
     Favorite(String),
@@ -35,6 +46,10 @@ pub enum StoreEvent {
     Session(SessionSummary),
     ScanDone { report: ScanReport, stats: IndexStats },
     Messages { session_id: String, messages: Vec<MessageRow> },
+    /// A transcript read for the detail panel (`Store::read_conversation`), already built into
+    /// cards. `read` is the file read, `build` the conversion; both ran on the reader thread.
+    #[allow(dead_code)] // until the detail panel asks for conversations (M4a step 5)
+    Conversation { seq: u64, session_id: String, conversation: Result<Arc<ConversationView>, String>, read: Duration, build: Duration },
     FavoriteChanged { id: String, favorite: bool },
     FavoritesDirChanged { dir: PathBuf, moved: usize, skipped: usize },
     RebuildingRoots,
@@ -43,22 +58,84 @@ pub enum StoreEvent {
 
 pub struct Store {
     requests: mpsc::Sender<StoreRequest>,
+    #[allow(dead_code)] // until the detail panel asks for conversations (M4a step 5)
+    reads: mpsc::Sender<ReadRequest>,
+    #[allow(dead_code)]
+    latest: Arc<AtomicU64>,
+}
+
+struct ReadRequest {
+    seq: u64,
+    session_id: String,
+    path: PathBuf,
+    project_path: String,
+    matcher: Option<Matcher>,
 }
 
 impl Store {
     pub fn spawn(claude: ClaudeDir, db_path: PathBuf, favorites: FavoritesDir) -> (Store, Receiver<StoreEvent>) {
         let (requests, request_rx) = mpsc::channel();
         let (event_tx, events) = async_channel::unbounded();
+        let (reads, read_rx) = mpsc::channel();
+        let latest = Arc::new(AtomicU64::new(0));
+        let (reader_latest, reader_events) = (latest.clone(), event_tx.clone());
         std::thread::Builder::new()
             .name("asm-store".into())
             .spawn(move || run(claude, db_path, favorites, request_rx, event_tx))
             .expect("failed to spawn the store thread");
-        (Store { requests }, events)
+        std::thread::Builder::new()
+            .name("asm-reader".into())
+            .spawn(move || serve_reads(read_rx, reader_latest, reader_events))
+            .expect("failed to spawn the reader thread");
+        (Store { requests, reads, latest }, events)
     }
 
     pub fn request(&self, request: StoreRequest) {
         self.requests.send(request).ok();
     }
+
+    /// Read a transcript for the detail panel on the reader thread, superseding any read that
+    /// has not started yet. Returns the `seq` the `Conversation` event carries; events of older
+    /// requests are stale from now on.
+    #[allow(dead_code)] // until the detail panel asks for conversations (M4a step 5)
+    pub fn read_conversation(&self, session_id: String, path: PathBuf, project_path: String, matcher: Option<Matcher>) -> u64 {
+        let seq = self.latest.fetch_add(1, Ordering::SeqCst) + 1;
+        self.reads.send(ReadRequest { seq, session_id, path, project_path, matcher }).ok();
+        seq
+    }
+}
+
+/// Reader thread body: only the newest request is read; whatever queued up before it, or was
+/// superseded while being read, is dropped. Never touches the index, so a scan never delays it.
+fn serve_reads(requests: mpsc::Receiver<ReadRequest>, latest: Arc<AtomicU64>, events: Sender<StoreEvent>) {
+    let stale = |seq: u64| latest.load(Ordering::SeqCst) != seq;
+    while let Ok(mut request) = requests.recv() {
+        while let Ok(newer) = requests.try_recv() {
+            request = newer;
+        }
+        if stale(request.seq) {
+            continue;
+        }
+        let seq = request.seq;
+        let event = read(request);
+        if !stale(seq) {
+            events.send_blocking(event).ok();
+        }
+    }
+}
+
+fn read(request: ReadRequest) -> StoreEvent {
+    let started = Instant::now();
+    let conversation = read_conversation(&request.path, request.matcher.as_ref());
+    let read = started.elapsed();
+    let conversation = conversation
+        .map(|conv| {
+            let mut view = conversation::build(&conv, &request.project_path, Local::now().date_naive());
+            view.pattern = request.matcher.as_ref().map(|m| m.pattern().to_string());
+            Arc::new(view)
+        })
+        .map_err(|e| format!("{e:#}"));
+    StoreEvent::Conversation { seq: request.seq, session_id: request.session_id, conversation, read, build: started.elapsed() - read }
 }
 
 /// Thread body: every failure becomes a `Failed` event instead of taking the thread down.
@@ -265,6 +342,116 @@ mod tests {
         let seen = until_settled(&events);
         assert_eq!(loaded_counts(&seen), [0, 8], "the table empties, then fills again");
         assert_eq!(streamed(&seen), 8);
+    }
+
+    const S2: &str = "22222222-aaaa-4bbb-8ccc-000000000002";
+    const ALPHA: &str = "/Users/me/Code/alpha";
+
+    fn transcript(id: &str) -> PathBuf {
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../core/tests/fixtures/claude/projects/-Users-me-Code-alpha")).join(format!("{id}.jsonl"))
+    }
+
+    /// Events up to and including the `Conversation` of `seq`.
+    fn until_conversation(events: &Receiver<StoreEvent>, seq: u64) -> Vec<StoreEvent> {
+        let mut seen = Vec::new();
+        loop {
+            let ev = events.recv_blocking().expect("store threads ended early");
+            let done = matches!(&ev, StoreEvent::Conversation { seq: s, .. } if *s == seq);
+            seen.push(ev);
+            if done {
+                return seen;
+            }
+        }
+    }
+
+    fn conversation_of(ev: &StoreEvent) -> (u64, &str, &Result<Arc<ConversationView>, String>) {
+        let StoreEvent::Conversation { seq, session_id, conversation, .. } = ev else { panic!("expected a Conversation, got {ev:?}") };
+        (*seq, session_id, conversation)
+    }
+
+    #[test]
+    fn a_conversation_is_served_on_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, events) = spawn(fixture_claude(), dir.path().join("index.sqlite"));
+        until_settled(&events);
+
+        let seq = store.read_conversation(S1.into(), transcript(S1), ALPHA.into(), None);
+        let seen = until_conversation(&events, seq);
+        let (_, session_id, view) = conversation_of(seen.last().unwrap());
+        let view = view.as_ref().unwrap();
+        assert_eq!(session_id, S1);
+        assert_eq!((view.summary.as_ref(), view.cards.len()), ("4 turns · 3 tool calls", 4), "read from the transcript, built into cards");
+        assert!(view.pattern.is_none() && view.hits.is_empty());
+
+        let matcher = Matcher::words("parser").unwrap();
+        let seq = store.read_conversation(S1.into(), transcript(S1), ALPHA.into(), Some(matcher.clone()));
+        let seen = until_conversation(&events, seq);
+        let view = conversation_of(seen.last().unwrap()).2.as_ref().unwrap();
+        assert_eq!(view.pattern.as_deref(), Some(matcher.pattern()), "the view says which search it was marked for");
+        assert!(!view.hits.is_empty());
+    }
+
+    #[test]
+    fn a_conversation_is_served_before_the_first_scan_settles() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("index.sqlite");
+        // another writer holds the index: the store thread's scan waits for it
+        let writer = Db::open(&db_path).unwrap();
+        writer.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
+        let (store, events) = spawn(fixture_claude(), db_path);
+
+        let asked = Instant::now();
+        let seq = store.read_conversation(S1.into(), transcript(S1), ALPHA.into(), None);
+        let seen = until_conversation(&events, seq);
+        assert!(asked.elapsed() < Duration::from_secs(3), "served at once, not after the busy timeout gave up: {:?}", asked.elapsed());
+        assert!(conversation_of(seen.last().unwrap()).2.is_ok());
+        assert!(!seen.iter().any(|e| matches!(e, StoreEvent::ScanDone { .. } | StoreEvent::Failed(_))), "the scan is still waiting: {seen:?}");
+
+        writer.conn().execute_batch("COMMIT").unwrap();
+        let settled = until_settled(&events);
+        assert!(!settled.iter().any(|e| matches!(e, StoreEvent::Failed(_))));
+        assert_eq!(streamed(&settled), 8, "and the scan goes on once the index is free");
+    }
+
+    #[test]
+    fn a_newer_request_supersedes_the_one_before() {
+        // queued requests: only the newest one is read
+        let (requests, queue) = mpsc::channel();
+        let (event_tx, events) = async_channel::unbounded();
+        let latest = Arc::new(AtomicU64::new(3));
+        for (seq, id) in [(1, S1), (2, S2), (3, S1)] {
+            requests.send(ReadRequest { seq, session_id: id.into(), path: transcript(id), project_path: ALPHA.into(), matcher: None }).unwrap();
+        }
+        drop(requests);
+        serve_reads(queue, latest, event_tx);
+        let served: Vec<u64> = std::iter::from_fn(|| events.try_recv().ok()).map(|e| conversation_of(&e).0).collect();
+        assert_eq!(served, [3]);
+
+        // through the store: whatever arrives for the older request arrives before the newer one
+        let dir = tempfile::tempdir().unwrap();
+        let (store, events) = spawn(fixture_claude(), dir.path().join("index.sqlite"));
+        let old = store.read_conversation(S1.into(), transcript(S1), ALPHA.into(), None);
+        let new = store.read_conversation(S2.into(), transcript(S2), ALPHA.into(), None);
+        assert!(new > old);
+        let seen = until_conversation(&events, new);
+        let conversations: Vec<(u64, &str)> = seen.iter().filter(|e| matches!(e, StoreEvent::Conversation { .. })).map(|e| { let (seq, id, _) = conversation_of(e); (seq, id) }).collect();
+        assert_eq!(conversations.last(), Some(&(new, S2)));
+        assert!(conversations[..conversations.len() - 1].iter().all(|(seq, _)| *seq == old), "{conversations:?}");
+    }
+
+    #[test]
+    fn a_missing_transcript_is_reported_instead_of_crashing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, events) = spawn(fixture_claude(), dir.path().join("index.sqlite"));
+        let gone = dir.path().join("gone.jsonl");
+        let seq = store.read_conversation(S1.into(), gone, ALPHA.into(), None);
+        let seen = until_conversation(&events, seq);
+        let Err(message) = conversation_of(seen.last().unwrap()).2 else { panic!("a missing file cannot be read") };
+        assert!(message.contains("gone.jsonl"), "{message}");
+
+        let seq = store.read_conversation(S1.into(), transcript(S1), ALPHA.into(), None);
+        let seen = until_conversation(&events, seq);
+        assert!(conversation_of(seen.last().unwrap()).2.is_ok(), "the reader thread is still there");
     }
 
     #[test]
