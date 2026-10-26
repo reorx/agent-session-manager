@@ -13,10 +13,14 @@ use std::time::{Duration, Instant};
 use agent_session_core::claude::paths::ClaudeDir;
 use agent_session_core::index::{Db, IndexStats, Indexer, ListFilter, Order, Progress, ScanEvent, ScanReport};
 use agent_session_core::model::{MessageRow, SessionSummary};
-use anyhow::Result;
+use anyhow::{Result, anyhow, ensure};
+use agent_session_core::{config, favorites::{self, FavoritesDir}};
 use async_channel::{Receiver, Sender};
 
 pub enum StoreRequest {
+    Favorite(String),
+    Unfavorite(String),
+    SetFavoritesDir(Option<PathBuf>),
     Scan,
     Rebuild,
     Messages(String),
@@ -31,6 +35,9 @@ pub enum StoreEvent {
     Session(SessionSummary),
     ScanDone { report: ScanReport, stats: IndexStats },
     Messages { session_id: String, messages: Vec<MessageRow> },
+    FavoriteChanged { id: String, favorite: bool },
+    FavoritesDirChanged { dir: PathBuf, moved: usize, skipped: usize },
+    RebuildingRoots,
     Failed(String),
 }
 
@@ -39,12 +46,12 @@ pub struct Store {
 }
 
 impl Store {
-    pub fn spawn(claude: ClaudeDir, db_path: PathBuf) -> (Store, Receiver<StoreEvent>) {
+    pub fn spawn(claude: ClaudeDir, db_path: PathBuf, favorites: FavoritesDir) -> (Store, Receiver<StoreEvent>) {
         let (requests, request_rx) = mpsc::channel();
         let (event_tx, events) = async_channel::unbounded();
         std::thread::Builder::new()
             .name("asm-store".into())
-            .spawn(move || run(claude, db_path, request_rx, event_tx))
+            .spawn(move || run(claude, db_path, favorites, request_rx, event_tx))
             .expect("failed to spawn the store thread");
         (Store { requests }, events)
     }
@@ -55,8 +62,8 @@ impl Store {
 }
 
 /// Thread body: every failure becomes a `Failed` event instead of taking the thread down.
-fn run(claude: ClaudeDir, db_path: PathBuf, requests: mpsc::Receiver<StoreRequest>, events: Sender<StoreEvent>) {
-    let mut worker = match Worker::open(claude, &db_path, events.clone()) {
+fn run(claude: ClaudeDir, db_path: PathBuf, favorites: FavoritesDir, requests: mpsc::Receiver<StoreRequest>, events: Sender<StoreEvent>) {
+    let mut worker = match Worker::open(claude, &db_path, favorites, events.clone()) {
         Ok(worker) => worker,
         Err(e) => {
             events.send_blocking(StoreEvent::Failed(format!("open index: {e:#}"))).ok();
@@ -68,6 +75,9 @@ fn run(claude: ClaudeDir, db_path: PathBuf, requests: mpsc::Receiver<StoreReques
     }
     for request in requests {
         let result = match request {
+            StoreRequest::Favorite(id) => worker.favorite(id, false),
+            StoreRequest::Unfavorite(id) => worker.favorite(id, true),
+            StoreRequest::SetFavoritesDir(dir) => worker.set_favorites_dir(dir),
             StoreRequest::Scan => worker.scan(false),
             StoreRequest::Rebuild => worker.scan(true),
             StoreRequest::Messages(id) => worker.messages(id),
@@ -79,14 +89,39 @@ fn run(claude: ClaudeDir, db_path: PathBuf, requests: mpsc::Receiver<StoreReques
 }
 
 struct Worker {
+    claude: ClaudeDir,
+    favorites: FavoritesDir,
     db: Db,
     indexer: Indexer,
     events: Sender<StoreEvent>,
 }
 
 impl Worker {
-    fn open(claude: ClaudeDir, db_path: &std::path::Path, events: Sender<StoreEvent>) -> Result<Worker> {
-        Ok(Worker { db: Db::open(db_path)?, indexer: Indexer::new(claude), events })
+    fn open(claude: ClaudeDir, db_path: &std::path::Path, favorites: FavoritesDir, events: Sender<StoreEvent>) -> Result<Worker> {
+        Ok(Worker { db: Db::open(db_path)?, indexer: Indexer::new(claude.clone(), Some(favorites.claude())), claude, favorites, events })
+    }
+
+    fn favorite(&mut self, id: String, remove: bool) -> Result<()> {
+        let s = self.db.session(&id)?.ok_or_else(|| anyhow!("session not found"))?;
+        if remove { favorites::remove(&self.favorites.root, &s.project_key, &id, &self.favorites.trash)?; }
+        else {
+            ensure!(!s.history_only(), "cannot favorite a history-only session");
+            favorites::save(&self.favorites.root, s.file_path.as_ref().ok_or_else(|| anyhow!("no transcript"))?, &s.project_key, &id)?;
+        }
+        self.scan(false)?;
+        self.events.send_blocking(StoreEvent::FavoriteChanged { id, favorite: !remove })?; Ok(())
+    }
+    fn set_favorites_dir(&mut self, dir: Option<PathBuf>) -> Result<()> {
+        ensure!(!config::environment_override(), "由环境变量 ASM_FAVORITES_DIR 指定");
+        let db_path = self.db.path().unwrap().to_path_buf();
+        let new = config::canonical_root(&dir.clone().unwrap_or_else(|| config::default_favorites_dir(&db_path)))?;
+        let report = favorites::migrate_with_commit(&self.favorites.root, &new, &self.claude, || self.db.transaction(|db| {
+            db.set_meta("favorites_root", &config::canonical_root(&new.join("claude"))?.to_string_lossy())?;
+            config::set_favorites_dir(&db_path, dir.as_ref().map(|_| new.as_path()))
+        }))?;
+        self.favorites.root = new.clone(); self.indexer = Indexer::new(self.claude.clone(), Some(self.favorites.claude()));
+        self.scan(false)?;
+        self.events.send_blocking(StoreEvent::FavoritesDirChanged { dir: new, moved: report.moved, skipped: report.skipped })?; Ok(())
     }
 
     fn load(&self) -> Result<()> {
@@ -102,13 +137,20 @@ impl Worker {
             self.load()?;
         }
         let events = self.events.clone();
-        let report = self.indexer.scan_streaming(&mut self.db, &mut |ev| {
+        let result = self.indexer.scan_streaming(&mut self.db, &mut |ev| {
             let event = match ev {
                 ScanEvent::Progress(p) => StoreEvent::Progress(p),
                 ScanEvent::Session(s) => StoreEvent::Session(s),
             };
             events.send_blocking(event).ok();
-        })?;
+        });
+        let report = match result {
+            Err(e) if e.is::<agent_session_core::index::indexer::RootsChanged>() => {
+                self.events.send_blocking(StoreEvent::RebuildingRoots)?;
+                return self.scan(true);
+            }
+            result => result?,
+        };
         let changed = report.files_seen != report.files_unchanged || report.files_missing > 0 || report.history_sessions > 0;
         self.events.send_blocking(StoreEvent::ScanDone { report, stats: self.db.stats()? })?;
         if changed {
@@ -129,6 +171,27 @@ mod tests {
     use super::*;
 
     const S1: &str = "11111111-aaaa-4bbb-8ccc-000000000001";
+
+    fn spawn(claude: ClaudeDir, db: PathBuf) -> (Store, Receiver<StoreEvent>) {
+        let root = db.with_file_name("favorites"); let trash = favorites::Trash::Dir(db.with_file_name("trash"));
+        Store::spawn(claude, db, FavoritesDir { root, trash })
+    }
+
+    #[test]
+    fn favorite_and_unfavorite_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, events) = spawn(fixture_claude(), dir.path().join("index.sqlite")); until_settled(&events);
+        for (request, expected) in [(StoreRequest::Favorite(S1.into()), true), (StoreRequest::Unfavorite(S1.into()), false)] {
+            store.request(request);
+            loop {
+                match events.recv_blocking().unwrap() {
+                    StoreEvent::FavoriteChanged { favorite, .. } => { assert_eq!(favorite, expected); break; }
+                    StoreEvent::Failed(e) => panic!("{e}"),
+                    _ => {}
+                }
+            }
+        }
+    }
 
     fn fixture_claude() -> ClaudeDir {
         ClaudeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../core/tests/fixtures/claude"))
@@ -162,7 +225,7 @@ mod tests {
     #[test]
     fn a_cold_start_shows_an_empty_table_then_streams_every_session_and_reloads() {
         let dir = tempfile::tempdir().unwrap();
-        let (_store, events) = Store::spawn(fixture_claude(), dir.path().join("index.sqlite"));
+        let (_store, events) = spawn(fixture_claude(), dir.path().join("index.sqlite"));
         let seen = until_settled(&events);
         assert!(matches!(seen.first(), Some(StoreEvent::Loaded { sessions, .. }) if sessions.is_empty()));
         assert_eq!(streamed(&seen), 8, "4 transcripts + 4 history-only sessions");
@@ -176,10 +239,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("index.sqlite");
         {
-            let (_store, events) = Store::spawn(fixture_claude(), db_path.clone());
+            let (_store, events) = spawn(fixture_claude(), db_path.clone());
             until_settled(&events);
         }
-        let (_store, events) = Store::spawn(fixture_claude(), db_path);
+        let (_store, events) = spawn(fixture_claude(), db_path);
         let seen = until_settled(&events);
         assert_eq!(loaded_counts(&seen), [8], "one load, no reload");
         assert_eq!(streamed(&seen), 0);
@@ -190,7 +253,7 @@ mod tests {
     #[test]
     fn messages_of_a_session_are_served_on_request_and_a_rebuild_streams_everything_again() {
         let dir = tempfile::tempdir().unwrap();
-        let (store, events) = Store::spawn(fixture_claude(), dir.path().join("index.sqlite"));
+        let (store, events) = spawn(fixture_claude(), dir.path().join("index.sqlite"));
         until_settled(&events);
 
         store.request(StoreRequest::Messages(S1.into()));
@@ -209,7 +272,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("file");
         std::fs::write(&blocker, "x").unwrap();
-        let (_store, events) = Store::spawn(fixture_claude(), blocker.join("index.sqlite"));
+        let (_store, events) = spawn(fixture_claude(), blocker.join("index.sqlite"));
         assert!(matches!(events.recv_blocking().unwrap(), StoreEvent::Failed(_)));
     }
 }

@@ -1,6 +1,6 @@
 ---
 created: 2026-09-15
-updated: 2026-10-23
+updated: 2026-10-26
 tags:
   - prd
   - product
@@ -39,6 +39,7 @@ tags:
 
 | 模块 | 状态 | 说明 |
 |---|---|---|
+| Session 收藏 | ✅ | 2026-10-26 完成：⌘D、Favorites 菜单、行右键和详情星标；快照优先、仅收藏过滤、目录迁移、最后副本确认，见 `../plans/2026-10-26-favorites.md` |
 | Session 表格 | ✅ | 9 列（Project / Preview / Started / Updated / Prompts / Cost / Ctx / Size / Kind）、36px 两行、虚拟滚动、行选中、表头排序；Preview 列随窗口自适应 |
 | 费用与 context | ✅ | 2026-10-23 完成：Cost 按 token 用量和官方价格自算（含 subagent），Ctx 是结束时的 context 占用；状态栏合计当前显示行的费用；`asm cost` 命令行同样可用，见 `../plans/2026-10-23-cost-context-columns.md` |
 | Preview 展示模式切换 | ✅ | 工具栏 Preview 下拉或 `cmd-1..4`，四种模式即时切换 |
@@ -213,3 +214,10 @@ M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebui
 - M4 详情面板实现方案（含待确认项）：`../plans/2026-09-28-m4-detail-panel.md`
 - M0 验证记录与截图说明：`../notes/2026-09-15-m0-spike.md`；界面重构记录（设计稿、模块划分、gpui-kit 坑、与设计稿差异）：`../notes/2026-09-16-design-refactor.md`；M1 核心库记录（模块、实测、与旧脚本的比对）：`../notes/2026-09-17-m1-core-crate.md`
 - 数据格式：`claude-session-data-format.md`；数据层设计：`data-layer-design.md`；UI 框架：`gpui-framework-research.md`
+
+
+## Session 收藏
+
+已实现（2026-10-26）。通过 Favorites 菜单、⌘D、行右键或详情星标保存会话快照，Kind 下拉的 Favorites only 可与其他过滤叠加。收藏副本优先显示，原会话被清理后仍能搜索与导出。取消收藏移至废纸篓；最后副本先确认。菜单支持显示、更换或恢复默认收藏目录，更换时迁移，重复 id 保留目标副本。
+
+验收与数据规则见 [收藏方案](../plans/2026-10-26-favorites.md)。

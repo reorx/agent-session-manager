@@ -49,7 +49,8 @@ CREATE TABLE sessions (
   -- last / largest prompt of a main-thread call (from the parser, like the fields above)
   context_tokens INTEGER,
   context_peak INTEGER,
-  context_model TEXT
+  context_model TEXT,
+  favorite INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX sessions_project ON sessions(project_id, updated_at DESC);
@@ -129,3 +130,5 @@ CREATE TABLE index_state (
   indexed_offset INTEGER NOT NULL DEFAULT 0,
   indexed_at INTEGER
 );
+
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);

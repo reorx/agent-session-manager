@@ -9,7 +9,7 @@ use common::*;
 
 fn indexed(sb: &Sandbox) -> Db {
     let mut db = Db::open(&sb.db_path()).unwrap();
-    Indexer::new(sb.claude.clone()).scan(&mut db, &mut |_| {}).unwrap();
+    Indexer::new(sb.claude.clone(), None).scan(&mut db, &mut |_| {}).unwrap();
     db
 }
 
@@ -113,7 +113,7 @@ fn messages_deleted_with_their_transcript_disappear_from_search() {
     let sb = sandbox();
     let mut db = indexed(&sb);
     std::fs::remove_file(sb.transcript(ALPHA, S1)).unwrap();
-    Indexer::new(sb.claude.clone()).scan(&mut db, &mut |_| {}).unwrap();
+    Indexer::new(sb.claude.clone(), None).scan(&mut db, &mut |_| {}).unwrap();
     assert!(search_sessions(&db, &q("parser")).unwrap().is_empty());
 }
 

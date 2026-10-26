@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use crate::model::{MessageRow, Role, SessionSummary, Source, UsageRow};
 
 /// Also bump this when a price in `pricing.rs` changes: stored costs are computed at index time.
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 const SCHEMA: &str = include_str!("schema.sql");
 
 pub struct Db {
@@ -59,6 +59,7 @@ pub enum Order {
 
 #[derive(Clone, Debug, Default)]
 pub struct ListFilter {
+    pub favorites_only: bool,
     pub project_keys: Option<Vec<String>>,
     /// Keep sessions with `updated_at >= since_ms`.
     pub since_ms: Option<i64>,
@@ -73,7 +74,7 @@ const SESSION_COLUMNS: &str = "s.id, s.id_known, p.encoded_dir, p.path, s.file_p
      s.user_msg_count, s.assistant_msg_count, s.tool_use_count, s.subagent_count, s.file_size, \
      s.total_cost_usd, s.duration_ms, s.lines_added, s.lines_removed, s.pr_url, s.models, \
      s.cost_usd, s.tokens_in, s.tokens_out, s.tokens_cache_read, s.tokens_cache_write, s.unpriced_models, \
-     s.context_tokens, s.context_peak, s.context_model";
+     s.context_tokens, s.context_peak, s.context_model, s.favorite";
 
 impl Db {
     /// Open (or create) the index at `path`. Unreadable files are deleted and recreated; an old
@@ -176,7 +177,7 @@ impl Db {
     pub fn clear_all(&mut self) -> Result<()> {
         self.conn.execute_batch(
             "DELETE FROM messages; DELETE FROM session_files; DELETE FROM session_tool_counts;
-             DELETE FROM sessions; DELETE FROM projects; DELETE FROM index_state; DELETE FROM api_usage;
+             DELETE FROM sessions; DELETE FROM projects; DELETE FROM index_state; DELETE FROM api_usage; DELETE FROM meta;
              INSERT INTO messages_fts(messages_fts) VALUES ('rebuild');",
         )?;
         Ok(())
@@ -184,6 +185,14 @@ impl Db {
 
     pub fn set_user_version_for_test(&self, version: i32) {
         self.conn.execute_batch(&format!("PRAGMA user_version = {version};")).unwrap();
+    }
+
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).optional()?)
+    }
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute("INSERT INTO meta VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, value])?;
+        Ok(())
     }
 
     pub fn conn(&self) -> &Connection {
@@ -249,9 +258,9 @@ impl Db {
                 first_prompt, last_prompt, last_message, started_at, updated_at, git_branch, cwd, cc_version,
                 entrypoint, permission_mode, is_background, user_msg_count, assistant_msg_count, tool_use_count,
                 subagent_count, file_size, total_cost_usd, duration_ms, lines_added, lines_removed, pr_url, models,
-                context_tokens, context_peak, context_model)
+                context_tokens, context_peak, context_model, favorite)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
-                ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)
+                ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)
              ON CONFLICT(id) DO UPDATE SET
                 id_known = excluded.id_known, project_id = excluded.project_id, file_path = excluded.file_path,
                 source = excluded.source, transcript_missing = excluded.transcript_missing, title = excluded.title,
@@ -265,7 +274,7 @@ impl Db {
                 total_cost_usd = excluded.total_cost_usd, duration_ms = excluded.duration_ms,
                 lines_added = excluded.lines_added, lines_removed = excluded.lines_removed, pr_url = excluded.pr_url,
                 models = excluded.models, context_tokens = excluded.context_tokens,
-                context_peak = excluded.context_peak, context_model = excluded.context_model",
+                context_peak = excluded.context_peak, context_model = excluded.context_model, favorite = excluded.favorite",
             params![
                 s.id,
                 s.id_known,
@@ -300,6 +309,7 @@ impl Db {
                 s.context_tokens.map(|n| n as i64),
                 s.context_peak.map(|n| n as i64),
                 s.context_model,
+                s.favorite,
             ],
         )?;
         self.conn.execute("DELETE FROM session_tool_counts WHERE session_id = ?1", [&s.id])?;
@@ -345,6 +355,7 @@ impl Db {
     pub fn list_sessions(&self, filter: &ListFilter) -> Result<Vec<SessionSummary>> {
         let mut sql = format!("SELECT {SESSION_COLUMNS} FROM sessions s JOIN projects p ON p.id = s.project_id WHERE 1 = 1");
         let mut args: Vec<rusqlite::types::Value> = Vec::new();
+        if filter.favorites_only { sql.push_str(" AND s.favorite = 1"); }
         if let Some(keys) = &filter.project_keys {
             let marks: Vec<String> = keys.iter().enumerate().map(|(i, _)| format!("?{}", args.len() + i + 1)).collect();
             sql.push_str(&format!(" AND p.encoded_dir IN ({})", marks.join(",")));
@@ -392,7 +403,7 @@ impl Db {
     }
 
     pub fn mark_transcript_missing(&self, id: &str) -> Result<()> {
-        self.conn.execute("UPDATE sessions SET transcript_missing = 1 WHERE id = ?1", [id])?;
+        self.conn.execute("UPDATE sessions SET favorite = 0, transcript_missing = 1 WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -691,6 +702,7 @@ fn row_to_session(r: &Row) -> rusqlite::Result<SessionSummary> {
         context_tokens: tokens(37)?,
         context_peak: tokens(38)?,
         context_model: r.get(39)?,
+        favorite: r.get(40)?,
     })
 }
 

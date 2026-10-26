@@ -44,6 +44,8 @@ impl Sandbox {
         self.root().join("projects").join(project).join(format!("{sid}.jsonl"))
     }
 
+    pub fn fav_root(&self) -> PathBuf { self.tmp.path().join("favorites") }
+
     pub fn db_path(&self) -> PathBuf {
         self.tmp.path().join("index.sqlite")
     }

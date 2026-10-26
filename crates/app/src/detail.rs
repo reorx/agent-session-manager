@@ -6,6 +6,7 @@ use std::sync::Arc;
 use agent_session_core::model::MessageRow;
 use agent_session_core::search::Matcher;
 use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme, Sizable, h_flex, v_flex};
 use gpui_kit::*;
@@ -237,7 +238,8 @@ impl AppRoot {
             .pb(px(8.))
             .border_b_1()
             .border_color(style::border_soft())
-            .child(div().truncate().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).line_height(px(18.)).child(row.title.clone()))
+             .child(h_flex().gap(px(6.)).child(div().flex_1().truncate().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).line_height(px(18.)).child(row.title.clone()))
+                .child(Button::new("favorite-session").ghost().small().label(if row.favorite { "★" } else { "☆" }).text_color(style::favorite()).on_click(cx.listener(|this, _, window, cx| this.toggle_favorite(window, cx)))))
             .child(
                 h_flex()
                     .mt(px(3.))
@@ -286,6 +288,7 @@ impl AppRoot {
                     .px(px(14.))
                     .pt(px(10.))
                     .pb(px(16.))
+                    .child(meta_pair("Favorite", mono_value(row.favorite_path.clone(), cx).into_any_element()))
                     .child(pair_row(
                         meta_pair("Project", div().child(row.project.clone()).into_any_element()),
                         meta_pair("Branch", mono_value(row.branch.clone(), cx).into_any_element()),

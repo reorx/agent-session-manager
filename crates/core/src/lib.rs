@@ -10,3 +10,6 @@ pub mod model;
 pub mod pricing;
 pub mod search;
 pub mod transcript;
+
+pub mod config;
+pub mod favorites;

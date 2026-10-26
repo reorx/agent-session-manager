@@ -13,7 +13,7 @@ use anyhow::Result;
 use rayon::prelude::*;
 
 use super::db::{Db, IndexState};
-use crate::claude::discover::{TranscriptFile, discover_subagent_transcripts, discover_transcripts, subagent_count};
+use crate::claude::discover::{TranscriptFile, discover_all, subagent_count};
 use crate::claude::history::{history_sessions, load_history};
 use crate::claude::parse::{SessionDelta, TranscriptParser, map_file};
 use crate::claude::paths::ClaudeDir;
@@ -21,6 +21,7 @@ use crate::model::{MessageRow, SessionSummary, Source, UsageRow};
 
 pub struct Indexer {
     claude: ClaudeDir,
+    favorites: Option<ClaudeDir>,
 }
 
 /// Scan progress, reported after every file.
@@ -49,6 +50,7 @@ pub struct ScanReport {
     pub files_rebuilt: usize,
     pub files_unchanged: usize,
     pub files_missing: usize,
+    pub files_superseded: usize,
     pub bytes_parsed: u64,
     /// Sessions written from history.jsonl (new or refreshed).
     pub history_sessions: usize,
@@ -85,8 +87,8 @@ struct Parsed {
 }
 
 impl Indexer {
-    pub fn new(claude: ClaudeDir) -> Self {
-        Indexer { claude }
+    pub fn new(claude: ClaudeDir, favorites: Option<ClaudeDir>) -> Self {
+        Indexer { claude, favorites }
     }
 
     /// Bring the index up to date with the files on disk.
@@ -102,16 +104,25 @@ impl Indexer {
     pub fn scan_streaming(&self, db: &mut Db, emit: &mut dyn FnMut(ScanEvent)) -> Result<ScanReport> {
         let started = Instant::now();
         let mut report = ScanReport::default();
-        let files = discover_transcripts(&self.claude)?;
-        let subagents = discover_subagent_transcripts(&self.claude)?;
+        let claude_root = crate::config::canonical_root(self.claude.root())?.to_string_lossy().into_owned();
+        let favorites_root = self.favorites.as_ref().map(|f| crate::config::canonical_root(f.root())).transpose()?.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+        for (key, value) in [("claude_root", &claude_root), ("favorites_root", &favorites_root)] {
+            if db.meta(key)?.is_some_and(|previous| previous != *value) { return Err(RootsChanged.into()); }
+        }
+        let discovered = discover_all(&self.claude, self.favorites.as_ref())?;
+        let files = discovered.sessions; let subagents = discovered.subagents;
+        let live_ids: HashSet<String> = files.iter().map(|f| f.session_id.clone()).collect();
+        let on_disk: HashSet<PathBuf> = files.iter().chain(&subagents).map(|f| f.path.clone()).collect();
         report.files_seen = files.len();
         report.subagents_seen = subagents.len();
         let states = db.all_index_states()?;
+        let gone = Gone::find(&states, &on_disk);
+        let superseded: HashSet<_> = gone.sessions.iter().filter(|(_, s)| live_ids.contains(&s.session_id)).map(|(_, s)| s.session_id.clone()).collect();
         let planned: Vec<(TranscriptFile, Plan)> = files
             .into_iter()
             .chain(subagents)
             .map(|f| {
-                let plan = plan_for(&f, states.get(&f.path));
+                let plan = if superseded.contains(&f.session_id) { Plan::Full } else { plan_for(&f, states.get(&f.path)) };
                 (f, plan)
             })
             .collect();
@@ -120,18 +131,21 @@ impl Indexer {
 
         let to_parse: Vec<(TranscriptFile, Plan)> = planned.into_iter().filter(|(_, p)| *p != Plan::Unchanged).collect();
         let t = Instant::now();
-        let parsed: Vec<Parsed> = to_parse.into_par_iter().filter_map(|(f, plan)| parse_file(f, plan).ok()).collect();
+        let parsed: Vec<Parsed> = to_parse.into_par_iter().map(|(f, plan)| parse_file(f, plan)).collect::<Result<Vec<_>>>()?;
         report.elapsed_parse = t.elapsed();
         let (sessions, subagents): (Vec<&Parsed>, Vec<&Parsed>) = parsed.iter().partition(|p| p.file.agent.is_empty());
 
         let mut done = report.files_unchanged;
         let t = Instant::now();
         db.transaction(|db| {
-            let on_disk: HashSet<&PathBuf> = parsed.iter().map(|p| &p.file.path).collect();
-            let gone = Gone::find(&states, &on_disk);
+            db.set_meta("claude_root", &claude_root)?;
+            db.set_meta("favorites_root", &favorites_root)?;
+            for (path, state) in &gone.sessions {
+                if live_ids.contains(&state.session_id) { db.delete_index_state(path)?; report.files_superseded += 1; }
+            }
             // Subagent usage first, so every session row written below already counts it.
             // Sessions whose subagents changed but whose own transcript did not are sent at the end.
-            let mut touched: BTreeSet<String> = forget_subagents(db, &gone.subagents)?;
+            let mut touched: BTreeSet<String> = forget_subagents(db, &gone.subagents, &live_ids)?;
             for p in &subagents {
                 write_subagent(db, p)?;
                 touched.insert(p.file.session_id.clone());
@@ -152,7 +166,7 @@ impl Indexer {
                 done += 1;
                 emit(ScanEvent::Progress(Progress { done, total: report.files_seen, phase: "indexing" }));
             }
-            let missing = mark_missing(db, &gone.sessions)?;
+            let missing = mark_missing(db, &gone.sessions.iter().copied().filter(|(_, s)| !live_ids.contains(&s.session_id)).collect::<Vec<_>>())?;
             report.files_missing = missing.len();
             for id in &missing {
                 if touched.remove(id) {
@@ -256,6 +270,7 @@ fn write_parsed(db: &Db, p: &Parsed) -> Result<()> {
     }
     p.delta.apply(&mut s);
     s.file_path = Some(f.path.clone());
+    s.favorite = f.favorite;
     s.source = Source::Transcript;
     s.transcript_missing = false;
     s.updated_at = f.mtime_ms;
@@ -307,10 +322,10 @@ struct Gone<'a> {
 }
 
 impl<'a> Gone<'a> {
-    fn find(states: &'a HashMap<PathBuf, IndexState>, parsed_now: &HashSet<&PathBuf>) -> Gone<'a> {
+    fn find(states: &'a HashMap<PathBuf, IndexState>, parsed_now: &HashSet<PathBuf>) -> Gone<'a> {
         let (subagents, sessions) = states
             .iter()
-            .filter(|(path, _)| !parsed_now.contains(path) && !path.is_file())
+            .filter(|(path, _)| !parsed_now.contains(*path))
             .partition(|(_, state)| !state.agent.is_empty());
         Gone { sessions, subagents }
     }
@@ -332,11 +347,10 @@ fn mark_missing(db: &Db, gone: &[(&PathBuf, &IndexState)]) -> Result<Vec<String>
 /// Subagent transcripts that are gone. While their session's own transcript is still there the
 /// subagent was deleted on its own and its usage goes too; when the whole session was cleaned up
 /// its usage stays, like the session's own. Returns the sessions whose totals changed.
-fn forget_subagents(db: &Db, gone: &[(&PathBuf, &IndexState)]) -> Result<BTreeSet<String>> {
+fn forget_subagents(db: &Db, gone: &[(&PathBuf, &IndexState)], live_ids: &HashSet<String>) -> Result<BTreeSet<String>> {
     let mut touched = BTreeSet::new();
     for (path, state) in gone {
-        let session_dir = path.parent().and_then(|subagents| subagents.parent());
-        if session_dir.is_some_and(|dir| dir.with_extension("jsonl").is_file()) {
+        if live_ids.contains(&state.session_id) {
             db.delete_usage(&state.session_id, Some(&state.agent))?;
             touched.insert(state.session_id.clone());
         }
@@ -344,3 +358,10 @@ fn forget_subagents(db: &Db, gone: &[(&PathBuf, &IndexState)]) -> Result<BTreeSe
     }
     Ok(touched)
 }
+
+#[derive(Debug)]
+pub struct RootsChanged;
+impl std::fmt::Display for RootsChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "RootsChanged: index roots differ; use --db or index --rebuild") }
+}
+impl std::error::Error for RootsChanged {}

@@ -20,7 +20,7 @@ struct Cli {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let claude = cli.claude_dir.map(ClaudeDir::new).unwrap_or_else(ClaudeDir::from_env);
-    match transcript::run(cli.args, &claude, &mut std::io::stdout().lock()) {
+    match transcript::run(cli.args, &claude, &agent_session_core::claude::paths::default_db_path(), &mut std::io::stdout().lock()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error:#}");

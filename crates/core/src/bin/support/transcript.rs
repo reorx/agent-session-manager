@@ -16,8 +16,9 @@ pub struct ReaderArgs {
     pub output: Option<PathBuf>,
 }
 
-pub fn run(args: ReaderArgs, claude: &ClaudeDir, out: &mut impl Write) -> Result<()> {
-    let path = resolve_transcript(claude, &args.input)?;
+pub fn run(args: ReaderArgs, claude: &ClaudeDir, db: &std::path::Path, out: &mut impl Write) -> Result<()> {
+    let favorites = ClaudeDir::new(agent_session_core::config::favorites_dir(db)?.join("claude"));
+    let path = resolve_transcript(claude, Some(&favorites), &args.input)?;
     let export = read_transcript(&path)?;
     if export.skipped_lines > 0 {
         eprintln!("warning: skipped {} malformed/incomplete JSONL records in {}", export.skipped_lines, path.display());

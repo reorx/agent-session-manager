@@ -68,6 +68,7 @@ pub struct SessionSummary {
     pub file_path: Option<PathBuf>,
     pub source: Source,
     pub transcript_missing: bool,
+    pub favorite: bool,
     pub title: Option<String>,
     pub title_rank: u8,
     /// First human prompt (cleaned); empty when the session never got one.
@@ -123,6 +124,7 @@ impl SessionSummary {
             file_path: None,
             source: Source::Transcript,
             transcript_missing: false,
+            favorite: false,
             title: None,
             title_rank: 0,
             first_prompt: String::new(),

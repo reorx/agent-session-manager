@@ -289,6 +289,7 @@ impl Worker {
 /// Only the path is read by the scan; the file's stat fields are the indexer's business.
 fn transcript_of(target: &SearchTarget) -> Option<TranscriptFile> {
     Some(TranscriptFile {
+        favorite: false,
         project_key: target.project_key.clone(),
         session_id: target.session_id.clone(),
         agent: String::new(),
@@ -391,7 +392,7 @@ mod tests {
         let db_path = dir.path().join("index.sqlite");
         let claude = ClaudeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../core/tests/fixtures/claude"));
         let mut db = Db::open(&db_path).unwrap();
-        Indexer::new(claude).scan(&mut db, &mut |_| {}).unwrap();
+        Indexer::new(claude, None).scan(&mut db, &mut |_| {}).unwrap();
         let sessions = db.list_sessions(&ListFilter { order: Order::UpdatedDesc, ..Default::default() }).unwrap();
         let targets = sessions
             .iter()

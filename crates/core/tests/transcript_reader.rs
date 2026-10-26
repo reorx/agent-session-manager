@@ -52,13 +52,13 @@ Called Edit 1 time.
 #[test]
 fn resolves_exact_ids_unique_prefixes_and_paths_without_creating_an_index() {
     let sb = sandbox();
-    assert_eq!(resolve_transcript(&sb.claude, S1).unwrap(), sb.transcript(ALPHA, S1));
-    assert_eq!(resolve_transcript(&sb.claude, "1111").unwrap(), sb.transcript(ALPHA, S1));
+    assert_eq!(resolve_transcript(&sb.claude, None, S1).unwrap(), sb.transcript(ALPHA, S1));
+    assert_eq!(resolve_transcript(&sb.claude, None, "1111").unwrap(), sb.transcript(ALPHA, S1));
     let path = sb.transcript(ALPHA, S2);
-    assert_eq!(resolve_transcript(&sb.claude, path.to_str().unwrap()).unwrap(), path);
+    assert_eq!(resolve_transcript(&sb.claude, None, path.to_str().unwrap()).unwrap(), path);
     std::fs::copy(sb.transcript(ALPHA, S1), sb.transcript(ALPHA, "1111-other")).unwrap();
-    assert!(resolve_transcript(&sb.claude, "1111").unwrap_err().to_string().contains("ambiguous"));
-    assert!(resolve_transcript(&sb.claude, S4).unwrap_err().to_string().contains("no transcript"));
+    assert!(resolve_transcript(&sb.claude, None, "1111").unwrap_err().to_string().contains("ambiguous"));
+    assert!(resolve_transcript(&sb.claude, None, S4).unwrap_err().to_string().contains("no transcript"));
     assert!(!sb.db_path().exists());
 }
 

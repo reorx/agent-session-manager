@@ -252,3 +252,23 @@ fn list_orders_sessions_without_a_prompt_by_last_update_then_by_id_like_the_refe
     let no_prompt: Vec<&str> = text.lines().filter(|l| l.starts_with("?  ")).map(|l| l.split_whitespace().nth(1).unwrap()).collect();
     assert_eq!(no_prompt, ["aaaaaaaa-0000-4000-8000-000000000001", S5, "ffffffff-0000-4000-8000-000000000002"], "{text}");
 }
+
+#[test]
+fn favorites_roundtrip_and_last_copy_protection() {
+    let sb = sandbox();
+    asm(&sb).args(["favorite", "1111"]).assert().success();
+    asm(&sb).args(["list", "alpha", "--favorites"]).assert().success().stdout(predicates::str::contains(S1));
+    asm(&sb).args(["unfavorite", "1111"]).env("ASM_TRASH_DIR", sb.tmp.path().join("trash")).assert().success();
+    asm(&sb).args(["favorite", "1111"]).assert().success();
+    std::fs::remove_file(sb.transcript(ALPHA, S1)).unwrap();
+    asm(&sb).args(["unfavorite", "1111"]).assert().failure().stderr(predicates::str::contains("--yes"));
+    asm(&sb).args(["unfavorite", "1111", "--yes"]).env("ASM_TRASH_DIR", sb.tmp.path().join("trash")).assert().success();
+}
+#[test]
+fn favorites_directory_migrates_and_roots_are_guarded() {
+    let sb = sandbox(); asm(&sb).args(["favorite", "1111"]).assert().success();
+    let new = sb.tmp.path().join("moved");
+    asm(&sb).arg("favorites-dir").arg(&new).assert().success();
+    asm(&sb).args(["session", "1111"]).assert().success().stdout(predicates::str::contains(new.to_string_lossy().as_ref()));
+    asm(&sb).arg("index").env("ASM_FAVORITES_DIR", sb.tmp.path().join("other")).assert().failure().stderr(predicates::str::contains("index --rebuild"));
+}

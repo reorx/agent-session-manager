@@ -25,10 +25,13 @@ struct Harness {
 /// scan is over.
 fn launch(cx: &mut TestAppContext) -> Harness {
     let dir = tempfile::tempdir().unwrap();
+    let claude = dir.path().join("claude");
+    copy_fixture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../core/tests/fixtures/claude")), &claude);
     let paths = AppPaths {
-        claude: ClaudeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../core/tests/fixtures/claude")),
+        claude: ClaudeDir::new(claude),
         db: dir.path().join("index.sqlite"),
         state: dir.path().join("state.json"),
+        favorites: agent_session_core::favorites::FavoritesDir { root: dir.path().join("favorites"), trash: agent_session_core::favorites::Trash::Dir(dir.path().join("trash")) },
     };
     // the store and search threads are real ones; the test scheduler must put up with their wake-ups
     cx.executor().allow_parking();
@@ -367,4 +370,49 @@ fn a_picked_custom_range_filters_the_table_and_hands_the_focus_back_to_it(cx: &m
     picker.update(cx, |_, cx| cx.emit(DatePickerEvent::Change(Date::Range(Some(day(5)), None))));
     cx.run_until_parked();
     assert_eq!(h.app.read_with(cx, |app, _| app.custom_range), Some((day(1), day(31))));
+}
+
+#[gpui_kit::test]
+fn command_d_favorites_and_unfavorites_and_filter_composes(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    h.app.update(cx, |app, cx| app.select_row(0, cx));
+    press(cx, &h, "cmd-d");
+    wait_until(cx, &h, "favorite", |app, _| app.selected.as_ref().is_some_and(|r| r.favorite));
+    h.app.update(cx, |app, cx| app.toggle_favorites_only(cx));
+    assert_eq!(h.app.read_with(cx, shown_rows), 1);
+    press(cx, &h, "cmd-d");
+    wait_until(cx, &h, "unfavorite", |app, cx| shown_rows(app, cx) == 0);
+    assert!(!cx.has_pending_prompt());
+}
+#[gpui_kit::test]
+fn changing_favorites_directory_moves_files_and_restores_focus(cx: &mut TestAppContext) {
+    let h = launch(cx); h.app.update(cx, |app, cx| app.select_row(0, cx)); press(cx, &h, "cmd-d");
+    wait_until(cx, &h, "favorite", |app, _| app.selected.as_ref().is_some_and(|r| r.favorite));
+    in_window(cx, &h, |window, cx| h.app.update(cx, |app, cx| app.change_favorites_folder(window, cx)));
+    let new = agent_session_core::config::canonical_root(&h._dir.path().join("new-favorites")).unwrap();
+    cx.simulate_path_prompt_response(|_| Some(vec![new.clone()]));
+    wait_until(cx, &h, "migration", |app, _| app.selected.as_ref().is_some_and(|r| r.transcript_path.as_ref().is_some_and(|p| p.starts_with(&new))));
+    assert_eq!(focus(cx, &h), (false, true));
+}
+
+fn copy_fixture(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap(); let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() { copy_fixture(&entry.path(), &target); }
+        else { std::fs::copy(entry.path(), target).unwrap(); }
+    }
+}
+
+#[gpui_kit::test]
+fn last_copy_requires_confirmation_and_cancel_keeps_it(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    let original = h.app.update(cx, |app, cx| { app.select_row(0, cx); app.selected.as_ref().unwrap().transcript_path.clone().unwrap() });
+    press(cx, &h, "cmd-d");
+    wait_until(cx, &h, "favorite", |app, _| app.selected.as_ref().is_some_and(|r| r.favorite));
+    std::fs::remove_file(original).unwrap();
+    press(cx, &h, "cmd-d"); cx.run_until_parked(); assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("取消"); cx.run_until_parked();
+    assert!(h.app.read_with(cx, |app, _| app.selected.as_ref().unwrap().transcript_path.as_ref().unwrap().exists()));
+    assert_eq!(focus(cx, &h), (false, true));
 }

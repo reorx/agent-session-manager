@@ -196,3 +196,5 @@ pub fn install_theme(cx: &mut App) {
 
 /// `FluentBuilder` re-export so callers only need `use crate::style::*`.
 pub use gpui_kit::prelude::FluentBuilder;
+
+pub fn favorite() -> gpui_kit::Hsla { gpui_kit::rgb(0xb58116).into() }

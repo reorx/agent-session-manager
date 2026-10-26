@@ -100,7 +100,7 @@ fn menu_item(
 }
 
 impl AppRoot {
-    fn current_filter(&self, cx: &App) -> Filter {
+    pub(crate) fn current_filter(&self, cx: &App) -> Filter {
         self.table.read(cx).delegate().filter().clone()
     }
 
@@ -157,7 +157,7 @@ impl AppRoot {
         self.apply_filter(filter, cx);
     }
 
-    fn apply_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
+    pub(crate) fn apply_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
         let (changed, ms, shown) = self.table.update(cx, |table, cx| {
             let changed = table.delegate_mut().set_filter(filter);
             if changed {
@@ -431,6 +431,7 @@ impl AppRoot {
         let this = cx.entity().downgrade();
         let kinds = self.current_filter(cx).kinds;
         let counts = self.kind_counts;
+        let favorites_only = self.current_filter(cx).favorites_only;
         move |menu, _, _| {
             let mut menu = menu.min_w(px(160.));
             for kind in Kind::ALL {
@@ -440,7 +441,10 @@ impl AppRoot {
                     this.update(cx, |app, cx| app.toggle_kind(kind, cx)).ok();
                 }));
             }
-            menu
+            menu.separator().item(menu_item("★ Favorites only".into(), "".into(), false, favorites_only, {
+                let this = this.clone();
+                move |cx| { this.update(cx, |app, cx| app.toggle_favorites_only(cx)).ok(); }
+            }))
         }
     }
 
@@ -491,7 +495,7 @@ impl AppRoot {
                     ),
                 )
             })
-            .child(trigger("kind", "Kind", filter.kinds.label().into(), cx).dropdown_menu(self.kind_menu(cx)))
+            .child(trigger("kind", "Kind", format!("{}{}", filter.kinds.label(), if filter.favorites_only { " · ★" } else { "" }).into(), cx).dropdown_menu(self.kind_menu(cx)))
             .child(
                 div().ml(px(4.)).w(px(220.)).child(
                     Input::new(&self.search)

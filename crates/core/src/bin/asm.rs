@@ -38,6 +38,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    Favorite { id: String },
+    Unfavorite { id: String, #[arg(long)] yes: bool },
+    FavoritesDir { path: Option<PathBuf>, #[arg(long, conflicts_with = "path")] reset: bool },
     /// Export a transcript as compact text with XML-style tags for agent handoffs
     Transcript(transcript::ReaderArgs),
     /// Bring the index up to date (or rebuild it from scratch)
@@ -65,6 +68,8 @@ enum Cmd {
 
 #[derive(Args)]
 struct ListArgs {
+    #[arg(long)]
+    favorites: bool,
     /// Project directory, or a substring of project directory names (default: cwd)
     path: Option<String>,
     /// Only sessions active within the last DAYS days
@@ -223,13 +228,16 @@ fn main() -> ExitCode {
     let db_path = cli.db.clone().unwrap_or_else(default_db_path);
     let mut app = App { claude, db_path, pal: Palette::new(color), out: std::io::BufWriter::new(std::io::stdout()) };
     let result = match cli.cmd {
-        Cmd::Transcript(args) => transcript::run(args, &app.claude, &mut app.out),
+        Cmd::Transcript(args) => transcript::run(args, &app.claude, &app.db_path, &mut app.out),
         Cmd::Index { rebuild } => app.index(rebuild),
         Cmd::List(args) => app.list(args),
         Cmd::Session { id, limit, no_scan } => app.session(&id, limit, no_scan),
         Cmd::Search(args) => app.search(args),
         Cmd::Cost(args) => app.cost(args),
         Cmd::Stats => app.stats(),
+        Cmd::Favorite { id } => app.favorite(&id, false, false),
+        Cmd::Unfavorite { id, yes } => app.favorite(&id, true, yes),
+        Cmd::FavoritesDir { path, reset } => app.favorites_dir(path, reset),
     };
     let _ = app.out.flush();
     match result {
@@ -242,17 +250,48 @@ fn main() -> ExitCode {
 }
 
 impl App {
+    fn favorite(&mut self, id: &str, remove: bool, yes: bool) -> Result<()> {
+        use agent_session_core::{config, favorites};
+        let mut db = self.open_db(true)?;
+        let found = db.find_by_prefix(id)?;
+        let [s] = found.as_slice() else { bail!("session ID must match exactly one session"); };
+        let root = config::favorites_dir(&self.db_path)?;
+        if remove {
+            if !yes && !favorites::original_exists(&self.claude, &s.project_key, &s.id) { bail!("original is gone; use --yes to trash the last copy"); }
+            favorites::remove(&root, &s.project_key, &s.id, &favorites::Trash::from_env())?;
+        } else {
+            if s.history_only() { bail!("cannot favorite a history-only session"); }
+            favorites::save(&root, s.file_path.as_ref().ok_or_else(|| anyhow!("no transcript"))?, &s.project_key, &s.id)?;
+        }
+        Indexer::new(self.claude.clone(), Some(ClaudeDir::new(root.join("claude")))).scan(&mut db, &mut |_| {})?;
+        writeln!(self.out, "{} {}", if remove { "Unfavorited" } else { "Favorited" }, s.id)?; Ok(())
+    }
+    fn favorites_dir(&mut self, path: Option<PathBuf>, reset: bool) -> Result<()> {
+        use agent_session_core::{config, favorites};
+        let old = config::favorites_dir(&self.db_path)?;
+        if path.is_none() && !reset { writeln!(self.out, "{}", old.display())?; return Ok(()); }
+        anyhow::ensure!(!config::environment_override(), "Favorites directory is controlled by ASM_FAVORITES_DIR");
+        let new = config::canonical_root(&path.clone().unwrap_or_else(|| config::default_favorites_dir(&self.db_path)))?;
+        let mut db = self.open_db(true)?;
+        let report = favorites::migrate_with_commit(&old, &new, &self.claude, || db.transaction(|db| {
+            db.set_meta("favorites_root", &config::canonical_root(&new.join("claude"))?.to_string_lossy())?;
+            config::set_favorites_dir(&self.db_path, if reset { None } else { Some(&new) })
+        }))?;
+        Indexer::new(self.claude.clone(), Some(ClaudeDir::new(new.join("claude")))).scan(&mut db, &mut |_| {})?;
+        writeln!(self.out, "{} (moved {}, skipped {})", new.display(), report.moved, report.skipped)?; Ok(())
+    }
+
     fn open_db(&self, scan: bool) -> Result<Db> {
         let mut db = Db::open(&self.db_path)?;
         if scan {
-            Indexer::new(self.claude.clone()).scan(&mut db, &mut |_| {})?;
+            Indexer::new(self.claude.clone(), Some(ClaudeDir::new(agent_session_core::config::favorites_dir(&self.db_path)?.join("claude")))).scan(&mut db, &mut |_| {})?;
         }
         Ok(db)
     }
 
     fn index(&mut self, rebuild: bool) -> Result<()> {
         let mut db = Db::open(&self.db_path)?;
-        let indexer = Indexer::new(self.claude.clone());
+        let indexer = Indexer::new(self.claude.clone(), Some(ClaudeDir::new(agent_session_core::config::favorites_dir(&self.db_path)?.join("claude"))));
         let stderr_tty = std::io::stderr().is_terminal();
         let mut progress = |p: &Progress| {
             if stderr_tty {
@@ -345,7 +384,7 @@ impl App {
         let since_ms = args.days.filter(|d| *d > 0.0).map(|d| chrono::Utc::now().timestamp_millis() - (d * 86_400_000.0) as i64);
         let mut shown = 0;
         for key in keys {
-            let infos = db.list_sessions(&ListFilter { project_keys: Some(vec![key.clone()]), since_ms, ..Default::default() })?;
+            let infos = db.list_sessions(&ListFilter { favorites_only: args.favorites, project_keys: Some(vec![key.clone()]), since_ms, ..Default::default() })?;
             let n_hist = infos.iter().filter(|s| s.history_only()).count();
             let (bold, dim, reset) = (self.pal.bold, self.pal.dim, self.pal.reset);
             writeln!(self.out, "{bold}{key}{reset} {dim}({} sessions, {} with transcript){reset}", infos.len(), infos.len() - n_hist)?;
@@ -393,6 +432,7 @@ impl App {
             );
         }
         for info in found.iter().take(limit) {
+            if info.favorite { writeln!(self.out, "favorite: {}", info.file_path.as_ref().unwrap().display())?; }
             writeln!(self.out, "{}{}{}", self.pal.bold, info.project_key, self.pal.reset)?;
             self.print_session(info, true)?;
             writeln!(self.out)?;
@@ -414,7 +454,7 @@ impl App {
             }
         };
         let opts = RegexOptions { roles, labels: args.labels.clone(), case_sensitive: args.case_sensitive, context: args.context, limit: args.limit };
-        let files = list_transcripts(&self.claude, Some(args.days.unwrap_or(7.0)), args.project.as_deref())?;
+        let files = list_transcripts(&self.claude, Some(&ClaudeDir::new(agent_session_core::config::favorites_dir(&self.db_path)?.join("claude"))), Some(args.days.unwrap_or(7.0)), args.project.as_deref())?;
         if files.is_empty() {
             writeln!(self.out, "no sessions found in the given range")?;
             return Ok(());

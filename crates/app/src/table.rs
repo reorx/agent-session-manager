@@ -335,6 +335,14 @@ impl TableDelegate for SessionTableDelegate {
             .child(column.name.clone())
     }
 
+    fn context_menu(&mut self, row_ix: usize, menu: gpui_kit::component::menu::PopupMenu, _: &mut Window, _: &mut Context<TableState<Self>>) -> gpui_kit::component::menu::PopupMenu {
+        use gpui_kit::component::menu::PopupMenuItem;
+        let row = self.row(row_ix).clone();
+        let path = row.transcript_path.clone();
+        menu.menu(if row.favorite { "取消收藏" } else { "收藏" }, Box::new(crate::favorites::FavoriteSession { id: row.id.to_string() }))
+            .item(PopupMenuItem::new("在 Finder 中显示").on_click(move |_, _, cx| { if let Some(path) = &path { cx.reveal_path(path); } }))
+    }
+
     fn render_td(&mut self, row_ix: usize, col_ix: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
         let row = self.row(row_ix).clone();
         let right = self.columns[col_ix].align == TextAlign::Right;
@@ -350,7 +358,7 @@ impl TableDelegate for SessionTableDelegate {
                     .h(px(ROW_H))
                     .justify_center()
                     .overflow_hidden()
-                    .child(div().truncate().line_height(px(15.)).child(row.title.clone()))
+                    .child(div().flex().gap(px(4.)).line_height(px(15.)).when(row.favorite, |el| el.child(div().text_color(style::favorite()).child("★"))).child(div().truncate().child(row.title.clone())))
                     .child(sub)
                     .into_any_element()
             }

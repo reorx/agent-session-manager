@@ -54,6 +54,8 @@ const NONE: &str = "—";
 /// One session row, built once from a core `SessionSummary`. Display strings are pre-formatted
 /// so `render_td` does no work.
 pub struct SessionRow {
+    pub favorite: bool,
+    pub favorite_path: SharedString,
     pub id: SharedString,
     pub short_id: SharedString,
     pub project_key: SharedString,
@@ -214,6 +216,8 @@ impl SessionRow {
         let context_pct = s.context_ratio().map(|r| r as f32);
         let resume = if s.id_known { format!("claude --resume {}", s.id) } else { NONE.to_string() };
         SessionRow {
+            favorite: s.favorite,
+            favorite_path: if s.favorite { s.file_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default().into() } else { NONE.into() },
             id: s.id.clone().into(),
             short_id: short_id.into(),
             project_key: s.project_key.clone().into(),
@@ -505,6 +509,7 @@ fn local_midnight(date: NaiveDate) -> Option<i64> {
 /// Filter applied to the table rows before sorting.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Filter {
+    pub favorites_only: bool,
     /// `project_key` of the only project to show.
     pub project: Option<SharedString>,
     pub since_ms: Option<i64>,
@@ -523,7 +528,7 @@ impl Filter {
         let since_ok = self.since_ms.is_none_or(|since| row.updated_at >= since)
             && self.until_ms.is_none_or(|until| row.updated_at < until);
         let shown = (self.show_empty || row.prompts > 0) && !self.hidden_projects.contains(&row.project_key);
-        project_ok && since_ok && shown && self.kinds.contains(row.kind)
+        (!self.favorites_only || row.favorite) && project_ok && since_ok && shown && self.kinds.contains(row.kind)
     }
 
     /// Hide a project; when it is the picked one the filter goes back to all projects.

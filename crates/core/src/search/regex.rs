@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 
 use super::Highlighted;
 use super::pyjson::stringify;
-use crate::claude::discover::{TranscriptFile, discover_transcripts};
+use crate::claude::discover::{TranscriptFile, discover_all};
 use crate::claude::parse::{Content, LineKind, RawRecord, classify, map_file, parse_content};
 use crate::claude::paths::ClaudeDir;
 use crate::format::parse_ts;
@@ -139,13 +139,13 @@ pub struct SearchOutcome {
 
 /// Transcripts modified within the last `days` (`None` / 0 = all) whose project name contains
 /// `project` (case-insensitive), newest first.
-pub fn list_transcripts(claude: &ClaudeDir, days: Option<f64>, project: Option<&str>) -> Result<Vec<TranscriptFile>> {
+pub fn list_transcripts(claude: &ClaudeDir, favorites: Option<&ClaudeDir>, days: Option<f64>, project: Option<&str>) -> Result<Vec<TranscriptFile>> {
     let cutoff = match days {
         Some(d) if d > 0.0 => chrono::Utc::now().timestamp_millis() - (d * 86_400_000.0) as i64,
         _ => i64::MIN,
     };
     let needle = project.map(|p| p.to_lowercase()).filter(|p| !p.is_empty());
-    let mut files: Vec<TranscriptFile> = discover_transcripts(claude)?
+    let mut files: Vec<TranscriptFile> = discover_all(claude, favorites)?.sessions
         .into_iter()
         .filter(|f| f.mtime_ms >= cutoff)
         .filter(|f| needle.as_ref().is_none_or(|n| f.project_key.to_lowercase().contains(n)))

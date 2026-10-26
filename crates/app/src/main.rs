@@ -8,6 +8,7 @@
 //! `ASM_CLAUDE_DIR`, `ASM_DB` and `ASM_STATE` point the app at other data.
 
 mod detail;
+mod favorites;
 #[cfg(test)]
 mod keyboard_tests;
 mod model;
@@ -45,6 +46,10 @@ use crate::table::{PREVIEW_MIN_W, ROW_H, SessionTableDelegate};
 gpui_kit::actions!(
     app,
     [
+        ToggleFavorite,
+        RevealFavoritesFolder,
+        ChangeFavoritesFolder,
+        DefaultFavoritesFolder,
         Quit,
         ToggleDetail,
         FocusSearch,
@@ -78,6 +83,8 @@ enum IndexStatus {
 }
 
 pub struct AppRoot {
+    claude: ClaudeDir,
+    favorites: agent_session_core::favorites::FavoritesDir,
     table: Entity<TableState<SessionTableDelegate>>,
     search: Entity<InputState>,
     resizable: Entity<ResizableState>,
@@ -130,12 +137,18 @@ pub struct AppPaths {
     pub claude: ClaudeDir,
     pub db: PathBuf,
     pub state: PathBuf,
+    pub favorites: agent_session_core::favorites::FavoritesDir,
 }
 
 impl AppPaths {
     /// `ASM_CLAUDE_DIR`, `ASM_DB` and `ASM_STATE`, or their defaults.
     fn from_env() -> Self {
-        AppPaths { claude: ClaudeDir::from_env(), db: default_db_path(), state: default_state_path() }
+        AppPaths { claude: ClaudeDir::from_env(), db: default_db_path(), state: default_state_path(),
+            favorites: agent_session_core::favorites::FavoritesDir {
+                root: agent_session_core::config::favorites_dir(&default_db_path()).expect("read favorites config"),
+                trash: agent_session_core::favorites::Trash::from_env(),
+            }
+        }
     }
 }
 
@@ -162,6 +175,7 @@ impl AppRoot {
             until_ms,
             show_empty: saved.show_empty,
             kinds: saved.kinds,
+            favorites_only: saved.favorites_only,
             hidden_projects: saved.hidden_projects.iter().cloned().map(Into::into).collect(),
         });
         if let Some((key, dir)) = &saved.sort {
@@ -212,14 +226,14 @@ impl AppRoot {
             }),
         ];
 
-        let (store, events) = Store::spawn(paths.claude, paths.db.clone());
-        let pump = cx.spawn(async move |this, cx| {
+        let (store, events) = Store::spawn(paths.claude.clone(), paths.db.clone(), paths.favorites.clone());
+        let pump = cx.spawn_in(window, async move |this, cx| {
             while let Ok(first) = events.recv().await {
                 let mut batch = vec![first];
                 while let Ok(ev) = events.try_recv() {
                     batch.push(ev);
                 }
-                if this.update(cx, |this, cx| this.on_store_events(batch, cx)).is_err() {
+                if this.update_in(cx, |this, window, cx| this.on_store_events(batch, window, cx)).is_err() {
                     break;
                 }
             }
@@ -239,6 +253,8 @@ impl AppRoot {
         });
 
         let mut this = Self {
+            claude: paths.claude,
+            favorites: paths.favorites,
             table,
             search,
             resizable,
@@ -278,7 +294,9 @@ impl AppRoot {
         };
         // a fresh window has no focus, and without one no key binding or menu action reaches the app
         this.focus_table(window, cx);
-        if std::env::var_os("ASM_SPIKE_AUTOPLAY").is_some() {
+        if std::env::var_os("ASM_FAVORITES_AUTOPLAY").is_some() {
+            this._autoplay = Some(this.favorites_autoplay(window, cx));
+        } else if std::env::var_os("ASM_SPIKE_AUTOPLAY").is_some() {
             this._autoplay = Some(this.autoplay(window, cx));
         } else if std::env::var_os("ASM_SEARCH_AUTOPLAY").is_some() {
             this._autoplay = Some(this.search_autoplay(window, cx));
@@ -287,7 +305,7 @@ impl AppRoot {
     }
 
     /// Apply a batch of store events with a single table recompute.
-    fn on_store_events(&mut self, batch: Vec<StoreEvent>, cx: &mut Context<Self>) {
+    fn on_store_events(&mut self, batch: Vec<StoreEvent>, window: &mut Window, cx: &mut Context<Self>) {
         let mut streamed = Vec::new();
         let mut data_changed = false;
         let mut reloaded = false;
@@ -317,6 +335,19 @@ impl AppRoot {
                     if self.selected.as_ref().is_some_and(|row| row.id == session_id) {
                         self.detail.set_messages(messages, self.matcher.as_ref());
                     }
+                }
+                StoreEvent::FavoriteChanged { id, favorite } => {
+                    use gpui_kit::component::WindowExt;
+                    window.push_notification(format!("{} {}", if favorite { "已收藏" } else { "已取消收藏" }, id), cx);
+                }
+                StoreEvent::FavoritesDirChanged { dir, moved, skipped } => {
+                    use gpui_kit::component::WindowExt;
+                    self.favorites.root = dir;
+                    window.push_notification(format!("收藏目录已更改：迁移 {moved}，跳过 {skipped}"), cx);
+                }
+                StoreEvent::RebuildingRoots => {
+                    use gpui_kit::component::WindowExt;
+                    window.push_notification("数据目录已更改，正在重建索引", cx);
                 }
                 StoreEvent::Failed(message) => {
                     eprintln!("store: {message}");
@@ -402,6 +433,7 @@ impl AppRoot {
             custom_range: self.custom_range,
             show_empty: delegate.filter().show_empty,
             kinds: delegate.filter().kinds,
+            favorites_only: delegate.filter().favorites_only,
             hidden_projects: delegate.filter().hidden_projects.iter().map(|p| p.to_string()).collect(),
             detail_visible: self.detail_visible,
             selected_id: self.selected.as_ref().map(|r| r.id.to_string()).or_else(|| self.wanted_id.as_ref().map(|id| id.to_string())),
@@ -633,6 +665,11 @@ impl Render for AppRoot {
                 this.persist(cx);
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &ToggleFavorite, window, cx| this.toggle_favorite(window, cx)))
+            .on_action(cx.listener(|this, action: &favorites::FavoriteSession, window, cx| this.favorite_session(&action.id, window, cx)))
+            .on_action(cx.listener(|this, _: &RevealFavoritesFolder, _, cx| cx.reveal_path(&this.favorites.root)))
+            .on_action(cx.listener(|this, _: &ChangeFavoritesFolder, window, cx| this.change_favorites_folder(window, cx)))
+            .on_action(cx.listener(|this, _: &DefaultFavoritesFolder, window, cx| this.default_favorites_folder(window, cx)))
             .on_action(cx.listener(|this, _: &Rescan, _, cx| this.rescan(false, cx)))
             .on_action(cx.listener(|this, _: &RebuildIndex, _, cx| this.rescan(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleEmptySessions, _, cx| this.toggle_empty_sessions(cx)))
@@ -682,6 +719,7 @@ impl Render for AppRoot {
 
 fn bind_keys(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("cmd-d", ToggleFavorite, None),
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-\\", ToggleDetail, None),
         KeyBinding::new("cmd-f", FocusSearch, None),
@@ -725,6 +763,12 @@ fn main() {
                 MenuItem::separator(),
                 MenuItem::action("Show / Hide Sessions Without Prompts", ToggleEmptySessions),
                 MenuItem::action("Hide Project of Selected Session", HideSelectedProject),
+            ]),
+            Menu::new("Favorites").items(vec![
+                MenuItem::action("Toggle Favorite", ToggleFavorite),
+                MenuItem::action("Reveal Favorites Folder", RevealFavoritesFolder),
+                MenuItem::action("Change Favorites Folder…", ChangeFavoritesFolder),
+                MenuItem::action("Use Default Favorites Folder", DefaultFavoritesFolder),
             ]),
             Menu::new("Index").items(vec![
                 MenuItem::action("Scan for Changes", Rescan),

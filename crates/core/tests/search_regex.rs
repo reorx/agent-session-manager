@@ -13,24 +13,24 @@ fn opts() -> RegexOptions {
 }
 
 fn run(sb: &Sandbox, query: &str, o: RegexOptions) -> agent_session_core::search::regex::SearchOutcome {
-    let files = list_transcripts(&sb.claude, None, None).unwrap();
+    let files = list_transcripts(&sb.claude, None, None, None).unwrap();
     search(query, &files, &o)
 }
 
 #[test]
 fn transcripts_are_listed_newest_first_with_day_and_project_filters() {
     let sb = sandbox();
-    let files = list_transcripts(&sb.claude, None, None).unwrap();
+    let files = list_transcripts(&sb.claude, None, None, None).unwrap();
     let ids: Vec<&str> = files.iter().map(|f| f.session_id.as_str()).collect();
     assert_eq!(ids, vec![S3, S2, S5, S1], "mtime desc; subagent files are never scanned");
     assert_eq!(files[0].project_key, BETA);
 
-    let beta = list_transcripts(&sb.claude, None, Some("BETA")).unwrap();
+    let beta = list_transcripts(&sb.claude, None, None, Some("BETA")).unwrap();
     assert_eq!(beta.len(), 1, "project substring is case-insensitive");
 
     let now = chrono::Utc::now().timestamp_millis();
     let days_since_s3 = (now - MTIME_S3) as f64 / 86_400_000.0;
-    let recent = list_transcripts(&sb.claude, Some(days_since_s3 + 0.01), None).unwrap();
+    let recent = list_transcripts(&sb.claude, None, Some(days_since_s3 + 0.01), None).unwrap();
     assert_eq!(recent.len(), 1);
 }
 
@@ -171,7 +171,7 @@ fn limit_stops_after_the_file_that_reaches_it() {
 }
 
 fn scan(sb: &Sandbox, query: &str, max_sessions: usize, cancelled: &(dyn Fn() -> bool + Sync)) -> (Vec<FileMatches>, SessionScan) {
-    let files = list_transcripts(&sb.claude, None, None).unwrap();
+    let files = list_transcripts(&sb.claude, None, None, None).unwrap();
     let mut seen = Vec::new();
     let summary = scan_sessions(query, &files, &opts(), max_sessions, cancelled, &mut |batch| seen.extend(batch));
     (seen, summary)

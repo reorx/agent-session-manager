@@ -10,14 +10,14 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 
 use crate::claude::clean::clean_prompt;
-use crate::claude::discover::discover_transcripts;
+use crate::claude::discover::discover_all;
 use crate::claude::parse::{Content, parse_content, user_text};
 use crate::claude::paths::{ClaudeDir, expand_user};
 use crate::model::TranscriptExport;
 
 /// Resolve a local file, exact session ID, or unambiguous ID prefix.
 /// Discovery is read-only; history-only sessions have no transcript to export.
-pub fn resolve_transcript(claude: &ClaudeDir, input: &str) -> Result<PathBuf> {
+pub fn resolve_transcript(claude: &ClaudeDir, favorites: Option<&ClaudeDir>, input: &str) -> Result<PathBuf> {
     let path = expand_user(input);
     if path.is_file() {
         return Ok(path);
@@ -28,7 +28,7 @@ pub fn resolve_transcript(claude: &ClaudeDir, input: &str) -> Result<PathBuf> {
     if input.is_empty() {
         bail!("transcript ID must not be empty");
     }
-    let files = discover_transcripts(claude)?;
+    let files = discover_all(claude, favorites)?.sessions;
     let exact: Vec<_> = files.iter().filter(|f| f.session_id == input).collect();
     let hits = if exact.is_empty() {
         files.iter().filter(|f| f.session_id.starts_with(input)).collect()

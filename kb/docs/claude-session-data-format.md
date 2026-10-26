@@ -1,6 +1,6 @@
 ---
 created: 2026-09-08
-updated: 2026-10-23
+updated: 2026-10-26
 tags:
   - claude-code
   - data-format
@@ -150,3 +150,14 @@ assistant 特有：`requestId`、`effort`、`message.model`、`message.id`、`me
 ## 6. 其他 agent 的 session（扩展方向）
 
 本机 `~/.codex/sessions/<year>/...rollout-*.jsonl` 有 144 份 Codex CLI transcript；旧项目 `~/Code/agent-sessions` 已有把 Claude Code 与 Codex 都转成统一中间格式（`SessionMeta{title, description, agent, source}` + `Message{role, content}`）的 Python parser，可作为第二数据源的 adapter 参考。本项目一期只做 Claude Code，但数据模型里预留 `agent` 字段。
+
+
+## 收藏副本
+
+收藏保存的是操作当时的快照，包含主 transcript、subagents、meta 和 tool-results。原会话继续写入时，收藏内容不自动刷新；原会话被 Claude Code 清理后，收藏仍可显示、搜索和导出。取消收藏后恢复读取原会话；原会话也不存在时，只保留索引中的历史信息和费用。
+
+默认目录是索引旁的 `favorites/`，布局为 `claude/projects/<project_key>/<id>.jsonl` 和同名目录。`ASM_FAVORITES_DIR` 优先于索引旁 `config.json` 的 `favorites_dir`，两者都没有时使用默认路径。CLI 和桌面应用共用配置。
+
+发现文件时按 session id 选择收藏副本，主文件及 subagent 都来自同一侧。只有主 JSONL 已落位的收藏才有效，孤立子目录和 `.staging/` 不参与覆盖。复制保留文件修改时间，并截去 JSONL 未完成的末行。
+
+取消收藏移到系统废纸篓；测试使用 `ASM_TRASH_DIR` 隔离。更换目录迁移文件，目标已有同 id 时保留目标并留下旧副本；嵌套目录和 Claude 数据目录不允许作为迁移目标。详见 [收藏方案](../plans/2026-10-26-favorites.md)。

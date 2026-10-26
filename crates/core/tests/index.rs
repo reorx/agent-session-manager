@@ -13,7 +13,7 @@ fn ms(iso: &str) -> i64 {
 }
 
 fn scan(sb: &Sandbox, db: &mut Db) -> agent_session_core::index::ScanReport {
-    Indexer::new(sb.claude.clone()).scan(db, &mut |_| {}).unwrap()
+    Indexer::new(sb.claude.clone(), None).scan(db, &mut |_| {}).unwrap()
 }
 
 #[test]
@@ -254,7 +254,7 @@ fn rebuild_drops_everything_and_rescans() {
     let mut db = Db::open(&sb.db_path()).unwrap();
     scan(&sb, &mut db);
     std::fs::remove_file(sb.transcript(ALPHA, S2)).unwrap();
-    let report = Indexer::new(sb.claude.clone()).rebuild(&mut db, &mut |_| {}).unwrap();
+    let report = Indexer::new(sb.claude.clone(), None).rebuild(&mut db, &mut |_| {}).unwrap();
     assert_eq!(report.files_parsed, 3);
     assert!(db.session(S2).unwrap().is_none(), "a rebuild forgets sessions that have no source left");
     let stats = db.stats().unwrap();
@@ -268,7 +268,7 @@ fn progress_is_reported_while_scanning() {
     let sb = sandbox();
     let mut db = Db::open(&sb.db_path()).unwrap();
     let mut seen = Vec::new();
-    Indexer::new(sb.claude.clone()).scan(&mut db, &mut |p| seen.push((p.done, p.total))).unwrap();
+    Indexer::new(sb.claude.clone(), None).scan(&mut db, &mut |p| seen.push((p.done, p.total))).unwrap();
     assert!(!seen.is_empty());
     assert_eq!(seen.last().unwrap(), &(4, 4));
     assert!(seen.windows(2).all(|w| w[0].0 <= w[1].0));
@@ -277,7 +277,7 @@ fn progress_is_reported_while_scanning() {
 /// Scan and collect every session streamed out while the index is being written.
 fn scan_streaming(sb: &Sandbox, db: &mut Db) -> Vec<SessionSummary> {
     let mut streamed = Vec::new();
-    Indexer::new(sb.claude.clone())
+    Indexer::new(sb.claude.clone(), None)
         .scan_streaming(db, &mut |ev| {
             if let ScanEvent::Session(s) = ev {
                 streamed.push(s);
@@ -348,7 +348,7 @@ fn a_new_history_row_is_streamed_once() {
 fn a_read_only_connection_searches_while_the_writer_keeps_the_index() {
     let sb = sandbox();
     let mut db = Db::open(&sb.db_path()).unwrap();
-    Indexer::new(sb.claude.clone()).scan(&mut db, &mut |_| {}).unwrap();
+    Indexer::new(sb.claude.clone(), None).scan(&mut db, &mut |_| {}).unwrap();
     let reader = Db::open_read_only(&sb.db_path()).unwrap();
     assert_eq!(reader.list_sessions(&Default::default()).unwrap().len(), db.list_sessions(&Default::default()).unwrap().len());
     assert!(reader.conn().execute("DELETE FROM sessions", []).is_err(), "the reader cannot write");
@@ -426,7 +426,7 @@ fn a_subagent_that_grows_raises_its_parents_cost_and_streams_the_parent_again() 
     scan_streaming(&sb, &mut db);
     append(&subagent_path(&sb), &reply("msg-sub-2", "claude-sonnet-5", 1_000_000, 0, true));
     let mut streamed = Vec::new();
-    let report = Indexer::new(sb.claude.clone())
+    let report = Indexer::new(sb.claude.clone(), None)
         .scan_streaming(&mut db, &mut |ev| {
             if let ScanEvent::Session(s) = ev {
                 streamed.push(s);
@@ -475,7 +475,7 @@ fn rebuild_clears_the_usage_too() {
     let mut db = Db::open(&sb.db_path()).unwrap();
     scan(&sb, &mut db);
     let before = db.session(S1).unwrap().unwrap().cost_usd;
-    Indexer::new(sb.claude.clone()).rebuild(&mut db, &mut |_| {}).unwrap();
+    Indexer::new(sb.claude.clone(), None).rebuild(&mut db, &mut |_| {}).unwrap();
     assert_eq!(db.session(S1).unwrap().unwrap().cost_usd, before, "a rebuild counts every response exactly once again");
 }
 

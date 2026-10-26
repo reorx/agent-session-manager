@@ -48,6 +48,7 @@ pub struct ViewState {
     pub custom_range: Option<(NaiveDate, NaiveDate)>,
     pub show_empty: bool,
     pub kinds: KindSet,
+    pub favorites_only: bool,
     /// `project_key`s hidden from the table.
     pub hidden_projects: Vec<String>,
     pub detail_visible: bool,
@@ -66,6 +67,7 @@ impl Default for ViewState {
             custom_range: None,
             show_empty: false,
             kinds: KindSet::default(),
+            favorites_only: false,
             hidden_projects: Vec::new(),
             detail_visible: true,
             selected_id: None,
@@ -116,6 +118,7 @@ mod tests {
             custom_range: Some((NaiveDate::from_ymd_opt(2026, 9, 10).unwrap(), NaiveDate::from_ymd_opt(2026, 9, 20).unwrap())),
             show_empty: true,
             kinds,
+            favorites_only: true,
             hidden_projects: vec!["-Users-me-Code-probe".into()],
             detail_visible: false,
             selected_id: Some("11111111-aaaa-4bbb-8ccc-000000000001".into()),
