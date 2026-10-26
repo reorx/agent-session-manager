@@ -14,23 +14,18 @@
 - PRD 已定 bundle id 为 `com.reorx.agent-session-manager`，而索引与 `state.json` 所在目录是 `dev.reorx.AgentSessionManager`。目前还没有 `.app` bundle，所以没有实际影响；M5 用 cargo-bundle 打包后，app 的标识与它的数据目录会对不上。
 - 处理方向：M5 打包前决定是否统一。改数据目录名会让现有索引和视图状态落到新路径，索引可重建，`state.json` 需要迁移或接受重置。
 
-## 详情：索引扫描进行中选中一行，对话要等扫描结束才出现
+## 表格与详情：Prompts 列的数字比详情里的回合数多
 
-- 记录：2026-09-28（M4 方案调研时读代码发现；`kb/plans/2026-09-28-m4-detail-panel.md` §2）
-- store 线程是单循环，`StoreRequest::Messages` 排在扫描后面。冷启动或 Rebuild 的 3.6–4s 内选中行，Conversation 一直是空的。
-- 处理方向：M4a（`kb/plans/2026-10-26-m4a-turn-cards-spec.md` 步骤 2）给记录文件的读取单开一条线程。
+- 记录：2026-10-27（M4a 验收；总 plan D7，`kb/sessions/2026-10-27-asm-m4a-accept.md`）
+- Prompts 列沿用 Python 脚本的口径（`make parity` 逐字比对）：非 sidechain、非 isMeta、有文字的 user 记录都算一条（`parse.rs::is_human_prompt`）。详情只从真实输入开始编号回合，下面这些在 Prompts 里算、在详情里不是回合：打断标记 `[Request interrupted by user]`（详情记为上一回合的 interrupted）、compact 摘要（详情是分隔线上的 summary）、task-notification 等非人工消息（详情是不编号的 AUTO 卡）。本机例子：`481e870a` Prompts 2、详情 1 turn，多出的是打断标记；`35fec037` Prompts 21、详情 13 turns · 4 auto，另 4 条是 compact 摘要。
+- 影响：按 Prompts 排序或估计对话长短时数字偏大，表格和详情并排时看上去对不上。
+- 处理方向：Prompts 改口径要和 Python 脚本一起改（脚本是行为基准）；不改的话至少在表头提示或术语里说明它数的是 user 记录。M4 不动。
 
-## 详情：Conversation 只显示索引里的前 300 条 user / assistant 文本，每条截到 4000 字
+## 详情：Read 图片的步骤看不出读到了什么
 
-- 记录：2026-09-28（M2 的过渡实现，有意为之；`kb/notes/2026-09-21-m2-real-data.md`）
-- 该视图没有虚拟化，全量渲染上千条会卡，所以设了上限。工具调用、thinking 不显示，没有 Markdown 渲染。搜索命中落在上限之外时靠两个补丁移动窗口和截断位置。
-- 处理方向：M4a 直接读记录文件、按回合卡虚拟化显示，届时删掉上限和两个补丁。
-
-## 搜索：工具调用与 thinking 里的命中在详情面板里看不到
-
-- 记录：2026-09-28（M3 遗留；`kb/notes/2026-09-21-m3-search.md`"已知问题与未做"）
-- 正则 + Tools 范围或选了 Labels 时，命中只在表格的片段里可见，详情面板底部有一句说明。
-- 处理方向：M4a（命中在读取记录文件时标出，覆盖工具输入 / 输出、thinking 和回复）。
+- 记录：2026-10-27（`kb/sessions/2026-10-26-asm-m4a-store.md`"遗留"；M4a 验收在 `5f6eea99` 上确认）
+- core 的 `ToolResult` 只记文字输出，工具结果里的图片 block 被丢掉。Read 一张图片的步骤结果摘要是空的，展开后只有 input、没有 output，看不出读没读成功、图多大。`5f6eea99` 的 112 次工具调用里有 79 次是这样。
+- 处理方向：core 解析工具结果时像 prompt 附件一样记下图片（`ToolResult` 加 attachments），app 在结果摘要和 output 里显示 `image · 230 KB`。
 
 ## 导出：用户按 Esc 打断时留下的标记被当成一条用户输入导出
 

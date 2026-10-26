@@ -23,6 +23,9 @@ rm -f "$ASM_STATE"
 ASM_SPIKE_AUTOPLAY=1 "$BIN" > "$OUT/app.log" 2>&1 &
 PID=$!
 trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null || true' EXIT
+# keep the display from sleeping while the app runs: a sleeping or locked screen makes window
+# captures fail halfway (wake-screen only wakes it once, at the start)
+caffeinate -d -w "$PID" &
 
 sleep 2.5
 WID=$("$WINID" "$(basename "$BIN")")

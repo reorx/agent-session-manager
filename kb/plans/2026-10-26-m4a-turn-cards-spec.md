@@ -316,7 +316,7 @@ pub struct HitPlace { pub item: usize, pub part: Part }
 
 每一步先写行为测试再实现（BDD）。测试名沿用仓库的整句风格。
 
-- [ ] **步骤 1：core 读取对话**
+- [x] **步骤 1：core 读取对话**
   - fixture：在 `gen_fixtures.py` 里加 `conversation_rows`，写到 `fixtures/conversation.jsonl`（放在发现目录之外，和 `reader.jsonl` 一样，不影响索引和 parity 的 fixture）。要覆盖：两个真实输入的回合；thinking（含只有 signature 的空 thinking）；字符串和数组两种 tool_result；`is_error` 的 tool_result；找不到调用的 tool_result；超过 `RESULT_CHARS` 的输出；过程文字之后、同一 `message.id` 分两条记录写的最终回复；打断标记；API 错误；task-notification；`compact_boundary` 加 `isCompactSummary`；带图片的 prompt；`isMeta`；重复的 uuid；`turn_duration`；最后一行没写完。用 `uv run` 重跑脚本并提交生成结果。
   - 测试（新文件 `crates/core/tests/conversation.rs`）：
     - `turns_start_at_human_inputs_and_are_numbered_from_one`
@@ -343,13 +343,13 @@ pub struct HitPlace { pub item: usize, pub part: Part }
     - `hit_places_list_every_part_with_a_hit_in_file_order`
     - `a_subagent_transcript_reads_like_a_session`
   - 完成标准：`cargo test -p agent-session-core` 全过，`transcript_reader` 的测试不改也能过；`make parity` 21/21；在真实数据上跑 `asm session <id> --conversation`，核对打断、API 错误、AUTO、compact 的识别数和上面的真实数据对得上；release 下 `5f6eea99` 的读取耗时和截断上限的统计记进 session 总结。
-- [ ] **步骤 2：store 读取线程**
+- [x] **步骤 2：store 读取线程**
   - 测试（`store.rs`）：
     - `a_conversation_is_served_on_request`（取代 `messages_of_a_session_are_served_on_request…` 的前半段；后半段改名为 `a_rebuild_streams_everything_again` 单独保留）
     - `a_conversation_is_served_before_the_first_scan_settles`
     - `a_newer_request_supersedes_the_one_before`：连发两个请求，收到的最后一个 `Conversation` 事件带最新的 `seq`，旧 `seq` 的事件（如果有）都在它之前
     - `a_missing_transcript_is_reported_instead_of_crashing`
-- [ ] **步骤 3：app 转换（`conversation.rs`）**
+- [x] **步骤 3：app 转换（`conversation.rs`）**
   - 测试：
     - `the_summary_counts_turns_auto_segments_and_tool_calls`
     - `a_card_shows_steps_duration_errors_and_how_the_turn_ended`
@@ -361,7 +361,7 @@ pub struct HitPlace { pub item: usize, pub part: Part }
     - `times_carry_the_date_when_the_day_changes`
     - `a_closed_turn_is_a_head_and_a_tail_and_an_open_turn_lists_its_steps_between`
   - 删除 app `model.rs` 里的 `MessageKind`、`Message`、`Conversation`、`ConversationView`、`conversation_from`、`shown_text` 和四个常量，以及"现状"里列出的四个测试。
-- [ ] **步骤 4：详情状态与渲染（`detail.rs`、`turn_cards.rs`、`style.rs`）**
+- [x] **步骤 4：详情状态与渲染（`detail.rs`、`turn_cards.rs`、`style.rs`）**
   - 测试（`DetailState` 是纯状态；`ListState` 不需要窗口就能构造，`logical_scroll_top()` 可以断言）：
     - `the_view_parks_on_the_first_hit_and_steps_around_the_others`（改写输入，断言不变）
     - `a_new_search_keeps_open_turns_and_parks_on_its_first_hit`
@@ -372,13 +372,13 @@ pub struct HitPlace { pub item: usize, pub part: Part }
     - `expand_all_opens_every_turn_and_collapse_all_keeps_the_current_hit_open`
     - `a_new_session_starts_folded`
   - 界面：照画稿 1–4 实现顶栏、卡片各行、刻度的悬停和点击、骨架、错误和空状态。
-- [ ] **步骤 5：接线（`main.rs`、`toolbar.rs`）**
+- [x] **步骤 5：接线（`main.rs`、`toolbar.rs`）**
   - 测试（`keyboard_tests.rs`）：
     - `enter_searches_at_once_and_n_steps_through_the_hits_while_the_table_has_the_focus`：命中单位变成命中位置后，fixture 里 "parser" 的位置数会变；按新规则在 fixture 上数出来，改掉期望值，循环跳转的断言保持
     - `matches_header_sort_keeps_the_selected_session_and_detail_hit`：不改，必须通过
     - 新增 `rerunning_the_same_search_does_not_reread_the_conversation`：同一个查询再跑一次（例如切换过滤条件），`conversation_seq` 不变；换了查询则变
   - 实现 `select_row`、`on_store_events`、`run_search` 的改动和 `detail:` 计时行。
-- [ ] **步骤 6：验收与收尾**
+- [x] **步骤 6：验收与收尾**
   - autoplay、`screenshot-detail.sh`、`make screenshot-detail`；修 `screenshot-clicks.sh`。
   - 跑 `make screenshot-detail`、`make screenshot-search`、`make screenshot-clicks`，截图归档到 `tmp/<date>-m4a-turn-cards/`，逐张用 `Read` 打开，和画稿 1–4 对照。
   - 按 D4 测打开速度：debug 和 release 各跑一次 `big-session`，再选一个 5MB 级的文件，取 `detail:` 日志行。
@@ -418,3 +418,45 @@ pub struct HitPlace { pub item: usize, pub part: Part }
 | `ListState::splice` 在视口上方插入行时，滚动位置是否保持 | 步骤 4 的测试先锁住；跳到命中时本来就会重新 `scroll_to` |
 | 每次改搜索词都重读文件，70MB 约 100ms | 搜索本身有防抖；读取在后台线程，旧内容留在屏幕上；不够快再按总 plan D11 改成缓存 |
 | 详情里的命中数和 Matches 列不同 | D5 已接受；不处理 |
+
+## 实施结果与差异
+
+2026-10-27 完成并验收：提交 `200a567`（core）、`2d8543b`（store 与转换）、`baaed71` + `be96d1a`（界面与返工 r1），验收见 [验收总结](../sessions/2026-10-27-asm-m4a-accept.md)。截断常量（`ENTRY_CHARS` / `RESULT_CHARS` / `INPUT_FIELD_CHARS` / `HIT_LEAD_CHARS`）和折叠常量都没改。下面逐条列出实现与本 spec 不同的地方，理由在链接的出处。
+
+core（[出处](../sessions/2026-10-26-asm-m4a-core.md#注意事项与自己的决定)）：
+
+- `Matcher::pattern()` 返回带大小写标志的表达式（如 `(?i:needle)`），切换 `Aa` 也算换了搜索词
+- 没有 `message.id` 的旧记录，同一条记录里的几段文字按记录序号合并
+- `origin.kind` 不是 human 且有正文的消息，带 `isMeta` 也建 AUTO 段
+- `turn_duration` 只累加到当前回合的用时，不结束回合
+- 参数摘要另外支持 MultiEdit 的 `file_path`
+- `ToolLine.text` 不带 `# ` / `$ ` 前缀，由使用方按 `ToolLineKind` 加（app 的 `InputLine` 已加好）
+- `stringify` 实际在 `search/pyjson.rs`，`regex.rs` 改成 crate 内重导出
+
+store 与转换（[出处](../sessions/2026-10-26-asm-m4a-store.md#和-spec-不同的地方)）：
+
+- 读取线程读完立即 `conversation::build`，`StoreEvent::Conversation` 带 `Arc<ConversationView>` 而不是 `Arc<Conversation>`
+- `Store::read_conversation` 多一个 `project_path` 参数；事件里用 `read`、`build` 两个耗时代替 `elapsed`
+- `fold` 多一个 `hits` 参数
+- 多了 `card_rows`（给 `splice` 用）和 `row_of`（命中位置 → 行号）
+- compact 分隔线的时间和卡片同一规则：与上一张卡同一天只写 `HH:MM`
+- 折叠步骤行的命中徽章是这一步里的命中次数；卡片标题和顶栏仍按命中位置数
+- 输出为空（Read 图片、没有输出的命令）时结果摘要为空，不写"0 lines"
+- 用时、大小、字数、路径缩写等 spec 没写死的格式见出处同节"另外几处"
+
+界面与接线（[出处](../sessions/2026-10-27-asm-m4a-ui.md#自己的决定与-spec-的差异)、[返工 r1](../sessions/2026-10-27-asm-m4a-ui.md#返工-r1)）：
+
+- Show steps 开关在卡头状态行右端（照画稿），不在卡底
+- 命中在长文字深处时，把命中本身滚进视口（list autoscroll），不只停在所在行的顶端
+- `Folded` 多一个 `short`，折叠处去掉结尾空行
+- 当前命中位置里的高亮全部橙色；折叠步骤行的参数摘要不高亮，只有行尾徽章
+- 刻度格 6 / 7px 宽、首尾相接，不是 8px 的透明区域
+- `detail:` 行在列表后的 `canvas` paint 回调里打点，不用 `on_next_frame`；行里多一个 build 耗时
+- 键盘测试 "parser" 的期望值仍是 `(1, 3)`：按命中位置数在 fixture 上也是 3
+- `run_search` 比较最近一次请求的 pattern，不是屏幕上视图的 pattern
+- 被截过的文本，折叠链接只数保留下来的部分（`Show 401 lines · cut, 20,000 of 24,999 chars`、`+ 47 more lines · cut, 3,000 of 16,319 chars`），整段显示时末尾加 `cut · showing X of Y chars`；为此 core 的 `Marked` 多一个 `kept`
+
+验收（[出处](../sessions/2026-10-27-asm-m4a-accept.md#和-spec-不同的地方)）：
+
+- `screenshot-clicks.sh` 的回合卡点击不在第 11 张，改为脚本末尾再启动一次、只预选 `5f6eea99`，截 16–20 共 5 张（Show steps、工具行、刻度悬停与点击）
+- 验收标准 10 不用 detail autoplay（它等启动扫描结束才开始），改用一次 cliclick 在冷启动扫描中点一行
