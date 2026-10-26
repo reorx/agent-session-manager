@@ -4,11 +4,12 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格列出本机所有 Cla
 
 ## 当前状态
 
-M0–M3 完成（2026-09-21），M4a（回合卡与完整对话）完成（2026-10-27）。下一步 **M4b**（操作入口与其余条目），按总 plan `kb/plans/2026-10-26-m4-detail-panel.md` 和 `kb/plans/2026-10-26-m4b-actions-and-extras-spec.md` 实施，画稿链接在总 plan 里。功能状态表在 `kb/docs/product-prd.md`，里程碑定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3。
+M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-detail-panel.md`，M4b 有三项待用户人工验证，见 `kb/next-up.md`）。下一个里程碑 M5，定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3。功能状态表在 `kb/docs/product-prd.md`，里程碑定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3。
 
 - `crates/core`（`agent-session-core`，无 gpui 依赖）：JSONL 解析、增量 SQLite 索引、FTS5 / 正则搜索、`asm` CLI
 - `crates/app`（`agent-session-manager`）：gpui-kit 界面，保持薄。`store.rs` 后台线程独占 `Db`，启动先读索引出表，再流式增量扫描；`search.rs` 是另一条线程，自带只读连接，文本模式走 FTS、正则模式流式扫描 transcript
 - 详情的 Conversation 直接读记录文件（M4a）：`store.rs` 的 `asm-reader` 线程调 core `claude/conversation.rs::read_conversation`，在同一线程上用 app `conversation.rs` 转成卡片和行表，按 `seq` 取代旧请求；`detail.rs` 用 GPUI 的 `list` + `ListState` 按行表渲染回合卡（`turn_cards.rs`），一行是卡片的一段。搜索词变了才重读。实测数字与和 spec 的差异见 `kb/sessions/2026-10-27-asm-m4a-accept.md`
+- 会话操作（M4b）：复制 resume 命令 / ID、Finder、项目目录、导出 TXT、收藏都在 app `actions.rs`，可用性由纯函数按行的事实算出；标题行按钮、右键菜单、`⌘C` / `⇧⌘C` 派发同一组 action。History 行读 `history.jsonl` 显示 prompt 卡片，不参与搜索（与 Python 脚本一致）。resume 命令的依据见 `kb/sessions/2026-10-27-asm-m4b-resume.md`
 - 未解决的问题记在 `kb/known-issues.md`
 - 费用与 context 已完成（2026-10-23）：表格 Cost / Ctx 列、状态栏费用合计、Updated 的本月 / 上月 / 自定义区间（gpui-component `DatePicker`）、`asm cost [--compare]`。费用由 core 按 `message.usage` × `pricing.rs` 价格表自算（按 `message.id` 去重，subagent 计入父 session），`cost-state` 只作对照。实测与口径见 `kb/plans/2026-10-23-cost-context-columns.md` 和 `kb/docs/claude-session-data-format.md` §2.4。
 - Transcript Reader 已完成（2026-10-10）：独立 `transcript-reader` / `asm transcript` 导出 XML 风格标签分隔的精简 TXT，正文原样输出，无 CDATA，不要求标准 XML；GUI 导出待 M4 接入，复用 `transcript::read_transcript`。当前格式与验证见 `kb/notes/2026-10-10-transcript-reader-xml.md`，压缩规则见 `kb/notes/2026-10-10-transcript-reader.md`。
@@ -25,7 +26,7 @@ M0–M3 完成（2026-09-21），M4a（回合卡与完整对话）完成（2026-
 - `make asm ARGS="…"`：跑 `asm` CLI（`index` / `list` / `session` / `search [--index]` / `cost [--compare]` / `stats` / `favorite` / `unfavorite [--yes]` / `favorites-dir [PATH|--reset]`，`list --favorites` 仅列收藏；参数看 `--help`）。`cost --compare` 统计自算费用与 `cost-state` 的偏差，改价格表或用量解析后跑一次
 - `make transcript-reader ARGS="SESSION_ID -o session.txt"`：导出用户输入、最终回复及工具计数；也支持唯一 ID 前缀或 JSONL 路径，不依赖索引。
 - `make parity`：在真实 `~/.claude` 上把 `asm` 与 Python 脚本逐字比对；改解析器、清理逻辑、`regex.rs` 或输出格式后必须跑。两边的列表顺序一致：开始时间降序，并列时按更新时间降序、再按 id；改排序要两边一起改（脚本旁有 `test_claude_session_search.py`）。比对期间有 session 正在写入时 search 组偶尔失败，重跑即过
-- `make screenshot`（autoplay，3 张）、`make screenshot-clicks`（cliclick 真点击，20 张：12–15 是自定义区间与日期选择器，16–20 是回合卡，脚本末尾第二次启动并预选 `5f6eea99`，换机器要换一个不再变化的 session 并重量坐标；坐标在 `scripts/screenshot-clicks.sh`，改布局后要校对）、`make screenshot-search`（`ASM_SEARCH_AUTOPLAY=1`，app 自己走完搜索流程，脚本等日志标记后截 7 张）、`make screenshot-detail`（`ASM_DETAIL_AUTOPLAY=1`，8 步：选中、展开步骤、展开一步、全部展开、搜索命中、下一个命中、特殊回合、70MB 文件；`ASM_AUTOPLAY_SESSION` / `ASM_AUTOPLAY_REGEX` / `ASM_AUTOPLAY_SPECIAL` 指定 session 和查询，`ASM_AUTOPLAY_STEP=cut-output|thinking|mcp` 决定展开哪种步骤，跳过的步骤不截）。四个截图脚本都带 `caffeinate`，显示器中途睡着会截不到图。输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改），跑在真实索引上，但用一次性的 `state.json` 保证从默认视图开始
+- `make screenshot`（autoplay，3 张）、`make screenshot-clicks`（cliclick 真点击，22 张：12–15 是自定义区间与日期选择器，16–20 是回合卡（第二次启动、预选 `5f6eea99`），21–22 是普通行和 History 行的右键菜单（第三次启动）；换机器要换一个不再变化的 session 并重量坐标；坐标在 `scripts/screenshot-clicks.sh`，改布局后要校对）、`make screenshot-search`（`ASM_SEARCH_AUTOPLAY=1`，app 自己走完搜索流程，脚本等日志标记后截 7 张）、`make screenshot-detail`（`ASM_DETAIL_AUTOPLAY=1`，12 步：选中、展开步骤、展开一步、全部展开、搜索命中、下一个命中、特殊回合、70MB 文件、History 行（第一个 prompt 不少于 3 条的）、代码块（展开离开头最近的带代码块的回复）、从顶部按两次 `]`、Metadata；`ASM_AUTOPLAY_SESSION` / `ASM_AUTOPLAY_REGEX` / `ASM_AUTOPLAY_SPECIAL` 指定 session 和查询，`ASM_AUTOPLAY_STEP=cut-output|thinking|mcp` 决定展开哪种步骤，跳过的步骤不截）。四个截图脚本都带 `caffeinate`，显示器中途睡着会截不到图。输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改），跑在真实索引上，但用一次性的 `state.json` 保证从默认视图开始
 - 详情打开速度看日志里的 `detail:` 行（read / build / first frame，起点是选中，终点是带内容的首帧）。量的时候要停在 Conversation tab：停在 Metadata 上，首帧要等切回来才打点
 - 构建产物在 `~/Library/Caches/cargo-target`（全局 cargo 配置），不在 `./target`；`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒
 - 环境变量：`ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（默认 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`）、`ASM_STATE`（仅 app，默认为索引同目录的 `state.json`）、`ASM_FAVORITES_DIR`（覆盖共享配置中的收藏目录）、`ASM_TRASH_DIR`（取消收藏改用此目录，测试必设）。验收时把 `ASM_DB` / `ASM_STATE` 指到 `tmp/`，可反复测冷启动而不动真实索引
@@ -103,4 +104,5 @@ M0–M3 完成（2026-09-21），M4a（回合卡与完整对话）完成（2026-
 - `kb/plans/2026-10-26-m4a-turn-cards-spec.md` — M4a：直接读记录文件、回合卡、列表行模型、命中跳转、读取线程、打开速度验收
 - `kb/plans/2026-10-26-m4b-actions-and-extras-spec.md` — M4b：标题行按钮、右键菜单、`⌘C` / `⇧⌘C`、导出 TXT、History 的 prompt 列表、修改过的文件、`[` / `]`、代码块
 - `kb/sessions/2026-10-27-asm-m4a-accept.md` — M4a 验收：12 条标准的证据、打开速度实测（热 / 冷页缓存）、各任务与 spec 的差异汇总；core / store / 界面三份任务总结在同目录 `2026-10-2{6,7}-asm-m4a-*.md`
+- `kb/sessions/2026-10-27-asm-m4b-accept.md` — M4b 验收：11 条标准的证据、待用户验证的清单、各任务与 spec 的差异汇总
 - `kb/plans/2026-09-28-m4-detail-panel.md` — 已被上面的 M4 plan 取代，只作历史参考
