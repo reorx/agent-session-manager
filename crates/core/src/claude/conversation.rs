@@ -34,7 +34,7 @@ impl Marked {
         shown.push_str(&text[start..end]);
         if end < text.len() { shown.push('…'); }
         let hits = matcher.map_or_else(Vec::new, |m| m.ranges(&shown));
-        Self { text: shown, hits, chars, lines, moved: start > 0 }
+        Self { text: shown, hits, chars, lines, kept: text[start..end].chars().count(), moved: start > 0 }
     }
 }
 

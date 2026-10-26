@@ -9,6 +9,7 @@
 use std::collections::HashSet;
 use std::ops::Range;
 
+use agent_session_core::claude::conversation::INPUT_FIELD_CHARS;
 use agent_session_core::claude::paths::home_dir;
 use agent_session_core::model::{Compaction, ConvItem, Conversation, HitPlace, Marked, Part, Step, StepKind, ToolCall, ToolResult, Turn, TurnEnd};
 use agent_session_core::search::regex::{ToolLine, ToolLineKind};
@@ -116,22 +117,26 @@ pub struct Folded {
     /// because it is short or because a hit lies past the fold.
     pub fold: Option<usize>,
     /// What the unfold link says: `Show all · 18 lines`, or `+ 40 more lines · 4.1 KB` under a
-    /// tool output. Empty when `fold` is `None`.
+    /// tool output. Empty when `fold` is `None`. It counts what opening shows, never more: for a
+    /// text core cut, the kept part (`Show 400 lines · cut, 20,000 of 24,999 chars`).
     pub more: SharedString,
     /// `text` up to the fold (all of it without one), so rendering does not cut strings; the
     /// hits are all inside it when there is a fold.
     pub short: SharedString,
+    /// `cut · showing 3,000 of 14,212 chars`, shown at the end of the whole text when core kept
+    /// only part of it; empty when nothing was cut.
+    pub cut: SharedString,
 }
 
 impl Folded {
-    fn new(text: &str, hits: Vec<Range<usize>>, fold: Option<usize>, more: SharedString) -> Folded {
+    fn new(text: &str, hits: Vec<Range<usize>>, fold: Option<usize>, more: SharedString, cut: SharedString) -> Folded {
         // a fold right after a blank line would leave an empty line above the unfold link
         let short = fold.map(|at| {
             let end = hits.iter().map(|hit| hit.end).fold(text[..at].trim_end().len(), usize::max);
             SharedString::from(text[..end].to_string())
         });
         let text: SharedString = text.to_string().into();
-        Folded { short: short.unwrap_or_else(|| text.clone()), text, hits, fold, more }
+        Folded { short: short.unwrap_or_else(|| text.clone()), text, hits, fold, more, cut }
     }
 }
 
@@ -198,6 +203,8 @@ pub struct InputLine {
     pub kind: InputKind,
     pub text: SharedString,
     pub hits: Vec<Range<usize>>,
+    /// `cut · showing 2,000 chars` when core cut the field; empty otherwise.
+    pub cut: SharedString,
 }
 
 /// The bottom of a turn card, above the Show steps toggle.
@@ -531,10 +538,14 @@ fn input_line(line: &ToolLine) -> InputLine {
         ToolLineKind::Field(key) => (format!("{key}: "), InputKind::Field),
     };
     let shift = prefix.len();
+    // a field that fits is kept whole, so more than the cap means core cut it (and added `…`);
+    // how long it was is not kept
+    let cut = line.text.text.chars().count() > INPUT_FIELD_CHARS;
     InputLine {
         kind,
         hits: line.text.ranges.iter().map(|r| r.start + shift..r.end + shift).collect(),
         text: (prefix + &line.text.text).into(),
+        cut: if cut { format!("cut · showing {} chars", thousands(INPUT_FIELD_CHARS)).into() } else { SharedString::default() },
     }
 }
 
@@ -543,40 +554,58 @@ fn input_line(line: &ToolLine) -> InputLine {
 fn output_folded(r: &ToolResult) -> Folded {
     let m = &r.output;
     let fold = fold(&m.text, &m.hits, OUTPUT_LINES, FOLD_CHARS);
+    // what opening adds is what core kept past the fold; a cut output says so instead of its size
     let more = fold.map_or_else(String::new, |at| {
-        let shown = m.text[..at].lines().count();
-        let size = size_label(r.bytes as u64);
-        if r.lines > shown {
-            format!("+ {} more lines · {size}", r.lines - shown)
+        let (shown, kept) = (m.text[..at].lines().count(), m.text.lines().count());
+        let tail = kept_of(m).map_or_else(|| size_label(r.bytes as u64), |kept| format!("cut, {kept}"));
+        if kept > shown {
+            format!("+ {} more lines · {tail}", kept - shown)
         } else {
-            format!("+ {} more · {size}", chars_label(m.chars.saturating_sub(m.text[..at].chars().count())))
+            format!("+ {} more · {tail}", chars_label(m.kept.saturating_sub(m.text[..at].chars().count())))
         }
     });
-    Folded::new(&m.text, m.hits.clone(), fold, more.into())
+    Folded::new(&m.text, m.hits.clone(), fold, more.into(), cut_note(m))
 }
 
 /// A prompt, reply or process text folded at `max_lines`.
 fn folded(m: &Marked, max_lines: usize) -> Folded {
     let fold = fold(&m.text, &m.hits, max_lines, FOLD_CHARS);
-    Folded::new(&m.text, m.hits.clone(), fold, show_all(fold, m.lines, m.chars, max_lines))
+    let more = show_all(fold, m.text.lines().count(), m.kept, max_lines, kept_of(m).as_deref());
+    Folded::new(&m.text, m.hits.clone(), fold, more, cut_note(m))
 }
 
 fn plain_folded(text: &str, max_lines: usize) -> Folded {
     let fold = fold(text, &[], max_lines, FOLD_CHARS);
-    Folded::new(text, Vec::new(), fold, show_all(fold, text.lines().count(), text.chars().count(), max_lines))
+    Folded::new(text, Vec::new(), fold, show_all(fold, text.lines().count(), text.chars().count(), max_lines, None), SharedString::default())
 }
 
 fn whole(m: &Marked) -> Folded {
-    Folded::new(&m.text, m.hits.clone(), None, SharedString::default())
+    Folded::new(&m.text, m.hits.clone(), None, SharedString::default(), cut_note(m))
 }
 
-/// `Show all · 18 lines`, or `Show all · 2.0k chars` when the fold cut one long line.
-fn show_all(fold: Option<usize>, lines: usize, chars: usize, max_lines: usize) -> SharedString {
-    match fold {
-        None => SharedString::default(),
-        Some(_) if lines > max_lines => format!("Show all · {lines} lines").into(),
-        Some(_) => format!("Show all · {}", chars_label(chars)).into(),
+/// `Show all · 18 lines`, or `Show all · 2.0k chars` when the fold cut one long line. `lines`
+/// and `chars` are what the text holds; a text core cut (`kept`: `20,000 of 24,999 chars`) is not
+/// all there, so its link says what it does show: `Show 400 lines · cut, 20,000 of 24,999 chars`.
+fn show_all(fold: Option<usize>, lines: usize, chars: usize, max_lines: usize, kept: Option<&str>) -> SharedString {
+    if fold.is_none() {
+        return SharedString::default();
     }
+    match kept {
+        None if lines > max_lines => format!("Show all · {lines} lines").into(),
+        None => format!("Show all · {}", chars_label(chars)).into(),
+        Some(kept) if lines > max_lines => format!("Show {lines} lines · cut, {kept}").into(),
+        Some(kept) => format!("Show {kept}").into(),
+    }
+}
+
+/// `3,000 of 14,212 chars` for a text core cut; `None` when it is whole.
+fn kept_of(m: &Marked) -> Option<String> {
+    (m.kept < m.chars).then(|| format!("{} of {} chars", thousands(m.kept), thousands(m.chars)))
+}
+
+/// The line at the end of a cut text: `cut · showing 3,000 of 14,212 chars`.
+fn cut_note(m: &Marked) -> SharedString {
+    kept_of(m).map_or_else(SharedString::default, |kept| format!("cut · showing {kept}").into())
 }
 
 /// The first non-empty line, cut short; `…` when there is more.
@@ -618,6 +647,19 @@ fn size_label(bytes: u64) -> String {
         _ if kb < 1024.0 => format!("{kb:.0} KB"),
         _ => format!("{:.1} MB", kb / 1024.0),
     }
+}
+
+/// `14,212`.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (ix, digit) in digits.chars().enumerate() {
+        if ix > 0 && (digits.len() - ix) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 /// `880 chars`, `1.2k chars`, `21k chars`.
@@ -1013,6 +1055,49 @@ pub mod tests {
         assert_eq!(turn_card(&view, 0).prompt.more, "Show all · 2.0k chars", "a fold by characters counts characters");
         let short = view_of(vec![ConvItem::Turn(turn(Some(1), None, "short", vec![]))]);
         assert_eq!((turn_card(&short, 0).prompt.fold, turn_card(&short, 0).prompt.more.as_ref()), (None, ""));
+    }
+
+    #[test]
+    fn a_cut_text_promises_only_what_it_keeps_and_says_it_was_cut() {
+        use agent_session_core::claude::conversation::{ENTRY_CHARS, RESULT_CHARS, tool_input_lines};
+
+        // 320 lines of 50 characters: 16,319 in all, of which core keeps 3,000
+        let long_output = (1..=320).map(|i| format!("line {i:03}: {}", "x".repeat(40))).collect::<Vec<_>>().join("\n");
+        let output = Marked::new(&long_output, RESULT_CHARS, None);
+        let kept_lines = output.text.lines().count();
+        assert!(kept_lines < 320 && output.lines == 320);
+        let result = ToolResult { bytes: long_output.len(), lines: output.lines, output, is_error: false };
+        let cut_call = Step { ts: None, kind: StepKind::Tool(ToolCall { name: "Bash".into(), arg: "cat big.log".into(), input: Vec::new(), result: Some(result) }) };
+        let whole_call = tool("Bash", "cat small.log", Some((&lines(46), false)));
+        // 500 lines of 49 characters: 24,999 in all, of which core keeps 20,000
+        let long_prompt = (1..=500).map(|i| format!("{i:03} {}", "p".repeat(45))).collect::<Vec<_>>().join("\n");
+        let prompt = Marked::new(&long_prompt, ENTRY_CHARS, None);
+        let prompt_lines = prompt.text.lines().count();
+        assert!(prompt_lines < 500 && prompt.lines == 500);
+        let long_thinking = "t".repeat(ENTRY_CHARS + 500);
+        let input = tool_input_lines(serde_json::json!({ "content": "c".repeat(5_000), "file_path": "/tmp/a" }).as_object().unwrap(), None);
+        let edit = Step { ts: None, kind: StepKind::Tool(ToolCall { name: "Write".into(), arg: "/tmp/a".into(), input, result: None }) };
+        let steps = vec![cut_call, whole_call, Step { ts: None, kind: StepKind::Thinking(Marked::new(&long_thinking, ENTRY_CHARS, None)) }, edit];
+        let view = view_of(vec![ConvItem::Turn(Turn { prompt, ..turn(Some(1), None, "", steps) })]);
+        let card = turn_card(&view, 0);
+
+        let StepBody::Tool { output: Some(out), .. } = &card.steps[0].body else { panic!("expected an output") };
+        let shown = out.short.lines().count();
+        assert_eq!(shown, OUTPUT_LINES);
+        assert_eq!(out.more.to_string(), format!("+ {} more lines · cut, 3,000 of 16,319 chars", kept_lines - shown), "the link counts the kept lines only");
+        assert_eq!(out.cut, "cut · showing 3,000 of 16,319 chars", "and once open the output says it was cut");
+
+        let StepBody::Tool { output: Some(out), .. } = &card.steps[1].body else { panic!("expected an output") };
+        assert_eq!((out.more.to_string(), out.cut.as_ref()), (format!("+ 34 more lines · {} B", lines(46).len()), ""), "a whole output: as before, no note");
+
+        assert_eq!(card.prompt.more.to_string(), format!("Show {prompt_lines} lines · cut, 20,000 of 24,999 chars"), "no \"Show all\" for a cut prompt");
+        assert_eq!(card.prompt.cut, "cut · showing 20,000 of 24,999 chars");
+        let StepBody::Thinking(thinking) = &card.steps[2].body else { panic!("expected a thinking") };
+        assert_eq!((thinking.fold, thinking.cut.as_ref()), (None, "cut · showing 20,000 of 20,500 chars"), "shown whole, still says it was cut");
+
+        let StepBody::Tool { input, .. } = &card.steps[3].body else { panic!("expected a tool") };
+        assert_eq!(input[0].cut, "cut · showing 2,000 chars", "an input field cut by core says so");
+        assert_eq!(input[1].cut, "", "a short field does not");
     }
 
     #[test]

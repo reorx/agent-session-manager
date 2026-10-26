@@ -655,7 +655,8 @@ impl AppRoot {
     /// settle, prints `autoplay-detail: <step>` (or `… skipped`) and holds the view for a capture.
     /// `ASM_AUTOPLAY_SESSION` (id prefix; default: the listed session with the most tool calls),
     /// `ASM_AUTOPLAY_REGEX` (default `cargo (test|build)`) and `ASM_AUTOPLAY_SPECIAL` (a session
-    /// with compactions, AUTO cards, interruptions; the step is skipped without it) steer it.
+    /// with compactions, AUTO cards, interruptions; the step is skipped without it) steer it;
+    /// `ASM_AUTOPLAY_CUT_OUTPUT` makes `step-open` show a tool output core cut.
     fn detail_autoplay(&self, window: &Window, cx: &mut Context<Self>) -> Task<()> {
         let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
         let session = var("ASM_AUTOPLAY_SESSION");
@@ -737,6 +738,8 @@ impl AppRoot {
                     match name {
                         // what the stats line says while the mouse is on a tick
                         "conversation" => this.autoplay_hover_a_tick(),
+                        // the cut line is at the end of the output
+                        "step-open" if std::env::var_os("ASM_AUTOPLAY_CUT_OUTPUT").is_some() => this.autoplay_show_the_end_of_the_pointed_step(),
                         "special" => this.autoplay_scroll_to_special(),
                         // every turn is there, however long the session: show its very end
                         "big-session" => this.detail.list.scroll_to_end(),
@@ -774,6 +777,15 @@ impl AppRoot {
         if let Some((card, turn)) = turn {
             let step = turn.steps.iter().position(|s| s.error).unwrap_or(turn.steps.len() / 2);
             self.detail.hover_tick = Some((card, step));
+        }
+    }
+
+    /// Scroll the bottom of the step opened from its tick into view (it is laid out by now).
+    fn autoplay_show_the_end_of_the_pointed_step(&mut self) {
+        let Some((card, step)) = self.detail.pointed else { return };
+        let Some(ix) = self.detail.rows.iter().position(|row| *row == crate::conversation::Row::Step(card, step)) else { return };
+        if let Some(item) = self.detail.list.bounds_for_item(ix) {
+            self.detail.list.scroll_by(item.bottom() - self.detail.list.viewport_bounds().bottom() + px(16.));
         }
     }
 
@@ -818,11 +830,21 @@ impl AppRoot {
     }
 
     /// In the open turn, open its first failed tool call (or else its first tool call) the way a
-    /// click on its tick does.
+    /// click on its tick does. With `ASM_AUTOPLAY_CUT_OUTPUT`, open instead the first tool call
+    /// whose output core cut, with the output shown whole, so its cut line is on screen.
     fn autoplay_open_a_tool_step(&mut self, cx: &mut Context<Self>) -> bool {
+        use crate::conversation::{StepBody, TickKind};
         let (Some(view), Some(&card)) = (self.detail.view.clone(), self.detail.open_turns.iter().next()) else { return false };
         let Some(Card::Turn(turn)) = view.cards.get(card) else { return false };
-        let tools = || turn.steps.iter().enumerate().filter(|(_, s)| s.kind == crate::conversation::TickKind::Tool);
+        let tools = || turn.steps.iter().enumerate().filter(|(_, s)| s.kind == TickKind::Tool);
+        if std::env::var_os("ASM_AUTOPLAY_CUT_OUTPUT").is_some() {
+            let cut = tools().find(|(_, s)| matches!(&s.body, StepBody::Tool { output: Some(out), .. } if !out.cut.is_empty()));
+            let Some((step, _)) = cut else { return false };
+            self.detail.point_at(card, step);
+            self.detail.toggle_fold(card, agent_session_core::model::Part::Step(step));
+            cx.notify();
+            return true;
+        }
         let Some((step, _)) = tools().find(|(_, s)| s.error).or_else(|| tools().next()) else { return false };
         self.detail.point_at(card, step);
         cx.notify();

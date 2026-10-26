@@ -90,6 +90,16 @@ fn hits_badge(text: SharedString, cx: &App) -> Div {
         .child(text)
 }
 
+/// The gray line at the end of a text core kept only part of: `cut · showing 3,000 of 14,212 chars`.
+fn cut_line(text: SharedString) -> Div {
+    div().mt(px(2.)).text_size(px(10.)).line_height(px(13.)).text_color(style::muted_light()).child(text)
+}
+
+/// `cut_line` under a folded text, once it shows whole (opened, or never folded).
+fn cut_note(text: &Folded, open: bool) -> Option<Div> {
+    (!text.cut.is_empty() && (open || text.fold.is_none())).then(|| cut_line(text.cut.clone()))
+}
+
 fn ring(color: Hsla, spread: f32) -> BoxShadow {
     BoxShadow { color, offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(spread), inset: false }
 }
@@ -302,6 +312,7 @@ impl AppRoot {
                         .child(self.marked(&t.prompt, prompt_open, c, Part::Prompt)),
                 )
             })
+            .children(cut_note(&t.prompt, prompt_open))
             .children(self.fold_link(&t.prompt, c, Part::Prompt, cx))
             .when(!t.attachments.is_empty(), |el| {
                 el.child(h_flex().flex_wrap().gap(px(4.)).mt(px(4.)).children(t.attachments.iter().map(|label| {
@@ -491,6 +502,7 @@ impl AppRoot {
                         .flex_1()
                         .min_w_0()
                         .child(div().text_size(px(11.5)).line_height(px(15.)).text_color(style::text_secondary()).child(self.marked(text, open, c, Part::Step(s))))
+                        .children(cut_note(text, open))
                         .children(self.fold_link(text, c, Part::Step(s), cx)),
                 ),
         )
@@ -573,12 +585,13 @@ impl AppRoot {
                             div()
                                 .text_color(if line.kind == InputKind::Description { style::muted() } else { style::asst_text() })
                                 .child(self.revealing(StyledText::new(line.text.clone()).with_highlights(line.hits.iter().map(|r| (r.clone(), marks))), line.hits.first().map(|hit| hit.start), current))
+                                .when(!line.cut.is_empty(), |el| el.child(cut_line(line.cut.clone())))
                         }))))
                     })
                     .children(output.as_ref().filter(|out| !out.text.is_empty()).map(|out| {
                         v_flex()
                             .child(caption("output"))
-                            .child(code_box(cx).text_color(if step.error { style::error_text() } else { style::asst_text() }).child(self.marked(out, output_open, c, Part::Step(s))))
+                            .child(code_box(cx).text_color(if step.error { style::error_text() } else { style::asst_text() }).child(self.marked(out, output_open, c, Part::Step(s))).children(cut_note(out, output_open)))
                             .when(out.fold.is_some(), |el| {
                                 el.child(
                                     div()
@@ -598,7 +611,9 @@ impl AppRoot {
                     }))
             }
             StepBody::Thinking(text) | StepBody::Text(text) => {
-                v_flex().child(div().text_size(px(11.)).line_height(px(15.)).italic().text_color(style::head_fg()).child(self.marked(text, true, c, Part::Step(s))))
+                v_flex()
+                    .child(div().text_size(px(11.)).line_height(px(15.)).italic().text_color(style::head_fg()).child(self.marked(text, true, c, Part::Step(s))))
+                    .children(cut_note(text, true))
             }
         };
         v_flex()
@@ -631,6 +646,7 @@ impl AppRoot {
                             .flex_1()
                             .min_w_0()
                             .child(div().text_size(px(12.)).line_height(px(16.)).text_color(style::asst_text()).child(self.marked(text, open, c, Part::Reply)))
+                            .children(cut_note(text, open))
                             .children(self.fold_link(text, c, Part::Reply, cx)),
                     ),
             ),
@@ -736,6 +752,7 @@ impl AppRoot {
                         .line_height(px(15.))
                         .text_color(style::text_secondary())
                         .child(self.marked(summary, true, c, Part::Summary))
+                        .children(cut_note(summary, true))
                 }))
             })
     }

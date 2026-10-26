@@ -331,6 +331,9 @@ pub struct Marked {
     /// Original character and source-line counts, before truncation.
     pub chars: usize,
     pub lines: usize,
+    /// Characters of the original that `text` holds, omission marks not counted; less than
+    /// `chars` when the text was cut.
+    pub kept: usize,
     /// The retained window moved to the first match and begins with an ellipsis.
     pub moved: bool,
 }

@@ -104,6 +104,18 @@ fn a_long_tool_result_is_cut_and_keeps_its_real_size_and_line_count() {
     let c = fixture(None); let r = tool(&c, 2).result.as_ref().unwrap();
     assert_eq!(r.bytes, 4506); assert_eq!(r.lines, 901); assert_eq!(r.output.chars, 4506);
     assert!(r.output.text.chars().count() <= RESULT_CHARS + 1);
+    assert_eq!(r.output.kept, RESULT_CHARS, "kept: the characters of the original that the text holds");
+}
+#[test]
+fn a_marked_text_counts_the_characters_it_keeps() {
+    let whole = Marked::new("short", RESULT_CHARS, None);
+    assert_eq!((whole.kept, whole.chars), (5, 5), "nothing cut: everything kept");
+    let cut = Marked::new(&"é".repeat(5000), RESULT_CHARS, None);
+    assert_eq!((cut.kept, cut.chars), (RESULT_CHARS, 5000), "the trailing ellipsis is not counted");
+    let near_hit = format!("{}needle{}", "a".repeat(5000), "b".repeat(10));
+    let moved = Marked::new(&near_hit, RESULT_CHARS, Some(&Matcher::regex("needle", true)));
+    assert!(moved.moved && moved.text.starts_with('…') && !moved.text.ends_with('…'));
+    assert_eq!(moved.kept, 200 + 6 + 10, "a window moved to a hit keeps from the lead to the end");
 }
 #[test]
 fn tool_input_lists_description_command_then_the_other_fields() {
