@@ -656,7 +656,9 @@ impl AppRoot {
     /// `ASM_AUTOPLAY_SESSION` (id prefix; default: the listed session with the most tool calls),
     /// `ASM_AUTOPLAY_REGEX` (default `cargo (test|build)`) and `ASM_AUTOPLAY_SPECIAL` (a session
     /// with compactions, AUTO cards, interruptions; the step is skipped without it) steer it;
-    /// `ASM_AUTOPLAY_CUT_OUTPUT` makes `step-open` show a tool output core cut.
+    /// `ASM_AUTOPLAY_STEP` picks what `step-open` opens instead of a failed tool call:
+    /// `cut-output` (a tool output core cut, shown whole; also `ASM_AUTOPLAY_CUT_OUTPUT=1`),
+    /// `thinking`, or `mcp` (an MCP tool call).
     fn detail_autoplay(&self, window: &Window, cx: &mut Context<Self>) -> Task<()> {
         let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
         let session = var("ASM_AUTOPLAY_SESSION");
@@ -667,7 +669,7 @@ impl AppRoot {
         let steps: Vec<(&str, Step)> = vec![
             ("conversation", Box::new(move |this, _, cx| this.autoplay_select(session.as_deref(), cx))),
             ("steps-open", Box::new(|this, _, cx| this.autoplay_open_longest_turn(cx))),
-            ("step-open", Box::new(|this, _, cx| this.autoplay_open_a_tool_step(cx))),
+            ("step-open", Box::new(|this, _, cx| this.autoplay_open_a_step(cx))),
             (
                 "expand-all",
                 Box::new(|this, _, cx| {
@@ -739,7 +741,8 @@ impl AppRoot {
                         // what the stats line says while the mouse is on a tick
                         "conversation" => this.autoplay_hover_a_tick(),
                         // the cut line is at the end of the output
-                        "step-open" if std::env::var_os("ASM_AUTOPLAY_CUT_OUTPUT").is_some() => this.autoplay_show_the_end_of_the_pointed_step(),
+                        // a cut output's cut line and a thinking's last line are at the step's end
+                        "step-open" if matches!(autoplay_step().as_deref(), Some("cut-output" | "thinking")) => this.autoplay_show_the_end_of_the_pointed_step(),
                         "special" => this.autoplay_scroll_to_special(),
                         // every turn is there, however long the session: show its very end
                         "big-session" => this.detail.list.scroll_to_end(),
@@ -830,23 +833,26 @@ impl AppRoot {
     }
 
     /// In the open turn, open its first failed tool call (or else its first tool call) the way a
-    /// click on its tick does. With `ASM_AUTOPLAY_CUT_OUTPUT`, open instead the first tool call
-    /// whose output core cut, with the output shown whole, so its cut line is on screen.
-    fn autoplay_open_a_tool_step(&mut self, cx: &mut Context<Self>) -> bool {
+    /// click on its tick does; `ASM_AUTOPLAY_STEP` picks another kind of step (see
+    /// `detail_autoplay`).
+    fn autoplay_open_a_step(&mut self, cx: &mut Context<Self>) -> bool {
         use crate::conversation::{StepBody, TickKind};
         let (Some(view), Some(&card)) = (self.detail.view.clone(), self.detail.open_turns.iter().next()) else { return false };
         let Some(Card::Turn(turn)) = view.cards.get(card) else { return false };
-        let tools = || turn.steps.iter().enumerate().filter(|(_, s)| s.kind == TickKind::Tool);
-        if std::env::var_os("ASM_AUTOPLAY_CUT_OUTPUT").is_some() {
-            let cut = tools().find(|(_, s)| matches!(&s.body, StepBody::Tool { output: Some(out), .. } if !out.cut.is_empty()));
-            let Some((step, _)) = cut else { return false };
-            self.detail.point_at(card, step);
-            self.detail.toggle_fold(card, agent_session_core::model::Part::Step(step));
-            cx.notify();
-            return true;
-        }
-        let Some((step, _)) = tools().find(|(_, s)| s.error).or_else(|| tools().next()) else { return false };
+        let steps = || turn.steps.iter().enumerate();
+        let tools = || steps().filter(|(_, s)| s.kind == TickKind::Tool);
+        let pick = autoplay_step();
+        let step = match pick.as_deref() {
+            Some("cut-output") => tools().find(|(_, s)| matches!(&s.body, StepBody::Tool { output: Some(out), .. } if !out.cut.is_empty())),
+            Some("thinking") => steps().find(|(_, s)| s.kind == TickKind::Thinking),
+            Some("mcp") => tools().find(|(_, s)| !s.full_name.is_empty()),
+            _ => tools().find(|(_, s)| s.error).or_else(|| tools().next()),
+        };
+        let Some((step, _)) = step else { return false };
         self.detail.point_at(card, step);
+        if pick.as_deref() == Some("cut-output") {
+            self.detail.toggle_fold(card, agent_session_core::model::Part::Step(step));
+        }
         cx.notify();
         true
     }
@@ -987,6 +993,11 @@ impl Render for AppRoot {
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
     }
+}
+
+/// `ASM_AUTOPLAY_STEP`, or `cut-output` for the older `ASM_AUTOPLAY_CUT_OUTPUT=1`.
+fn autoplay_step() -> Option<String> {
+    std::env::var("ASM_AUTOPLAY_STEP").ok().filter(|v| !v.is_empty()).or_else(|| std::env::var_os("ASM_AUTOPLAY_CUT_OUTPUT").map(|_| "cut-output".into()))
 }
 
 fn bind_keys(cx: &mut App) {

@@ -26,6 +26,9 @@ const CARD_X: f32 = 10.;
 const BODY_X: f32 = 76.;
 const CARD_RADIUS: f32 = 6.;
 const STEP_ROW_H: f32 = 22.;
+/// Tool name column of a step row (the mockup's width), and how far a long name may widen it.
+const TOOL_NAME_W: f32 = 56.;
+const TOOL_NAME_MAX_W: f32 = 168.;
 
 const HISTORY_NOTE: &str = "The transcript was cleaned up by Claude Code; only the prompts kept in history.jsonl remain (see Metadata).";
 
@@ -44,10 +47,11 @@ fn part_ix(part: Part) -> usize {
     }
 }
 
-/// A folded text as it shows now: up to the fold, or whole once opened.
+/// A folded text as it shows now: folded (up to the fold, or a notification's gist), or whole
+/// once opened; with the hits of what shows.
 fn folded_text(text: &Folded, open: bool, marks: HighlightStyle) -> StyledText {
-    let shown = if open { text.text.clone() } else { text.short.clone() };
-    StyledText::new(shown).with_highlights(text.hits.iter().map(|r| (r.clone(), marks)))
+    let (shown, hits) = if open { (&text.text, &text.hits) } else { (&text.short, &text.short_hits) };
+    StyledText::new(shown.clone()).with_highlights(hits.iter().map(|r| (r.clone(), marks)))
 }
 
 /// A row's slice of a card: the sides always, the top edge on the head, the bottom one on the tail.
@@ -257,7 +261,8 @@ impl AppRoot {
 
     /// A folded text of `part`, its hits marked.
     fn marked(&self, text: &Folded, open: bool, card: usize, part: Part) -> Div {
-        self.revealing(folded_text(text, open, self.marks(card, part)), text.hits.first().map(|hit| hit.start), self.is_current(card, part))
+        let first_hit = if open { text.hits.first() } else { text.short_hits.first() };
+        self.revealing(folded_text(text, open, self.marks(card, part)), first_hit.map(|hit| hit.start), self.is_current(card, part))
     }
 
     /// `text` in a block. Parking scrolls to the top of the row with the hit, which a long
@@ -517,7 +522,8 @@ impl AppRoot {
         let name = if thinking {
             div().flex_none().font_family(style::sans(cx)).italic().text_color(style::muted_light()).child(step.label.clone())
         } else {
-            div().w(px(56.)).flex_none().truncate().font_weight(FontWeight::SEMIBOLD).text_color(style::tool_name()).child(step.label.clone())
+            // the mockup's 56px fit Read / Bash / Edit; longer names widen their own row
+            div().min_w(px(TOOL_NAME_W)).max_w(px(TOOL_NAME_MAX_W)).flex_none().truncate().font_weight(FontWeight::SEMIBOLD).text_color(style::tool_name()).child(step.label.clone())
         };
         let row = h_flex()
             .id(element_id("step", c, s))
@@ -580,6 +586,9 @@ impl AppRoot {
                 let output_open = self.detail.unfolded.contains(&(c, Part::Step(s)));
                 v_flex()
                     .gap(px(6.))
+                    .when(!step.full_name.is_empty(), |el| {
+                        el.child(div().font_family(style::mono(cx)).text_size(px(10.)).line_height(px(13.)).text_color(style::muted()).child(step.full_name.clone()))
+                    })
                     .when(!input.is_empty(), |el| {
                         el.child(v_flex().child(caption("input")).child(code_box(cx).children(input.iter().map(|line| {
                             div()
@@ -720,9 +729,10 @@ impl AppRoot {
                     .child(div().flex_none().child(k.label.clone()))
                     .when(!k.summary_label.is_empty(), |el| {
                         el.child(
-                            div()
+                            h_flex()
                                 .id(element_id("summary", c, 0))
                                 .flex_none()
+                                .whitespace_nowrap()
                                 .font_family(style::sans(cx))
                                 .text_color(style::accent())
                                 .cursor_default()

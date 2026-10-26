@@ -7,7 +7,8 @@
 # Uses ASM_DB / ASM_STATE like the app (point ASM_DB into tmp/ to leave the real index alone);
 # the view state is always a throwaway one. Usage: screenshot-detail.sh <binary> <out-dir>.
 # ASM_AUTOPLAY_SESSION / ASM_AUTOPLAY_REGEX / ASM_AUTOPLAY_SPECIAL steer the tour;
-# ASM_AUTOPLAY_CUT_OUTPUT=1 makes step-open show a tool output core cut, whole with its cut line.
+# ASM_AUTOPLAY_STEP=cut-output|thinking|mcp makes step-open open that kind of step instead of a
+# failed tool call (ASM_AUTOPLAY_CUT_OUTPUT=1 is the same as cut-output).
 set -euo pipefail
 
 BIN=$1

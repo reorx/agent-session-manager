@@ -114,7 +114,8 @@ pub struct Folded {
     /// Byte ranges of search hits in `text`.
     pub hits: Vec<Range<usize>>,
     /// Where the folded text stops (a byte position in `text`); `None` shows it whole, either
-    /// because it is short or because a hit lies past the fold.
+    /// because it is short or because a hit lies past the fold. `Some(0)` for a notification
+    /// folded to its gist, which is not a prefix of `text`.
     pub fold: Option<usize>,
     /// What the unfold link says: `Show all · 18 lines`, or `+ 40 more lines · 4.1 KB` under a
     /// tool output. Empty when `fold` is `None`. It counts what opening shows, never more: for a
@@ -123,6 +124,8 @@ pub struct Folded {
     /// `text` up to the fold (all of it without one), so rendering does not cut strings; the
     /// hits are all inside it when there is a fold.
     pub short: SharedString,
+    /// Byte ranges of the hits in `short` (the hits inside it, for a prefix).
+    pub short_hits: Vec<Range<usize>>,
     /// `cut · showing 3,000 of 14,212 chars`, shown at the end of the whole text when core kept
     /// only part of it; empty when nothing was cut.
     pub cut: SharedString,
@@ -130,13 +133,10 @@ pub struct Folded {
 
 impl Folded {
     fn new(text: &str, hits: Vec<Range<usize>>, fold: Option<usize>, more: SharedString, cut: SharedString) -> Folded {
-        // a fold right after a blank line would leave an empty line above the unfold link
-        let short = fold.map(|at| {
-            let end = hits.iter().map(|hit| hit.end).fold(text[..at].trim_end().len(), usize::max);
-            SharedString::from(text[..end].to_string())
-        });
-        let text: SharedString = text.to_string().into();
-        Folded { short: short.unwrap_or_else(|| text.clone()), text, hits, fold, more, cut }
+        // blank lines at the end would show as empty space under the text or above its link
+        let short = fold.map(|at| SharedString::from(trim_end_keeping(&text[..at], &hits).to_string()));
+        let text: SharedString = trim_end_keeping(text, &hits).to_string().into();
+        Folded { short: short.unwrap_or_else(|| text.clone()), short_hits: hits.clone(), text, hits, fold, more, cut }
     }
 }
 
@@ -158,14 +158,24 @@ pub struct Tick {
     pub hit: bool,
 }
 
+/// `text` without its trailing blank lines, unless a hit marks some of them.
+fn trim_end_keeping<'a>(text: &'a str, hits: &[Range<usize>]) -> &'a str {
+    let end = hits.iter().map(|hit| hit.end).filter(|end| *end <= text.len()).fold(text.trim_end().len(), usize::max);
+    &text[..end]
+}
+
 /// One step, both as its collapsed row and as what it shows open. `label`, `summary` and `meta`
 /// also make up the tick hover line: `14 / 29  Bash  cargo test …  error · 46 lines`.
 #[derive(Debug)]
 pub struct StepView {
     pub kind: TickKind,
     pub time: SharedString,
-    /// Tool name (`?` for a result whose call is missing), `thinking` or `text`.
+    /// Tool name (`?` for a result whose call is missing), `thinking` or `text`; an MCP tool by
+    /// its own name (`get_window_state`).
     pub label: SharedString,
+    /// `mcp__cua-computer-use__get_window_state`, shown in the open step; empty when `label` is
+    /// the whole name.
+    pub full_name: SharedString,
     /// Tool argument (paths shortened) or the opening of the text.
     pub summary: SharedString,
     /// Tool result (`212 lines`, `ok`, `error · 46 lines`) or a thinking's length (`1.2k chars`).
@@ -414,7 +424,7 @@ fn turn_card(t: &Turn, time: SharedString, day: NaiveDate, hits: usize, paths: &
         meta: meta.join(" · ").into(),
         errors: if errors == 0 { SharedString::default() } else { count(errors, "error", "errors").into() },
         end_note: end_note.into(),
-        prompt: folded(&t.prompt, PROMPT_LINES),
+        prompt: notification_gist(t).unwrap_or_else(|| folded(&t.prompt, PROMPT_LINES)),
         attachments: t.attachments.iter().map(|a| format!("{} · {}", a.kind, size_label(a.bytes)).into()).collect(),
         ticks,
         stats: stats(&t.steps).into(),
@@ -423,6 +433,49 @@ fn turn_card(t: &Turn, time: SharedString, day: NaiveDate, hits: usize, paths: &
         hits,
         hits_fmt: if hits == 0 { SharedString::default() } else { count(hits, "hit", "hits").into() },
     }
+}
+
+/// A task notification is a block of tags around one readable sentence: it folds to its
+/// `<summary>`, with its `<status>` unless the summary says it already, and opens to the whole
+/// message. A hit outside the summary shows the message whole from the start.
+fn notification_gist(t: &Turn) -> Option<Folded> {
+    if t.number.is_some() || t.origin.as_deref() != Some("task-notification") {
+        return None;
+    }
+    let m = &t.prompt;
+    let summary = tag_text(&m.text, "summary")?;
+    if m.hits.iter().any(|hit| hit.start < summary.start || hit.end > summary.end) {
+        return Some(Folded::new(&m.text, m.hits.clone(), None, SharedString::default(), cut_note(m)));
+    }
+    let mut gist = m.text[summary.clone()].to_string();
+    let status = tag_text(&m.text, "status").map(|r| &m.text[r]);
+    if let Some(status) = status.filter(|status| !gist.to_lowercase().contains(&status.to_lowercase())) {
+        gist.push_str(" · ");
+        gist.push_str(status);
+    }
+    let whole = trim_end_keeping(&m.text, &m.hits);
+    Some(Folded {
+        text: whole.to_string().into(),
+        hits: m.hits.clone(),
+        fold: Some(0),
+        more: show_all(Some(0), whole.lines().count(), m.kept, 0, kept_of(m).as_deref()),
+        short: gist.into(),
+        short_hits: m.hits.iter().map(|hit| hit.start - summary.start..hit.end - summary.start).collect(),
+        cut: cut_note(m),
+    })
+}
+
+/// Byte range of what `<tag>…</tag>` holds, spaces trimmed; `None` without the tag or text in it.
+fn tag_text(text: &str, tag: &str) -> Option<Range<usize>> {
+    let open = format!("<{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = start + text[start..].find(&format!("</{tag}>"))?;
+    let inner = &text[start..end];
+    if inner.trim().is_empty() {
+        return None;
+    }
+    let lead = inner.len() - inner.trim_start().len();
+    Some(start + lead..start + inner.trim_end().len())
 }
 
 fn compact_card(c: &Compaction, time: SharedString, hits: usize) -> CompactCard {
@@ -440,10 +493,13 @@ fn stats(steps: &[Step]) -> String {
     let (mut texts, mut thinking) = (0, 0);
     for step in steps {
         match &step.kind {
-            StepKind::Tool(call) => match tools.iter_mut().find(|(name, _)| *name == call.name) {
-                Some((_, n)) => *n += 1,
-                None => tools.push((&call.name, 1)),
-            },
+            StepKind::Tool(call) => {
+                let name = mcp_tool(&call.name).unwrap_or(&call.name);
+                match tools.iter_mut().find(|(seen, _)| *seen == name) {
+                    Some((_, n)) => *n += 1,
+                    None => tools.push((name, 1)),
+                }
+            }
             StepKind::Text(_) => texts += 1,
             StepKind::Thinking(_) => thinking += 1,
         }
@@ -463,6 +519,7 @@ fn step_view(step: &Step, day: NaiveDate, paths: &Paths) -> StepView {
             kind: TickKind::Thinking,
             time,
             label: "thinking".into(),
+            full_name: SharedString::default(),
             summary: opening(&m.text).into(),
             meta: chars_label(m.chars).into(),
             error: false,
@@ -474,6 +531,7 @@ fn step_view(step: &Step, day: NaiveDate, paths: &Paths) -> StepView {
             kind: TickKind::Text,
             time,
             label: "text".into(),
+            full_name: SharedString::default(),
             summary: opening(&m.text).into(),
             meta: SharedString::default(),
             error: false,
@@ -491,7 +549,8 @@ fn tool_view(call: &ToolCall, time: SharedString, paths: &Paths) -> StepView {
     StepView {
         kind: TickKind::Tool,
         time,
-        label: call.name.clone().into(),
+        label: mcp_tool(&call.name).unwrap_or(&call.name).to_string().into(),
+        full_name: if mcp_tool(&call.name).is_some() { call.name.clone().into() } else { SharedString::default() },
         summary: tool_summary(call, paths).into(),
         meta: call.result.as_ref().map_or_else(String::new, |r| result_label(&call.name, r)).into(),
         error: call.result.as_ref().is_some_and(|r| r.is_error),
@@ -499,6 +558,11 @@ fn tool_view(call: &ToolCall, time: SharedString, paths: &Paths) -> StepView {
         hits_fmt: hits_badge(hits),
         body: StepBody::Tool { input, output },
     }
+}
+
+/// `get_window_state` for `mcp__cua-computer-use__get_window_state`; `None` for other tools.
+fn mcp_tool(name: &str) -> Option<&str> {
+    name.strip_prefix("mcp__")?.split_once("__").map(|(_, tool)| tool).filter(|tool| !tool.is_empty())
 }
 
 /// The argument as the collapsed row shows it: file paths shortened, Grep's path part too.
@@ -556,7 +620,7 @@ fn output_folded(r: &ToolResult) -> Folded {
     let fold = fold(&m.text, &m.hits, OUTPUT_LINES, FOLD_CHARS);
     // what opening adds is what core kept past the fold; a cut output says so instead of its size
     let more = fold.map_or_else(String::new, |at| {
-        let (shown, kept) = (m.text[..at].lines().count(), m.text.lines().count());
+        let (shown, kept) = (m.text[..at].lines().count(), trim_end_keeping(&m.text, &m.hits).lines().count());
         let tail = kept_of(m).map_or_else(|| size_label(r.bytes as u64), |kept| format!("cut, {kept}"));
         if kept > shown {
             format!("+ {} more lines · {tail}", kept - shown)
@@ -570,7 +634,7 @@ fn output_folded(r: &ToolResult) -> Folded {
 /// A prompt, reply or process text folded at `max_lines`.
 fn folded(m: &Marked, max_lines: usize) -> Folded {
     let fold = fold(&m.text, &m.hits, max_lines, FOLD_CHARS);
-    let more = show_all(fold, m.text.lines().count(), m.kept, max_lines, kept_of(m).as_deref());
+    let more = show_all(fold, trim_end_keeping(&m.text, &m.hits).lines().count(), m.kept, max_lines, kept_of(m).as_deref());
     Folded::new(&m.text, m.hits.clone(), fold, more, cut_note(m))
 }
 
@@ -812,7 +876,7 @@ pub mod tests {
                 Card::Compact(c) => println!("  ── {} · {}", c.label, c.summary_label),
                 Card::Turn(t) => {
                     println!("  [{:?}] {} {} {} | {} | {} | {} | {}", t.status, t.label, t.origin, t.time, t.meta, t.errors, t.end_note, t.hits_fmt);
-                    let prompt = t.prompt.fold.map_or(t.prompt.text.as_ref(), |at| &t.prompt.text[..at]);
+                    let prompt = t.prompt.short.as_ref();
                     println!("    prompt: {:?} {}", prompt.chars().take(100).collect::<String>(), t.prompt.more);
                     if !t.attachments.is_empty() {
                         println!("    attachments: {:?}", t.attachments);
@@ -1098,6 +1162,83 @@ pub mod tests {
         let StepBody::Tool { input, .. } = &card.steps[3].body else { panic!("expected a tool") };
         assert_eq!(input[0].cut, "cut · showing 2,000 chars", "an input field cut by core says so");
         assert_eq!(input[1].cut, "", "a short field does not");
+    }
+
+    const NOTIFICATION: &str = "<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n<output-file>/tmp/b1.output</output-file>\n<status>killed</status>\n<summary>Background command \"Watch the agent\" was stopped because the system is running low on memory</summary>\n</task-notification>\nRead the output file to retrieve the result: /tmp/b1.output";
+
+    fn notification(prompt: Marked) -> Turn {
+        Turn { origin: Some("task-notification".into()), prompt, ..turn(None, None, "", vec![]) }
+    }
+
+    #[test]
+    fn a_task_notification_shows_its_summary_and_status_until_opened() {
+        let view = view_of(vec![ConvItem::Turn(notification(text(NOTIFICATION)))]);
+        let prompt = &turn_card(&view, 0).prompt;
+        assert_eq!(prompt.short, "Background command \"Watch the agent\" was stopped because the system is running low on memory · killed");
+        assert_eq!((prompt.fold.is_some(), prompt.more.as_ref()), (true, "Show all · 8 lines"), "the tags are a Show all away");
+        assert_eq!(prompt.text, NOTIFICATION, "opened, the message shows as it came");
+
+        let completed = NOTIFICATION.replace("<status>killed</status>", "<status>completed</status>").replace("was stopped because the system is running low on memory", "completed (exit code 0)");
+        let view = view_of(vec![ConvItem::Turn(notification(text(&completed)))]);
+        assert_eq!(turn_card(&view, 0).prompt.short, "Background command \"Watch the agent\" completed (exit code 0)", "a status the summary already says is not repeated");
+
+        let view = view_of(vec![ConvItem::Turn(notification(marked(NOTIFICATION, "Watch")))]);
+        let prompt = &turn_card(&view, 0).prompt;
+        assert_eq!(&prompt.short[prompt.short_hits[0].clone()], "Watch", "a hit in the summary is marked in it");
+        assert_eq!(&prompt.text[prompt.hits[0].clone()], "Watch", "and in the message once opened");
+
+        let view = view_of(vec![ConvItem::Turn(notification(marked(NOTIFICATION, "toolu_1")))]);
+        let prompt = &turn_card(&view, 0).prompt;
+        assert_eq!((prompt.fold, prompt.short.as_ref()), (None, NOTIFICATION), "a hit outside the summary shows the message whole");
+
+        let human = Turn { prompt: text(NOTIFICATION), ..turn(Some(1), None, "", vec![]) };
+        let peer = Turn { origin: Some("peer".into()), ..notification(text(NOTIFICATION)) };
+        let view = view_of(vec![ConvItem::Turn(human), ConvItem::Turn(peer)]);
+        assert!(turn_card(&view, 0).prompt.short.starts_with("<task-notification>"), "only task notifications get a gist");
+        assert!(turn_card(&view, 1).prompt.short.starts_with("<task-notification>"));
+    }
+
+    #[test]
+    fn a_text_shown_whole_drops_its_trailing_blank_lines() {
+        let steps = vec![thinks("先对齐方案的效果。\n\n"), says("ok\n\n\n")];
+        let view = view_of(vec![ConvItem::Turn(Turn { reply: Some(Reply { ts: None, text: text("done\n  \n") }), ..turn(Some(1), None, "go\n\n", steps) })]);
+        let card = turn_card(&view, 0);
+        assert_eq!((card.prompt.text.as_ref(), card.prompt.short.as_ref()), ("go", "go"));
+        let StepBody::Thinking(thinking) = &card.steps[0].body else { panic!("expected a thinking") };
+        assert_eq!(thinking.text, "先对齐方案的效果。", "no empty lines at the bottom of the open box");
+        let StepBody::Text(said) = &card.steps[1].body else { panic!("expected process text") };
+        assert_eq!(said.text, "ok");
+        assert!(matches!(&card.tail, Tail::Reply { text, .. } if text.text == "done"));
+
+        let view = view_of(vec![ConvItem::Turn(Turn { prompt: marked("a\n\n", "\\n+"), ..turn(Some(1), None, "", vec![]) })]);
+        let prompt = &turn_card(&view, 0).prompt;
+        assert_eq!((prompt.text.as_ref(), &prompt.text[prompt.hits[0].clone()]), ("a\n\n", "\n\n"), "blank lines a hit marks stay");
+    }
+
+    #[test]
+    fn mcp_tools_go_by_their_own_name_and_long_names_stay_whole() {
+        let steps = vec![
+            tool("mcp__cua-computer-use__get_window_state", "", Some(("{}", false))),
+            tool("mcp__cua-computer-use__get_window_state", "", None),
+            tool("mcp__cua-computer-use__click", "", None),
+            tool("ListAgents", "", None),
+            tool("Bash", "ls", None),
+        ];
+        let view = view_of(vec![ConvItem::Turn(turn(Some(1), None, "go", steps))]);
+        let card = turn_card(&view, 0);
+        let names: Vec<(&str, &str)> = card.steps.iter().map(|s| (s.label.as_ref(), s.full_name.as_ref())).collect();
+        assert_eq!(
+            names,
+            [
+                ("get_window_state", "mcp__cua-computer-use__get_window_state"),
+                ("get_window_state", "mcp__cua-computer-use__get_window_state"),
+                ("click", "mcp__cua-computer-use__click"),
+                ("ListAgents", ""),
+                ("Bash", ""),
+            ],
+            "the row shows the tool, the open step the full name"
+        );
+        assert_eq!(card.stats, "get_window_state 2 · Bash 1 · ListAgents 1 · click 1");
     }
 
     #[test]
