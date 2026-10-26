@@ -45,12 +45,6 @@
 - 用户粘贴的长文本在记录里包在 `<pasted_content id="9c86">…</pasted_content>` 里。表格 Preview 列、详情标题和回合卡 prompt 的第一行都是这个标签，真正的内容要往下看；本机 2061 个 session 里有 72 个的第一条 prompt 以它开头（`tmp/2026-10-27-m4a-turn-cards/accept/pasted-count.py`）。
 - 处理方向（推测）：显示时剥掉标签外壳、保留内容，必要时加一个 `pasted` 小标签。First prompt / Preview 的文字也进 `asm list` 的输出，和 Python 脚本逐字比对（`make parity`），所以只在 app 显示层改，或者两边一起改。
 
-## 导出：用户按 Esc 打断时留下的标记被当成一条用户输入导出
-
-- 记录：2026-10-26（写 M4 plan 时在真实数据上核对发现；85 个记录文件里有这种标记）
-- Claude Code 在用户打断时写入一条 user 记录，文字是 `[Request interrupted by user]` 或 `[Request interrupted by user for tool use]`，带 `interruptedMessageId`，没有 `origin` 和 `isMeta`，能通过 `transcript.rs::human_text` 的判断。`asm transcript` / `transcript-reader` 导出的 TXT 里因此多出一段 `<user>[Request interrupted by user]</user>`，交接时读的人会以为是用户说的话，回合也被多切一次。
-- 处理方向：M4b（`kb/plans/2026-10-26-m4b-actions-and-extras-spec.md` 步骤 1），和详情的回合切分共用打断标记的判断。
-
 ## 搜索：正则模式带 Tools 范围的扫描已到 500ms 目标线
 
 - 记录：2026-09-28（复测 M3 的数字时发现；`kb/sessions/2026-09-28-m3-known-issues.md`）

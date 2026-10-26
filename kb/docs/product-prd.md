@@ -29,7 +29,7 @@ tags:
 
 ## 2. 实现状态
 
-截至 2026-09-21 完成 M0（技术栈验证）、界面重构（见 `../notes/2026-09-16-design-refactor.md`）、M1（核心数据层与 `asm` 命令行，见 `../notes/2026-09-17-m1-core-crate.md`）M2（界面接入真实数据，见 `../notes/2026-09-21-m2-real-data.md`）和 M3（界面搜索，见 `../notes/2026-09-21-m3-search.md`），2026-10-27 完成 M4a（详情按回合卡显示完整对话，见 `../plans/2026-10-26-m4a-turn-cards-spec.md`）。**App 现在显示本机真实的 session：启动即读索引出表，后台增量扫描，首次启动边索引边填充。** 搜索框已接上全文与正则搜索。下表用三种状态标记各模块：
+截至 2026-09-21 完成 M0（技术栈验证）、界面重构（见 `../notes/2026-09-16-design-refactor.md`）、M1（核心数据层与 `asm` 命令行，见 `../notes/2026-09-17-m1-core-crate.md`）M2（界面接入真实数据，见 `../notes/2026-09-21-m2-real-data.md`）和 M3（界面搜索，见 `../notes/2026-09-21-m3-search.md`），2026-10-27 完成 M4（详情面板）：M4a 按回合卡显示完整对话（见 `../plans/2026-10-26-m4a-turn-cards-spec.md`），M4b 加上操作入口、History 的 prompt 卡片、代码块与按回合跳转（见 `../plans/2026-10-26-m4b-actions-and-extras-spec.md`）。**App 现在显示本机真实的 session：启动即读索引出表，后台增量扫描，首次启动边索引边填充。** 搜索框已接上全文与正则搜索。下表用三种状态标记各模块：
 
 | 状态 | 含义 |
 |---|---|
@@ -43,7 +43,7 @@ tags:
 | Session 表格 | ✅ | 9 列（Project / Preview / Started / Updated / Prompts / Cost / Ctx / Size / Kind）、36px 两行、虚拟滚动、行选中、表头排序；Preview 列随窗口自适应 |
 | 费用与 context | ✅ | 2026-10-23 完成：Cost 按 token 用量和官方价格自算（含 subagent），Ctx 是结束时的 context 占用；状态栏合计当前显示行的费用；`asm cost` 命令行同样可用，见 `../plans/2026-10-23-cost-context-columns.md` |
 | Preview 展示模式切换 | ✅ | 工具栏 Preview 下拉或 `cmd-1..4`，四种模式即时切换 |
-| 详情面板 | ✅ Metadata / ✅ Conversation / ⬜ 操作入口 | 头部 + 两个 tab；Metadata 为真实数据（含自算费用与 Claude Code 记录的费用、token 用量、context、时长、模型、权限模式、top 工具）；Conversation 2026-10-27 完成 M4a：直接读记录文件，按回合卡显示全部对话（工具调用、thinking、AUTO、compact、打断与 API 错误），命中在哪都能跳过去，扫描期间照常显示，70MB 的 session 首帧 45–79ms（release，页缓存热；冷的一般 150–160ms）。标题行操作按钮、右键菜单扩展、导出 TXT、History 的 prompt 列表、代码块框属于 M4b，未开工（`../plans/2026-10-26-m4-detail-panel.md`） |
+| 详情面板 | ✅ Metadata / ✅ Conversation / ✅ 操作入口 | 头部 + 两个 tab；Metadata 为真实数据（含自算费用与 Claude Code 记录的费用、token 用量、context、时长、模型、权限模式、top 工具、修改过的文件）；Conversation 2026-10-27 完成 M4a：直接读记录文件，按回合卡显示全部对话（工具调用、thinking、AUTO、compact、打断与 API 错误），命中在哪都能跳过去，扫描期间照常显示，70MB 的 session 首帧 45–79ms（release，页缓存热；冷的一般 150–160ms）。M4b 同日完成：标题行操作按钮（收藏、复制 resume 命令、复制 ID、在 Finder 中显示、打开项目目录、导出 TXT），表格右键菜单提供同一组操作，`⌘C` / `⇧⌘C`；History session 显示 history.jsonl 里的 prompt 卡片；代码块是等宽框、行内代码等宽浅灰底；`[` / `]` 按回合跳转（`../plans/2026-10-26-m4-detail-panel.md`） |
 | 分栏与折叠 | ✅ | 拖拽调宽，快捷键折叠 |
 | 状态栏 | ✅ | 左：显示数 / 总数 · 显示行的费用合计；中：操作状态 + 索引状态（loading / indexing n / m / 完成摘要 / 错误）；右：消息数、DB 大小、首批行上屏耗时 |
 | 搜索框与范围切换 | ✅ | 搜索框（`cmd-f` 聚焦、Enter 回到表格、`esc` 清空）、Scope 多选、`.*` 正则开关、`Aa` 大小写、Labels 多选；选项重启后保留 |
@@ -54,9 +54,9 @@ tags:
 | 全文搜索、正则搜索 | ✅ | 文本模式 FTS5（2–40ms，两字 CJK 走 LIKE 约 20ms）、正则模式流式扫描 transcript（2GB 记录文件，260–530ms，带 Tools 范围时已到 500ms 的目标线）；Matches 列、高亮片段、详情内命中跳转（命中在工具输入输出、thinking 里也能跳到）。`asm search` 命令行同样可用 |
 | 真实数据读取与索引 | ✅ | 解析器、增量 SQLite 索引、history.jsonl 补位、损坏自动重建；界面热启动约 200ms 出表（5488 行），冷索引 1.27GB 约 4s 且表格流式填充；Index 菜单可手动 Scan / Rebuild |
 | 实时更新 | ⬜ | |
-| 快捷键与菜单 | ✅ 部分 | 退出、折叠详情面板、`cmd-f`、`cmd-1..4`、`cmd-shift-r` 重建索引；View 菜单可显示 / 隐藏没有 prompt 的空 session。启动后焦点在表格上，不需要先点击就能用快捷键 |
+| 快捷键与菜单 | ✅ 部分 | 退出、折叠详情面板、`cmd-f`、`cmd-1..4`、`cmd-shift-r` 重建索引、`cmd-c` / `cmd-shift-c` 复制 ID / resume 命令、`[` / `]` 按回合跳转；View 菜单可显示 / 隐藏没有 prompt 的空 session；表格行有右键菜单。启动后焦点在表格上，不需要先点击就能用快捷键 |
 | 设置与状态持久化 | ✅ 视图状态 / ⬜ 设置页 | 项目与时间过滤（含自定义区间）、排序、Preview 模式、空 session 开关、详情面板开合、选中行存 `state.json`，下次启动恢复 |
-| 精简 TXT 导出 | ✅ CLI / ⬜ GUI | 2026-10-10 完成 Transcript Reader：通过 Session ID、唯一前缀或文件路径导出用户输入、最终回复与工具计数，去掉思考和工具结果；GUI 待 M4b 复用 core 接口，见 `../notes/2026-10-10-transcript-reader.md` |
+| 精简 TXT 导出 | ✅ CLI / ✅ GUI | 2026-10-10 完成 Transcript Reader：通过 Session ID、唯一前缀或文件路径导出用户输入、最终回复与工具计数，去掉思考和工具结果，见 `../notes/2026-10-10-transcript-reader.md`；2026-10-27 GUI 完成：详情标题行的导出按钮或右键菜单弹出系统保存对话框，内容与 CLI 相同；同日起被用户打断留下的 `[Request interrupted by user]` 不再当成用户输入导出 |
 
 ## 3. 产品架构
 
@@ -96,9 +96,11 @@ Branch、Tools、ID 不作为列，只在详情面板的 Metadata 里显示（�
 
 **费用怎么算**：每次 API 调用的 token 用量（输入、输出、5 分钟 / 1 小时缓存写入、缓存读取、fast mode）乘以官方价格，subagent 的调用计入它所属的 session。Claude Code 自己也会记一个数（`cost-state`），但很多 session 没有这条记录或记成 0，被 resume 过的 session 往往只记了最后一次运行，所以只在详情里作为对照。本机实测：Claude Code 记了费用的 973 个 session 里 96% 与自算相差不到 10%，合计相差约 1%。自算不含记录文件之外的调用（标题生成、分类器等）。新模型上线后要更新价格表，在此之前它的调用不计价，详情里会列出这些模型。Preview 列第一行是标题，第二行按展示模式显示灰色预览（换行显示为 `⏎`，截到 240 字）。没有任何 prompt 的空 session 默认隐藏，View 菜单可切换。
 
-**交互**：单击选中并刷新详情面板；双击展开详情面板；表头点击三态排序（升 / 降 / 恢复默认），同值按更新时间倒序保持稳定；列宽可拖拽；键盘上下、Home / End、翻页导航。
+**交互**：单击选中并刷新详情面板；双击展开详情面板；表头点击三态排序（升 / 降 / 恢复默认），同值按更新时间倒序保持稳定；列宽可拖拽；键盘上下、Home / End、翻页导航；表格有焦点时 `⌘C` 复制选中 session 的 ID、`⇧⌘C` 复制它的 resume 命令。
 
-**待补充**（⬜）：右键菜单（复制 ID、复制 resume 命令、在 Finder 显示、打开项目目录）、Updated 一分钟内显示"live"绿点、hover 显示完整路径与 top 工具名、列显隐与列宽持久化。
+**右键菜单**（✅ 2026-10-27）：作用于右键点中的那一行，不改变选中。依次是 Favorite / Unfavorite（⌘D）；Copy Session ID（⌘C）、Copy Resume Command（⇧⌘C，下面用小号灰色等宽字预览这条命令）；Reveal Transcript in Finder、Open Project Folder、Export Transcript as TXT…；Hide Project "<项目>"。哪些项置灰、为什么，和详情标题行的按钮相同（见 4.5）。
+
+**待补充**（⬜）：Updated 一分钟内显示"live"绿点、hover 显示完整路径与 top 工具名、列显隐与列宽持久化。
 
 ### 4.2 Preview 展示模式 ✅
 
@@ -114,7 +116,7 @@ Branch、Tools、ID 不作为列，只在详情面板的 Metadata 里显示（�
 
 - **时间范围**：「Updated ▾」下拉，预设 Today / 3 days / 7 days / 30 days / Any time、This month / Last month，分隔线后是 Custom range…。选 Custom 后按钮右侧出现日期区间选择器（两个月并排，左侧有本月 / 上月 / 近 7 天 / 近 30 天快捷项，起止日都包含在内，首次默认本月 1 日到今天）；选完表格立即过滤，焦点回到表格。判断的是 session 的最后活动时间，费用仍按整个 session 计，不按天切分。切换为 Started 待做。
 - **项目**：「Project ▾」下拉，按最近活动列出所有项目与各自 session 数，单选。待做：可搜索（真实数据上百个项目，目前靠滚动）、多选、worktree 聚合。
-- **隐藏项目**（✅）：把整个项目从表格里排除，用于探针 / 监控工具产生的噪音目录（真实数据里 CodexBar 的 `ClaudeProbe` 一个目录就有 2571 条 History，隐藏后 5484 行降到 2913 行）。两个入口：选中某项目后 Project 下拉顶部出现 `Hide “<项目>”`（隐藏后项目筛选自动回到 All）；或选中一行后用 View 菜单的 "Hide Project of Selected Session"——噪音项目往往不活跃、在下拉里排得很靠后（ClaudeProbe 排第 82），从表格行直接隐藏更快。已隐藏的项目列在 Project 下拉顶部的 Hidden 区，点一下恢复；按钮显示 `All · 1 hidden` 提示有行被排除。隐藏是全局排除（与"显示空 session"同级）：Project 总数与 Kind 计数都不含隐藏项目。持久化到 `state.json`。
+- **隐藏项目**（✅）：把整个项目从表格里排除，用于探针 / 监控工具产生的噪音目录（真实数据里 CodexBar 的 `ClaudeProbe` 一个目录就有 2571 条 History，隐藏后 5484 行降到 2913 行）。三个入口：选中某项目后 Project 下拉顶部出现 `Hide “<项目>”`（隐藏后项目筛选自动回到 All）；选中一行后用 View 菜单的 "Hide Project of Selected Session"；或在表格行的右键菜单里选 `Hide Project “<项目>”`（作用于右键点中的那一行）。噪音项目往往不活跃、在下拉里排得很靠后（ClaudeProbe 排第 82），从表格行直接隐藏更快。已隐藏的项目列在 Project 下拉顶部的 Hidden 区，点一下恢复；按钮显示 `All · 1 hidden` 提示有行被排除。隐藏是全局排除（与"显示空 session"同级）：Project 总数与 Kind 计数都不含隐藏项目。持久化到 `state.json`。
 - **Kind**（✅）：「Kind ▾」下拉，位于 Updated 之后，多选 CLI / SDK / BG / History，每项右侧是该 Kind 的 session 数（口径与 Project 下拉一致：遵循"显示空 session"开关，不受项目 / 时间过滤影响）。按钮显示 `All`、选中项短名（如 `CLI, SDK, BG`）或 `None`（表格为空）。默认全选，不隐藏任何来源；真实数据里 History 占 83%，取消它后 5479 行降到 932 行。
 - **更多过滤**（⬜）：折叠面板，含最少 prompt 数（默认 ≥1 以过滤空 session，目前由 View 菜单开关控制）、使用过的工具、有 PR、有 subagent。
 - 条件持久化到下次启动（✅）；生效条件以 chip 展示可逐个移除、"Reset" 清空（⬜）。
@@ -125,36 +127,35 @@ Branch、Tools、ID 不作为列，只在详情面板的 Metadata 里显示（�
 - **范围**：「Scope ▾」多选下拉，User / Assistant / Tools 三个复选项，默认 User + Assistant（显示为 Both）。Tools 指工具调用的输入与输出，仅正则模式可用。
 - **模式**：文本（默认，不区分大小写，多词为 AND）/ 正则（`.*` 按钮或 ⌥⌘R；非法正则按字面量匹配）。正则模式下多出 `Aa`（区分大小写）和「Labels ▾」标签过滤，如只搜 Bash 调用或 thinking 内容。
 - **结果呈现**：表格只保留有命中的 session，新增 Matches 列显示命中数并可排序；Preview 列改为显示第一个命中片段并高亮；详情面板内高亮命中，`▲ 2 / 9 hits ▼`、`n` / `shift-n`（表格有焦点时）或 `cmd-g` / `cmd-shift-g` 逐个跳转。命中落在工具调用的输入输出、thinking、回复或压缩摘要里时，详情面板同样高亮并能跳过去（见 4.5）；详情的命中数按"命中位置"计，和 Matches 列可能不同。
-- 搜索与过滤条件叠加（只在通过过滤的 session 里搜）；结果上限为最新的 200 个 session，超出时状态栏提示；命中数与耗时显示在状态栏。
+- 搜索与过滤条件叠加（只在通过过滤的 session 里搜）；History session 没有记录文件，不参与搜索（和 Python 脚本一致：搜索模式不读 history.jsonl）；结果上限为最新的 200 个 session，超出时状态栏提示；命中数与耗时显示在状态栏。
 
-### 4.5 详情面板 ✅ Metadata / ✅ Conversation / ⬜ 操作入口
+### 4.5 详情面板 ✅ Metadata / ✅ Conversation / ✅ 操作入口
 
 右侧分栏，默认 580px，可拖拽，`cmd-\` 折叠；未选中时显示"Select a session"。
 
-**头部**：标题、`id · project · branch · Kind 徽章`、Metadata / Conversation 分段 tab、右侧 `N prompts · N tools · size`。
+**头部**：标题、`id · project · branch · Kind 徽章`、Metadata / Conversation 分段 tab、右侧 `N prompts · N tools · size`。标题右边是一组操作按钮，从左到右：★ 收藏、Copy resume（复制 resume 命令）、复制 session ID、在 Finder 中显示记录文件（收藏了的 session 选中收藏副本）、打开项目目录、导出 TXT。每个按钮有悬停提示；复制成功弹通知"已复制 resume 命令" / "已复制 session ID"。
 
-**Metadata tab**：Project、Branch、Path、ID、Started、Updated、Prompts、Tools、Size、Cost（自算，旁边是 Claude Code 记录的 `CC: $x`）、Tokens（输入 / 输出 / 缓存读 / 缓存写）、Context（最终占用 / 窗口 · 峰值）、算不了价的模型（有才显示）、Messages、Duration、Kind、Subagents、权限模式、Claude Code 版本、Models、Top tools、PR、Resume 命令，以及 First prompt / Last prompt / Last message 全文（各截到 2000 字）。
+- **resume 命令**：`cd '<项目目录>' && claude --resume <id>`，路径一律加单引号；项目目录已不存在时是 `claude --resume <id>`（Claude Code 2.1.223 起按 ID 跨项目查找）。
+- **置灰**：History session（记录文件已被清理）的 ★、Copy resume、在 Finder 中显示、导出置灰，提示 "The transcript is gone"；没有 session ID 的早期 History session 连复制 ID 也置灰（"This session has no ID"）；收藏过、原记录已被清理的只有 Copy resume 置灰（"Only the favorite copy is left; restoring from a favorite is not supported here yet"）；项目目录不存在时只有打开项目目录置灰（"The project folder no longer exists"）。
+- **导出 TXT**：弹出系统保存对话框，默认文件名 `<项目名>-<id 前 8 位>.txt`，默认目录是这次运行里上一次导出的目录（第一次是"下载"）。内容与 `transcript-reader` 相同，写完通知"已导出 <文件名>"，有解析不了的行时加一句"有 N 行无法解析，已跳过"。
+
+**Metadata tab**：Project、Branch、Path、ID、Started、Updated、Prompts、Tools、Size、Cost（自算，旁边是 Claude Code 记录的 `CC: $x`）、Tokens（输入 / 输出 / 缓存读 / 缓存写）、Context（最终占用 / 窗口 · 峰值）、算不了价的模型（有才显示）、Messages、Duration、Kind、Subagents、权限模式、Claude Code 版本、Models、Top tools、Files（改过的文件，写 `12 files`，项目目录下的写相对路径，先列 10 个，多的用 Show all 展开；没改过写 —）、PR、Resume 命令（不能 resume 时用灰字写原因），以及 First prompt / Last prompt / Last message 全文（各截到 2000 字）。
 
 **Conversation tab**：直接读这个 session 的记录文件，按回合显示全部对话，没有条数上限。读取在后台线程进行，索引扫描进行中选中一行也照常显示。
 
-- **顶栏**：`9 turns · 2 auto · 214 tool calls`；有搜索时多出 `▲ 3 / 9 hits ▼`；最右边 Expand all / Collapse all 展开或收起所有回合的步骤。
+- **顶栏**：`9 turns · 2 auto · 214 tool calls`；没有搜索时后面是 `[ ] jump between turns` 的键帽提示，有搜索时这个位置换成 `▲ 3 / 9 hits ▼`；最右边 Expand all / Collapse all 展开或收起所有回合的步骤。
+- **按回合跳转**：表格有焦点、停在 Conversation 时，`]` 跳到下一张卡（回合或 AUTO）的开头，`[` 跳到上一张（视口顶端在一张卡中间时先回到这张卡的开头），到头不动，不改变展开状态。
 - **回合卡**：一个回合从用户的一条真实输入开始，标题 `TURN n`。卡头依次是状态灯（绿：正常结束；红：被打断或 API 出错；灰：没有回复）、开始时间、步数与用时、出错数和结束说明，Show steps 开关在这一行右端。prompt 最多显示 4 行、最终回复最多 6 行，超出的用 Show all 展开；折叠按原文行数算，一整段不换行的长文约 900 字后折叠。prompt 里粘贴的图片或文档显示成 `image · 231 KB` 这样的标签。
 - **刻度条与统计行**：一步一格（工具调用是竖杠、出错的是红色；过程文字是实心点；thinking 是空心点），下面写各工具的次数和文字、thinking 的段数。鼠标停在一格上，统计行改写成这一步（`35 / 120  Read  …/10.jpg`）；点一格会展开这个回合、滚到这一步并展开它。
 - **步骤**：展开后每步一行。工具调用是 `时间 ▶ 工具名 参数摘要 结果摘要`（`212 lines`、`ok`、红色的 `error · 46 lines`），MCP 工具只写工具名（`list_windows`），点开看完整名、input 和 output（output 先显示 12 行）；thinking 一行，点开看全文；Agent 在工具调用之间说的话直接显示成一段 ASST 文字。展开状态在选中期间保留，换一个 session 回到全部折叠。
 - **特殊段落**：不是人发起的消息（后台任务通知、自动续跑、其他 Agent 发来的消息）显示成不编号的 AUTO 卡，带来源标签；后台任务通知折叠时只显示一句摘要（如 `Background command "…" completed (exit code 0)`），Show all 看整条原文；第一条输入之前已有的 Agent 活动放进一张 "session start" AUTO 卡。上下文压缩显示为一条分隔线 `context compacted · 时间`，压缩摘要可以展开。被打断的回合底部写 `[Request interrupted by user]`，API 出错的回合底部是红框里的错误文字。
 - **长文本**：prompt、回复、过程文字、thinking 各保留前 2 万字，工具输出保留前 3000 字。被截过的文本，展开链接只数保留下来的部分并注明截断（`+ 47 more lines · cut, 3,000 of 16,319 chars`）。
 - **搜索命中**：选中时直接停在第一个命中位置，命中所在的回合、步骤和被折叠的段落自动展开；命中黄色、当前命中橙色；卡片标题写这张卡的命中位置数，刻度上含命中的格子带黄圈。命中落在保留范围之后时，保留的那一段移到命中附近。改搜索词会重读并保留已展开的回合；清空搜索回到顶部。
-- **状态**：读取中显示几张卡片骨架；读取失败（文件刚被删、没有读权限）显示一行错误说明；一条消息都没有时显示 "No messages in this session"；记录文件已被清理的 History session 显示一句说明。
-- 回复按纯文本显示，代码块的 ``` 原样出现，没有 Markdown 渲染。
+- **状态**：读取中显示几张卡片骨架；读取失败（文件刚被删、没有读权限）显示一行错误说明；一条消息都没有时显示 "No messages in this session"。
+- **History session**：记录文件已被 Claude Code 清理、只剩 history.jsonl 里 prompt 的 session，顶栏写 `5 prompts from history.jsonl`，下面一个虚线框说明记录已被清理（没有回复、工具调用和费用），每个 prompt 一张只有卡头的卡片（`TURN n`、时间、prompt，粘贴的长文本已还原，同样折叠到 4 行），没有状态灯、刻度和回复。`[` / `]` 照常可用；History session 不参与搜索。
+- **代码块与行内代码**：prompt、过程文字和最终回复里，``` 围起来的代码块显示成浅灰底、细边框的等宽框，不换行（超宽部分截掉），fence 行本身不显示，没闭合的一直算到文末；单个反引号的行内代码用等宽字、浅灰底。折叠仍按原文行数算，折叠点落在代码块中间时退到代码块之前。代码里的搜索命中照样高亮。工具的 input / output、thinking 不分段。其余 Markdown（标题、列表、表格、加粗）不渲染，按纯文本显示。
 
-**待补充**（M4b，未开工；spec 见 `../plans/2026-10-26-m4b-actions-and-extras-spec.md`）：
-
-- 标题行操作按钮（收藏、复制 resume 命令、复制 session ID、在 Finder 显示记录文件、打开项目目录、导出 TXT），表格右键菜单同样提供，表格有焦点时 `⌘C` / `⇧⌘C` 复制 ID / resume 命令。"在终端打开"放到 M5
-- Metadata 增加修改过的文件列表
-- 回复里的代码块显示成等宽框；不做完整的 Markdown 渲染
-- `[` / `]` 在回合之间跳转
-- History 类 session 显示 history.jsonl 里的 prompt 列表，并提示记录已被清理
-- subagent 查看放到 M5
+**待补充**：在终端里直接打开 resume、查看 subagent 的对话、对话随记录文件追加实时刷新，都在 M5；从收藏副本恢复对话是收藏方案的后续工作。
 
 ### 4.6 索引与实时更新 ✅ 索引与界面 / ⬜ 监听
 
@@ -167,11 +168,11 @@ Branch、Tools、ID 不作为列，只在详情面板的 Metadata 里显示（�
 
 ### 4.7 快捷键与菜单 ✅ 部分
 
-已实现：`cmd-q` 退出、`cmd-\` 折叠 / 展开详情面板、`cmd-f` 聚焦搜索框、`cmd-1..4` 切换展示模式，对应 App 菜单与 View 菜单。
+已实现：`cmd-q` 退出、`cmd-\` 折叠 / 展开详情面板、`cmd-f` 聚焦搜索框、`cmd-1..4` 切换展示模式，对应 App 菜单与 View 菜单。M4 新增（表格有焦点时）：`cmd-c` 复制 session ID、`cmd-shift-c` 复制 resume 命令（搜索框里的 `cmd-c` 仍是复制文字）、`[` / `]` 按回合跳转。
 
 M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebuild Index），View 菜单的空 session 开关。
 
-待补充：`enter` 打开详情、`cmd-c` 复制 ID、`cmd-shift-c` 复制 resume 命令、`cmd-r` 在终端 resume、`cmd-,` 设置。
+待补充：`enter` 打开详情、`cmd-r` 在终端 resume、`cmd-,` 设置。
 
 ### 4.8 状态栏 ✅ 部分
 
@@ -187,7 +188,7 @@ M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebui
 2. **缩小范围**：选项目、选时间段，表格即时收窄；状态栏显示 N / M 和这些 session 的费用合计。按 Cost 或 Ctx 排序找出最贵、context 最满的 session。
 3. **找到目标**：按列排序，或输入关键词搜索，Preview 列显示命中片段。
 4. **查看**：单击行，右侧看摘要与消息流；搜索时直接定位到命中处。
-5. **回到对话**：复制 resume 命令或直接在终端打开，继续这个 session。
+5. **回到对话**：复制 resume 命令（详情标题行的 Copy resume、右键菜单或 `⇧⌘C`），粘到终端继续这个 session；直接在终端打开留到 M5。
 
 ## 6. 性能目标
 

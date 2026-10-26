@@ -40,7 +40,7 @@ M4a 之后能在详情里看完整对话，但看完要做的事还没有入口�
 | 导出 TXT | 图标按钮 | 见第 4 节 |
 
 - 每个按钮都有悬停提示，写出它做什么；置灰时提示写出原因。
-- **恢复命令**是 `cd <项目目录> && claude --resume <session id>`，粘到终端直接能用。项目目录不存在时的写法见"风险与待定"第 1 条，以验证结果为准。
+- **恢复命令**是 `cd '<项目目录>' && claude --resume <session id>`，粘到终端直接能用。项目目录一律写绝对路径、用单引号包起来，路径里的 `'` 写成 `'\''`（不写 `~`：单引号里的 `~` 不展开）。项目目录不存在时是 `claude --resume <session id>`，Copy resume 照常可用：Claude Code 2.1.223 起按完整 ID 跨项目查找（步骤 0 的结论，见"风险与待定"第 1 条）。session ID 不是纯 `[A-Za-z0-9-]` 时不生成命令，Copy resume 置灰，提示 "This session has no ID"。
 - 复制成功后弹一条简短的通知（"已复制 resume 命令"、"已复制 session ID"），和现有的收藏通知同一种样式。
 
 什么时候置灰：
@@ -49,7 +49,7 @@ M4a 之后能在详情里看完整对话，但看完要做的事还没有入口�
 |---|---|---|
 | History session（记录文件已被 Claude Code 清理） | ★、Copy resume、在 Finder 中显示、导出 | "The transcript is gone" |
 | 没有 session ID 的早期 History session | 以上再加复制 ID | "This session has no ID" |
-| 收藏过、但原始记录文件已被清理 | Copy resume | "Only the favorite copy is left; Claude Code can no longer resume it" |
+| 收藏过、但原始记录文件已被清理 | Copy resume | "Only the favorite copy is left; restoring from a favorite is not supported here yet" |
 | 项目目录已不存在 | 打开项目目录 | "The project folder no longer exists" |
 
 #### 2. 表格行的右键菜单
@@ -61,7 +61,7 @@ Favorite / Unfavorite            ⌘D
 ─────────────
 Copy Session ID                  ⌘C
 Copy Resume Command             ⇧⌘C
-  cd ~/Code/agent-session-manager && claude --resume 3c1e9a20-…
+  cd '/Users/me/Code/agent-session-manager' && claude --resume 3c1e9a20-…
 ─────────────
 Reveal Transcript in Finder
 Open Project Folder
@@ -94,7 +94,7 @@ Hide Project "agent-session-manager"
 - 顶栏写"3 prompts from history.jsonl"。
 - 顶栏下面一行灰字："Claude Code cleaned up this session's transcript. Only its prompts in history.jsonl are left: no replies, tool calls or cost."
 - 每个 prompt 一张卡，标题 `TURN n` 和时间，内容是 prompt（粘贴的长文本已还原），没有状态灯、刻度条和回复。prompt 同样折叠到 4 行。
-- 搜索命中照常高亮，可以用 `n` / `⌘G` 等在 prompt 之间跳。
+- History session 不参与搜索（与 Python 脚本一致：搜索模式不读 history）；`[` / `]` 照常可用。
 
 #### 6. Metadata 里的"修改过的文件"
 
@@ -132,7 +132,7 @@ Metadata 的 Top tools 下面加一项 Files：写"12 files"，下面列出 sess
 5. 右键菜单按画稿 6 的顺序列出各项，作用于右键点中的那一行
 6. 表格有焦点时 `⌘C` / `⇧⌘C` 复制 ID / 恢复命令；搜索框里的 `⌘C` 不受影响
 7. 导出的文件和 `transcript-reader` 导出同一个 session 的结果逐字一致；打断标记不再出现在 `<user>` 里
-8. History session 的 Conversation 是 prompt 卡片，粘贴文本已还原，能搜索和跳转
+8. History session 的 Conversation 是 prompt 卡片，粘贴文本已还原；History session 不参与搜索（与 Python 脚本一致：搜索模式不读 history）；`[` / `]` 照常可用
 9. Metadata 列出修改过的文件
 10. `[` / `]` 在卡片之间跳，到头不动；顶栏的提示和命中导航按有无搜索切换
 11. 回复里的代码块是等宽框，行内代码是等宽浅灰底，里面的命中照样高亮
@@ -218,14 +218,14 @@ Metadata 的 Top tools 下面加一项 Files：写"12 files"，下面列出 sess
 
 每一步先写行为测试再实现（BDD）。界面的样式不写行为测试。
 
-- [ ] **步骤 0：验证 resume 的两个前提**（见"风险与待定"第 1、2 条）。先查 `claude --help` 和 Claude Code 文档；需要实际跑 `claude --resume` 时，先问用户（会在 `~/.claude` 里留下记录）。结论写进 session 总结，并据此定下"项目目录不存在"一行的行为，必要时回来改 PRD 第 1 节。
-- [ ] **步骤 1：core**
+- [x] **步骤 0：验证 resume 的两个前提**（见"风险与待定"第 1、2 条）。先查 `claude --help` 和 Claude Code 文档；需要实际跑 `claude --resume` 时，先问用户（会在 `~/.claude` 里留下记录）。结论写进 session 总结，并据此定下"项目目录不存在"一行的行为，必要时回来改 PRD 第 1 节。
+- [x] **步骤 1：core**
   - 测试：
     - `crates/core/tests/transcript_reader.rs`：`an_interruption_marker_is_not_exported_as_user_input`（`reader.jsonl` 里加一条打断标记；同时检查原有的期望输出不变）
     - `crates/core/tests/history.rs`：`history_prompts_of_a_session_are_its_rows_with_pasted_text_restored`、`an_anonymous_history_session_gets_the_prompts_of_its_time_group`、`history_sessions_and_history_prompts_group_the_same_way`
     - `crates/core/tests/conversation.rs`：`a_history_conversation_is_one_prompt_only_turn_per_prompt_with_hits_marked`
   - 完成标准：`cargo test -p agent-session-core`；`make parity` 21/21（`history_sessions` 改了内部结构，parity 会覆盖到）。
-- [ ] **步骤 2：`actions.rs`**
+- [x] **步骤 2：`actions.rs`**
   - 测试：
     - `the_resume_command_changes_into_the_project_folder`
     - `the_resume_command_quotes_a_path_with_spaces`
@@ -235,23 +235,23 @@ Metadata 的 Top tools 下面加一项 Files：写"12 files"，下面列出 sess
     - `a_favorite_whose_original_is_gone_cannot_be_resumed_but_can_be_exported`
     - `a_missing_project_folder_disables_only_open_folder`
     - `the_export_name_is_project_and_short_id`
-- [ ] **步骤 3：store**
+- [x] **步骤 3：store**
   - 测试（`store.rs`）：`history_prompts_are_served_for_a_history_session`（fixture 里有 4 个 History session）、`an_export_writes_the_file_and_reports_skipped_lines`、`an_export_is_not_superseded_by_a_conversation_request`。
-- [ ] **步骤 4：快捷键与 action**
+- [x] **步骤 4：快捷键与 action**
   - 测试（`keyboard_tests.rs`，无界面窗口用的是测试平台的剪贴板，不碰系统剪贴板）：
     - `command_c_copies_the_session_id_and_shift_command_c_the_resume_command`
     - `command_c_in_the_search_box_does_not_copy_the_session_id`
     - `copying_the_resume_command_of_a_history_session_copies_nothing`
     - `brackets_jump_between_turns_and_stop_at_the_ends`
     - `brackets_do_nothing_on_the_metadata_tab`
-- [ ] **步骤 5：分段**
+- [x] **步骤 5：分段**
   - 测试（app `conversation.rs`）：
     - `fenced_code_becomes_a_code_segment_and_an_unclosed_fence_runs_to_the_end`
     - `inline_code_is_found_in_text_segments_only`
     - `folding_counts_lines_across_segments_and_does_not_cut_inside_a_code_block`
     - `inline_code_and_hits_combine_into_runs_with_the_hit_on_top`
-- [ ] **步骤 6：界面**：标题行按钮组与图标、右键菜单、Metadata 的 Files、History 卡片、`[ ]` 提示、代码块渲染。`model.rs` 的测试 `a_row_shows_the_project_folder_name_and_a_short_id` 删掉对 `resume` 的断言，新增 `a_row_lists_the_files_it_touched_relative_to_the_project`。
-- [ ] **步骤 7：验收与收尾**
+- [x] **步骤 6：界面**：标题行按钮组与图标、右键菜单、Metadata 的 Files、History 卡片、`[ ]` 提示、代码块渲染。`model.rs` 的测试 `a_row_shows_the_project_folder_name_and_a_short_id` 删掉对 `resume` 的断言，新增 `a_row_lists_the_files_it_touched_relative_to_the_project`。
+- [x] **步骤 7：验收与收尾**
   - autoplay 加三步（接在 M4a 的 `ASM_DETAIL_AUTOPLAY` 后面）：`history-session`（选第一个 History 行）、`code-block`（选 `ASM_AUTOPLAY_SESSION`，展开一个回复里有代码块的回合）、`next-turn`（模拟 `]` 两次）。不在 autoplay 里复制。
   - 右键菜单用 cliclick 鼠标点击打开（AGENTS：只用于无法程序化打开的弹出层），加到 `screenshot-clicks.sh`；悬停提示人工看一次。
   - 截图归档到 `tmp/<date>-m4b-actions/`，逐张用 `Read` 看，和画稿 1、2、5、6 对照。
@@ -279,8 +279,58 @@ Metadata 的 Top tools 下面加一项 Files：写"12 files"，下面列出 sess
 
 ### 风险与待定
 
-1. **`cd` 进项目目录的必要性，以及目录不存在时怎么办**（D8，未验证）。推测 `claude --resume <id>` 只在当前目录对应的 `~/.claude/projects/<编码后的路径>/` 下找 session，所以要先 `cd`。如果属实，项目目录不存在时去掉 `cd` 也恢复不了，这时 Copy resume 应置灰，提示"The project folder no longer exists"，而不是退回不带 `cd` 的命令。步骤 0 验证后定。
-2. **收藏但原文件已被清理的 session**：推测 Claude Code 只在 `~/.claude/projects` 下找，收藏副本不在那里，所以置灰。如果步骤 0 发现能指定文件路径恢复，再回来讨论。
+1. **`cd` 进项目目录的必要性，以及目录不存在时怎么办**（D8；2026-10-27 步骤 0 已定：推测不成立，Claude Code 2.1.223 起按完整 ID 跨项目查找，目录不存在时复制 `claude --resume <id>`，见[调研 §3](../sessions/2026-10-27-asm-m4b-resume.md#3-项目目录不在时怎么恢复)）。推测 `claude --resume <id>` 只在当前目录对应的 `~/.claude/projects/<编码后的路径>/` 下找 session，所以要先 `cd`。如果属实，项目目录不存在时去掉 `cd` 也恢复不了，这时 Copy resume 应置灰，提示"The project folder no longer exists"，而不是退回不带 `cd` 的命令。步骤 0 验证后定。
+2. **收藏但原文件已被清理的 session**：推测 Claude Code 只在 `~/.claude/projects` 下找，收藏副本不在那里，所以置灰。如果步骤 0 发现能指定文件路径恢复，再回来讨论。（2026-10-27 步骤 0：`--resume` 能按绝对路径加载收藏副本，但普通恢复会把后续对话写回收藏目录，本期仍置灰，只改了提示措辞；从收藏恢复或 fork 留给收藏方案的后续，见[调研 §4](../sessions/2026-10-27-asm-m4b-resume.md#4-收藏副本可加载但普通恢复可能破坏快照)）
 3. **菜单里带参数 action 的快捷键提示**：按决策 1 用 `PopupMenuItem::element` 自己画。如果自定义项不支持 `disabled` 或点击后不关闭菜单，就退回普通的 `menu_with_disabled`，不显示快捷键提示，在 session 总结里记一笔。
 4. **`TextRun` 拼接的边界**：行内代码和命中区间按字节切分，必须落在字符边界上，`text_runs` 的测试要包含中文。
 5. **导出文件写到用户选的位置**：同名文件由系统保存对话框询问是否替换，应用不再二次确认。
+
+## 实施结果与差异
+
+2026-10-27 完成并验收：步骤 0 调研没有代码，见 [resume 调研](../sessions/2026-10-27-asm-m4b-resume.md)；提交 `f7c333c`（core）、`14d0c9f`（`actions.rs`、store、快捷键、标题行按钮、右键菜单）、`541c78a`（分段、History 卡片、`[` / `]`、Files、autoplay）。验收见 [验收总结](../sessions/2026-10-27-asm-m4b-accept.md)。下面一行一条列出实现与本 spec 不同的地方，理由在链接的出处。
+
+步骤 0（[调研 §6](../sessions/2026-10-27-asm-m4b-resume.md#6-给实现者的行为与测试建议)）：
+
+- 项目目录不存在时 Copy resume 可用，复制 `claude --resume <id>`（推测"只在当前项目里找"不成立，风险 1 关闭）（[§3](../sessions/2026-10-27-asm-m4b-resume.md#3-项目目录不在时怎么恢复)）
+- 只剩收藏副本时仍置灰，但原因改了：Claude Code 能按绝对路径加载副本，普通恢复会写回收藏目录（[§4](../sessions/2026-10-27-asm-m4b-resume.md#4-收藏副本可加载但普通恢复可能破坏快照)）
+- 跨项目查找要求 Claude Code ≥ 2.1.223；更早的版本不能套用（[§1](../sessions/2026-10-27-asm-m4b-resume.md#1-官方资料与本机版本)）
+
+core（[出处](../sessions/2026-10-27-asm-m4b-core.md#注意事项与自己的决定)）：
+
+- `HistoryPrompt` 定义在 `model.rs`，`claude::history` 重导出（core 规则：对外类型放 `model.rs`）
+- History 的标志是整个对话上的 `Conversation.history_only`，不是每个回合一个字段
+- History 对话的 `bytes`、`skipped_lines` 为 0；history 文件、项目或 session 不存在时返回空列表
+- 真实数据里没有匿名（无 `sessionId`）的 history 组，匿名分组只在 fixture 上验证（[出处](../sessions/2026-10-27-asm-m4b-core.md#遗留问题与交给协调者)）
+
+操作入口（[出处](../sessions/2026-10-27-asm-m4b-actions.md#2-自己的决定含与-spec-的差异)）：
+
+- 恢复命令里的路径一律加单引号（spec 原写"有空格或特殊字符时加"），PRD 第 1 节已改
+- id 不是纯 `[A-Za-z0-9-]` 时 `resume_command` 返回 `None`，Copy resume 置灰
+- 只剩收藏副本时的提示改为 "Only the favorite copy is left; restoring from a favorite is not supported here yet"，PRD 第 1 节已改
+- 导出失败不走 `StoreEvent::Failed`（它会把状态栏写成 index error），改成 `Exported { dest, result }`
+- 没有 ID 的 History session：只有复制 ID 的提示是 "This session has no ID"，其余置灰项仍是 "The transcript is gone"
+- 去掉 `HideSelectedProject`，View 菜单改派发 `HideProject { id: None }`
+- Metadata 的 Resume 行没有命令时用灰字写原因，不写 "—"
+- 右键菜单的 Favorite 项也画 ⌘D；Hide Project 用弯引号；项高 26px（画稿 22px），悬停色用主题色
+- 打开项目目录的图标用 `folder-open`（画稿是闭合的文件夹）
+- 风险 3 不成立：`PopupMenuItem::element` 支持 `disabled`，点击后照常关闭菜单；但它的外层没有 `min_w_0`，命令预览要给固定宽度才截得断（已写进 `gpui-kit-guide.md`）
+- `SessionRow` 删了 `resume`，另加了 `id_known`
+
+分段与其余界面（[出处](../sessions/2026-10-27-asm-m4b-extras.md#2-自己的决定含与-spec-的差异)）：
+
+- `text_runs(inline_code, hits) -> Vec<(Range, RunStyle)>`，渲染时转成 `with_highlights` 加字体覆盖，不自己拼 `TextRun`（字体和颜色要从父元素继承）
+- 折叠点落在代码块里时退到代码块之前；代码块就在开头时例外，折叠视图显示它的前几行（spec 原文"折到代码块结束前的那一行"有歧义）
+- fence 行（含 info string）不显示；代价是 fence 行上的命中看不到，但照算命中数
+- 行内代码的反引号留在文字里、用 `fade_out` 隐藏，当作灰底两边的留白（约 7px，画稿 3px）；行内代码字号与正文相同（画稿 11px）
+- 行内代码只认单个反引号、不跨行
+- `[`：视口顶行在某张卡中间时先回到这张卡的开头
+- History session 的顶栏也显示 `[ ]` 提示（画稿 5 没画）
+- History 的说明是顶栏下面固定的虚线框（画稿 5 的样子），不随列表滚动
+- autoplay 多一步 `metadata`，共 12 步；`history-session` 选第一个 prompt 数不少于 3 的 History 行
+- Files：没有斜杠开头的 `trackingPath` 也算项目里的文件，相对和绝对路径去重；"Show all · N files" 展开后变 "Show less"
+
+验收（[出处](../sessions/2026-10-27-asm-m4b-accept.md)）：
+
+- History session 不参与搜索（协调者决定，和 Python 脚本一致），PRD 第 5 节和验收标准 8 已改
+- 右键菜单的截图加在 `screenshot-clicks.sh` 末尾（第三次启动，21、22 两张），History 行用 Kind 收窄到 History 后的第一行
+- 界面导出没能在验收里点完：保存对话框触发了记在 Claude Code 名下的 iCloud Drive 访问授权，交给用户验证；导出内容与 `transcript-reader` 一致由同一个 `read_transcript` 代码路径、store 测试和 CLI 导出核对

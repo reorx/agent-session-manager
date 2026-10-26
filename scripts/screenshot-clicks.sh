@@ -2,7 +2,8 @@
 # Launch the app and drive it with real clicks (cliclick) to capture the interactive states:
 # dropdown open, kind filter, time range, project picked, preview mode, row selected, Metadata tab,
 # then the Custom range: Updated menu, picker shown, picker open, a picker shortcut applied,
-# then the Conversation tab's turn cards: Show steps, a tool row opened, a tick hovered and clicked.
+# then the Conversation tab's turn cards: Show steps, a tool row opened, a tick hovered and clicked,
+# then the row context menu: on a row that is not the selected one, and on a history-only row.
 # Runs on the real index (or $ASM_DB) with a throwaway view state (defaults on every run).
 # Usage: screenshot-clicks.sh <binary> <out-dir>. Coordinates are window-relative points.
 #
@@ -15,6 +16,9 @@
 # second time with only the selection preset to 5f6eea99 (the 70 MB session, unchanged since 09-14),
 # and every click lands in the detail panel. Without that session the second part is skipped; on
 # another machine pick a frozen session of your own and measure its card again.
+#
+# The context menus need a third launch with defaults (the top row selected, Kind "All"): the menu is
+# opened on the 3rd row, then Kind is narrowed to History so that a history-only row is the first one.
 set -euo pipefail
 
 BIN=$1
@@ -51,6 +55,7 @@ quit() { kill "$PID" 2>/dev/null; wait "$PID" 2>/dev/null || true; sleep 0.5; }
 # after the pointer jumps can land on nothing (the item only lights up)
 click() { local p="$((WX + $1)),$((WY + $2))"; cliclick "m:$p" w:200 "c:$p"; sleep 0.6; }
 hover() { cliclick "m:$((WX + $1)),$((WY + $2))"; sleep 0.6; }
+rclick() { local p="$((WX + $1)),$((WY + $2))"; cliclick "m:$p" w:300 "rc:$p"; sleep 0.8; }
 shot() { screencapture -x -o -l "$WID" "$OUT/$1.png"; }
 
 launch
@@ -65,7 +70,7 @@ click 54 49;   shot 6-project-menu          # open Project dropdown
 click 80 128;  shot 7-project-picked        # pick the 2nd project in the list
 click 1353 49; shot 8-preview-menu          # open Preview dropdown (right-anchored)
 click 1300 152; shot 9-preview-last-message # pick "Last message"
-click 300 227; shot 10-row-selected         # select the 4th table row
+click 300 155; shot 10-row-selected         # select the 2nd table row (the picked project may have only a few)
 click 903 132; shot 11-metadata-tab         # switch to Metadata tab
 
 # Custom range. The picker goes right of the Updated button and pushes Kind right, so these run last.
@@ -88,6 +93,17 @@ if grep -q "^detail: ${CARDS_SESSION:0:8} " "$OUT/app.log"; then
 else
   echo "session $CARDS_SESSION not opened: turn-card steps skipped"
 fi
+
+# Row context menus, see the header comment.
+quit
+launch
+click 700 14                                # title bar (activates the window)
+rclick 300 191; shot 21-row-menu            # right-click the 3rd row while the 1st stays selected: the menu is about the 3rd
+click 700 14                                # title bar: closes the menu
+click 383 49;  click 383 79                 # Kind: untick CLI (1st item); the menu closes after each pick
+click 383 49;  click 383 105                # untick SDK (2nd)
+click 383 49;  click 383 131                # untick BG (3rd): only history-only rows are left
+rclick 300 119; shot 22-history-row-menu    # right-click the 1st row: Favorite, Copy Resume, Reveal and Export disabled
 
 echo "screenshots written to $OUT"
 cat "$OUT/app.log"

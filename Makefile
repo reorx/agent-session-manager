@@ -51,7 +51,7 @@ fmt: ## Format all crates with rustfmt
 screenshot: build ## Wake the screen, launch the app and capture 3 window screenshots into $(SHOT_DIR)
 	scripts/screenshot.sh "$(BIN)" "$(SHOT_DIR)"
 
-screenshot-clicks: build ## Like screenshot, but drive dropdowns / tabs / rows / turn cards with real clicks (needs cliclick)
+screenshot-clicks: build ## Like screenshot, but drive dropdowns / tabs / rows / turn cards / row context menus with real clicks (needs cliclick)
 	scripts/screenshot-clicks.sh "$(BIN)" "$(SHOT_DIR)"
 
 screenshot-search: build ## Run the scripted search session (text, next hit, CJK, regex, Tools scope, sort, cleared) and capture 7 screenshots; types and clicks nothing
