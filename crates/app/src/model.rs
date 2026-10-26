@@ -104,6 +104,10 @@ pub struct SessionRow {
     pub permission_mode: SharedString,
     pub version: SharedString,
     pub top_tools: SharedString,
+    /// Files the session changed: the project's relative to it (sorted), then the others.
+    pub files_touched: Vec<SharedString>,
+    /// `12 files`, or a dash.
+    pub files_fmt: SharedString,
     pub subagents_fmt: SharedString,
     pub pr_url: SharedString,
     pub first_prompt_full: SharedString,
@@ -188,6 +192,32 @@ fn project_name(s: &SessionSummary) -> String {
     }
 }
 
+/// `files_touched` with the project's files relative to it, listed first. Claude Code records a
+/// file under the session's working directory relative to it already, and others absolute.
+fn files_touched(s: &SessionSummary) -> Vec<SharedString> {
+    let project = s.project_path.as_deref().or(s.cwd.as_deref()).map(|p| p.trim_end_matches('/')).filter(|p| !p.is_empty());
+    let (mut inside, mut outside): (Vec<&str>, Vec<&str>) = (Vec::new(), Vec::new());
+    for path in &s.files_touched {
+        match project.and_then(|p| path.strip_prefix(p)?.strip_prefix('/')) {
+            Some(rel) => inside.push(rel),
+            None if !path.starts_with('/') => inside.push(path),
+            None => outside.push(path),
+        }
+    }
+    // the others come sorted from the BTreeSet
+    inside.sort_unstable();
+    inside.dedup();
+    inside.into_iter().chain(outside).map(|p| SharedString::from(p.to_string())).collect()
+}
+
+fn files_fmt(n: usize) -> SharedString {
+    match n {
+        0 => NONE.into(),
+        1 => "1 file".into(),
+        n => format!("{n} files").into(),
+    }
+}
+
 fn top_tools(s: &SessionSummary) -> SharedString {
     let mut tools: Vec<(&String, &u32)> = s.tool_counts.iter().collect();
     tools.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
@@ -213,6 +243,7 @@ impl SessionRow {
     pub fn from_summary(s: &SessionSummary) -> SessionRow {
         let short_id = if s.id_known { s.id.chars().take(8).collect() } else { "(unknown)".to_string() };
         let context_pct = s.context_ratio().map(|r| r as f32);
+        let files = files_touched(s);
         SessionRow {
             favorite: s.favorite,
             favorite_path: if s.favorite { s.file_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default().into() } else { NONE.into() },
@@ -255,6 +286,8 @@ impl SessionRow {
             permission_mode: or_none(s.permission_mode.as_deref()),
             version: or_none(s.cc_version.as_deref()),
             top_tools: top_tools(s),
+            files_fmt: files_fmt(files.len()),
+            files_touched: files,
             subagents_fmt: s.subagent_count.to_string().into(),
             pr_url: or_none(s.pr_url.as_deref()),
             first_prompt_full: detail_text(Some(&s.first_prompt)),
@@ -831,6 +864,29 @@ pub mod tests {
 
 
 
+
+    #[test]
+    fn a_row_lists_the_files_it_touched_relative_to_the_project() {
+        let mut s = summary("s", "/Users/me/Code/alpha", 5000);
+        // Claude Code records a file under the working directory relative to it, others absolute
+        s.files_touched = ["/Users/me/Code/alpha/src/parse.rs", "README.md", "/Users/me/notes/todo.md", "/Users/me/Code/alphabet/x.rs", "crates/app/src/main.rs", "AGENTS.md"]
+            .map(String::from)
+            .into();
+        let r = SessionRow::from_summary(&s);
+        assert_eq!(r.files_fmt, "6 files");
+        assert_eq!(
+            r.files_touched,
+            ["AGENTS.md", "README.md", "crates/app/src/main.rs", "src/parse.rs", "/Users/me/Code/alphabet/x.rs", "/Users/me/notes/todo.md"],
+            "the project's files first, relative and sorted; then the others as they are"
+        );
+
+        s.files_touched = ["/Users/me/Code/alpha/a.rs", "a.rs"].map(String::from).into();
+        let r = SessionRow::from_summary(&s);
+        assert_eq!((r.files_fmt.as_ref(), r.files_touched.as_slice()), ("1 file", &["a.rs".into()][..]), "recorded both ways, one file");
+        s.files_touched.clear();
+        let r = SessionRow::from_summary(&s);
+        assert_eq!((r.files_fmt.as_ref(), r.files_touched.len()), ("—", 0), "no file changed: a dash");
+    }
 
     #[test]
     fn a_row_knows_its_transcript_unless_it_was_cleaned_up() {

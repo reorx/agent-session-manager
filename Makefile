@@ -57,7 +57,7 @@ screenshot-clicks: build ## Like screenshot, but drive dropdowns / tabs / rows /
 screenshot-search: build ## Run the scripted search session (text, next hit, CJK, regex, Tools scope, sort, cleared) and capture 7 screenshots; types and clicks nothing
 	scripts/screenshot-search.sh "$(BIN)" "$(SHOT_DIR)"
 
-screenshot-detail: build ## Tour the Conversation tab (turn cards, steps, search hits, special cards, the 70MB session) and capture up to 8 screenshots; types and clicks nothing
+screenshot-detail: build ## Tour the Conversation tab (turn cards, steps, search hits, special cards, the 70MB session, history prompts, a code block, ] twice, Metadata) and capture up to 12 screenshots; types and clicks nothing
 	scripts/screenshot-detail.sh "$(BIN)" "$(SHOT_DIR)"
 
 bin: ## Print the path of the debug binary

@@ -23,6 +23,8 @@ use crate::style::{self, FluentBuilder};
 use crate::AppRoot;
 
 pub const DETAIL_W: f32 = 580.;
+/// Files Metadata lists before `Show all · 12 files`.
+const FILES_SHOWN: usize = 10;
 /// Rows measured ahead of and behind the viewport, so a scroll does not pop rows in.
 const LIST_OVERDRAW: f32 = 400.;
 
@@ -32,10 +34,11 @@ pub enum DetailTab {
     Conversation,
 }
 
-/// Where the conversation of the selected session is.
+/// Where the conversation of the selected session is (its transcript, or for a history-only
+/// session its prompts in `history.jsonl`).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Load {
-    /// Nothing selected, or a session without a transcript.
+    /// Nothing selected.
     Idle,
     /// Asked the reader thread; skeleton cards until it answers.
     Loading,
@@ -69,6 +72,8 @@ pub struct DetailState {
     /// What the header buttons and the Resume line of the selected session offer, checked on
     /// disk when it was selected (`AppRoot::select_row`).
     pub actions: SessionActions,
+    /// Metadata lists every file the session changed, not only the first `FILES_SHOWN`.
+    pub(crate) files_open: bool,
 }
 
 impl Default for DetailState {
@@ -87,6 +92,7 @@ impl Default for DetailState {
             current_hit: None,
             reveal: Rc::default(),
             actions: SessionActions::default(),
+            files_open: false,
         }
     }
 }
@@ -119,6 +125,7 @@ impl DetailState {
         self.pointed = None;
         self.current_hit = None;
         self.reveal.set(false);
+        self.files_open = false;
     }
 
     /// Show a conversation, parked on its first search hit (or at the top without one).
@@ -232,6 +239,22 @@ impl DetailState {
         self.view.as_ref()?.hits.get(self.current_hit?)
     }
 
+    /// `]` / `[`: scroll the head of the next card (a turn or an AUTO card) to the top, or of the
+    /// previous one (of the card on top when it is scrolled into). Nothing moves past the first or
+    /// the last card, and nothing opens or closes.
+    pub fn step_turn(&mut self, forward: bool) {
+        let top = self.list.logical_scroll_top();
+        let mut heads = self.rows.iter().enumerate().filter(|(_, row)| matches!(row, Row::Head(_))).map(|(ix, _)| ix);
+        let target = if forward {
+            heads.find(|ix| *ix > top.item_ix)
+        } else {
+            heads.take_while(|ix| *ix < top.item_ix || (*ix == top.item_ix && top.offset_in_item > px(0.))).last()
+        };
+        if let Some(ix) = target {
+            self.list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
+        }
+    }
+
     /// Scroll a card's first row to the top.
     pub fn scroll_to_card(&mut self, card: usize) {
         if let Some(ix) = self.rows.iter().position(|row| row.card() == card) {
@@ -279,7 +302,8 @@ impl DetailState {
         turn.steps.get(step).is_some_and(|s| !matches!(s.body, StepBody::Text(_)))
     }
 
-    fn scroll_to(&mut self, row: Row) {
+    /// Scroll `row` to the top.
+    pub fn scroll_to(&mut self, row: Row) {
         if let Some(ix) = self.rows.iter().position(|r| *r == row) {
             self.list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
         }
@@ -405,7 +429,7 @@ impl AppRoot {
             .child(self.render_detail_header(&row, cx))
             .child(match self.detail.tab {
                 DetailTab::Metadata => self.render_metadata(&row, cx).into_any_element(),
-                DetailTab::Conversation => self.render_conversation(&row, cx).into_any_element(),
+                DetailTab::Conversation => self.render_conversation(cx).into_any_element(),
             })
             .into_any_element()
     }
@@ -557,12 +581,49 @@ impl AppRoot {
                     ))
                     .child(meta_pair("Models", mono_value(row.models.clone(), cx).into_any_element()))
                     .child(meta_pair("Top tools", mono_value(row.top_tools.clone(), cx).into_any_element()))
+                    .child(meta_pair("Files", mono_value(row.files_fmt.clone(), cx).into_any_element()))
+                    .children(self.render_files(row, cx))
                     .child(meta_pair("PR", mono_value(row.pr_url.clone(), cx).into_any_element()))
                     .child(meta_pair("Resume", self.resume_value(cx)))
                     .child(section("First prompt", row.first_prompt_full.clone()))
                     .child(section("Last prompt", row.last_prompt_full.clone()))
                     .child(section("Last message", row.last_message_full.clone())),
             )
+    }
+
+    /// Under `Files`: what the session changed, the first `FILES_SHOWN` until Show all.
+    fn render_files(&self, row: &SessionRow, cx: &mut Context<Self>) -> Option<Div> {
+        if row.files_touched.is_empty() {
+            return None;
+        }
+        let open = self.detail.files_open || row.files_touched.len() <= FILES_SHOWN;
+        let shown = if open { row.files_touched.len() } else { FILES_SHOWN };
+        let link = (row.files_touched.len() > FILES_SHOWN).then(|| {
+            div()
+                .id("files-toggle")
+                .mt(px(2.))
+                .text_size(px(11.))
+                .text_color(style::accent())
+                .cursor_default()
+                .hover(|el| el.text_decoration_1())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.detail.files_open = !this.detail.files_open;
+                    cx.notify();
+                }))
+                .child(if self.detail.files_open { "Show less".into() } else { format!("Show all · {}", row.files_fmt) })
+        });
+        // under the value column of `meta_pair` (label 64px + gap 8px)
+        Some(
+            v_flex()
+                .pl(px(72.))
+                .pb(px(4.))
+                .font_family(mono(cx))
+                .text_size(px(11.))
+                .line_height(px(16.))
+                .text_color(style::text_secondary())
+                .children(row.files_touched[..shown].iter().map(|file| div().truncate().child(file.clone())))
+                .children(link),
+        )
     }
 
     /// The command Copy resume copies, or why there is none.

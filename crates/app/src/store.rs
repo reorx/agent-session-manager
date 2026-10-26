@@ -115,8 +115,6 @@ impl Store {
 
     /// Like `read_conversation`, for a history-only session: its prompts in `history.jsonl`,
     /// one card each.
-    // TODO(M4b extras): `select_row` asks for this once History cards are drawn
-    #[allow(dead_code)]
     pub fn read_history(&self, session_id: String, project_key: String, matcher: Option<Matcher>) -> u64 {
         let seq = self.latest.fetch_add(1, Ordering::SeqCst) + 1;
         self.reads.send(ReadRequest::History { seq, session_id, project_key, matcher }).ok();

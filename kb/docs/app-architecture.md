@@ -115,7 +115,7 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 | `Export` | `Store::export(记录文件, 目标路径)` | core `read_transcript` 得到和 `transcript-reader` 逐字相同的 TXT，写到目标路径 | `Exported { dest, result }`：成功是跳过的坏行数，失败是说明。不走 `Failed`，那个事件会把状态栏改成索引出错 |
 
 - **新请求取代旧请求，做法照搬搜索，只对 `Conversation` / `History` 生效。** 它们共用一个 `seq`，发请求时加一。线程每次醒来先把队列里积压的请求取完，其中的导出按到达顺序全部执行，`Conversation` / `History` 只读最后一个；开始读之前和读完之后各看一次最新的 `seq`，过期就不发。所以快速换行时只有最后选中的那个 session 被读，界面收到的 `Conversation` 事件序号只增不减；界面仍要按 `seq` 和当前选中的 session 核对再用。导出没有 `seq`，换行再快也不会被丢掉（`store.rs` 的 `an_export_is_not_superseded_by_a_conversation_request`）
-- **`read_history` 还没有接到选中上**：现在选中 History session 仍不发请求，显示一句说明；接线和 History 卡片的样式是 M4b 下一个任务的事
+- **History session 走同一条路。** 选中它（`SessionRow.transcript_path` 为 `None`）时 `AppRoot::read_conversation` 发的是 `read_history`，返回同一种 `Conversation` 事件，取代、核对、搜索重读都一样。`ConversationView.history` 为 true，每张卡是 `prompt_only`：只有卡头（`TURN n`、时间、prompt），行表里一张卡就是一行 `Row::Head`，没有状态灯、刻度和卡尾；顶栏写 `N prompts from history.jsonl`，顶栏下面一块虚线框说明记录文件已被清理。搜索模式不读 history（和 Python 脚本一致），所以搜索时表格不会列出 History session，它的卡片在界面上碰不到命中标记；读取线程照样会标（`store.rs` 的测试）
 - **转换也在读取线程上做。** 卡片上的全部字符串（时间、用时、统计行、结果摘要、折叠位置）都在转换时算好，主线程只拿 `Arc<ConversationView>` 生成行表（`conversation::rows`）和绘制。记录文件读完就在读取线程上释放，内存里只留截断后的文本。release 下 70MB 的 `5f6eea99` 读取约 18ms、转换 0.2ms；465 次工具调用的 `4e5802b6` 读取 21ms、转换 1.1ms
 - **`ConversationView.pattern` 记着读取时用的 `Matcher::pattern()`**（带大小写标记）。搜索词变了要重读才能重新标记（详情里没有全文的缓存）；pattern 相同就不必重读
 - **读不了文件不会带走线程。** 文件被删、没有权限时，事件里是 `Err(说明)`，下一个请求照常处理
@@ -124,7 +124,7 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 
 | 时机 | 做什么 |
 |---|---|
-| 选中换了 session | 详情清空成骨架（`DetailState::begin_loading`，上一个 session 的内容不留在屏幕上），带当前搜索的 `Matcher` 发请求，记下返回的 `seq` 和这次请求的 pattern。没有记录文件的 history session 不发请求，直接显示说明 |
+| 选中换了 session | 详情清空成骨架（`DetailState::begin_loading`，上一个 session 的内容不留在屏幕上，Metadata 的文件列表也收起），带当前搜索的 `Matcher` 发请求（有记录文件的 `read_conversation`，History session 的 `read_history`），记下返回的 `seq` 和这次请求的 pattern |
 | 收到 `Conversation` | `seq` 等于最新一次请求、`session_id` 是当前选中的才用。屏幕上已经有这个 session 的对话（为新搜索重读）就保留展开状态，否则全部折叠；都停在第一个命中位置，没有搜索时回到顶部 |
 | 搜索重跑（`run_search`） | 新 `Matcher::pattern()` 和最近一次请求的 pattern 不同才重读；过滤变化、扫描后整表重读引起的重搜 pattern 不变，不读文件（`keyboard_tests.rs` 有测试）。重读期间旧内容留在屏幕上 |
 | 读取失败 | 对话区显示事件里的说明 |
@@ -210,6 +210,8 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 | 导出 TXT 的保存对话框关闭（保存或取消） | 表格 |
 
 新增会拿走焦点的界面（弹出层、对话框）时，关闭后要把焦点还给表格或搜索框。
+
+单键快捷键都绑在表格的上下文（`"DataTable"`）上，搜索框里打字不受影响：`n` / `shift-n` 在命中之间跳，`[` / `]` 在卡片之间跳。`[` / `]` 只在详情面板显示、且停在 Conversation tab 时起作用（`AppRoot::step_turn`）：把下一张卡（回合或 AUTO，不含 compact 分隔线）的卡头滚到顶端，`[` 先回到当前卡的开头；到第一张或最后一张不动，不改变展开状态（`DetailState::step_turn`，`keyboard_tests.rs` 的 `brackets_*` 两个测试）。
 
 ## 视图状态的保存
 

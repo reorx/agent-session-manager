@@ -2,7 +2,9 @@
 # Launch the app with ASM_DETAIL_AUTOPLAY and capture its window after every step of the scripted
 # tour of the Conversation tab: the busiest session, its longest turn opened, a tool step opened,
 # Expand all, a regex search with a hit in a tool output, the next hit, a session with special
-# cards (ASM_AUTOPLAY_SPECIAL; skipped without it) and the 70MB session scrolled to its end.
+# cards (ASM_AUTOPLAY_SPECIAL; skipped without it), the 70MB session scrolled to its end, a
+# history-only session's prompt cards, a reply with a code block, `]` pressed twice and the
+# Metadata tab.
 # The app drives itself and the window is captured by id, so nothing is typed or clicked.
 # Uses ASM_DB / ASM_STATE like the app (point ASM_DB into tmp/ to leave the real index alone);
 # the view state is always a throwaway one. Usage: screenshot-detail.sh <binary> <out-dir>.
@@ -16,7 +18,7 @@ OUT=$2
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
 WINID="$ROOT/tmp/winid"
-STEPS=(conversation steps-open step-open expand-all search-hit next-hit special big-session)
+STEPS=(conversation steps-open step-open expand-all search-hit next-hit special big-session history-session code-block next-turn metadata)
 
 mkdir -p "$OUT" "$ROOT/tmp"
 if [ ! -x "$WINID" ] || [ "$HERE/winid.swift" -nt "$WINID" ]; then

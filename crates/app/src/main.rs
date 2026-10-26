@@ -63,6 +63,8 @@ gpui_kit::actions!(
         ToggleCase,
         NextHit,
         PrevHit,
+        NextTurn,
+        PrevTurn,
         Preview1,
         Preview2,
         Preview3,
@@ -453,23 +455,22 @@ impl AppRoot {
     }
 
     /// A session was selected: nothing of the last one stays in the detail panel while the
-    /// reader thread reads its transcript. A history-only session has none to read.
+    /// reader thread reads its transcript, or the prompts of a history-only session.
     fn open_conversation(&mut self, row: &SessionRow) {
-        if row.transcript_path.is_none() {
-            self.detail.clear();
-            self.detail_timing = None;
-            return;
-        }
         self.detail.begin_loading();
         self.detail_timing = Some(DetailTiming { short_id: row.short_id.clone(), started: Instant::now(), loaded: None });
         self.read_conversation(row);
     }
 
-    /// Ask the reader thread for `row`'s conversation, marked for the current search.
+    /// Ask the reader thread for `row`'s conversation, marked for the current search: its
+    /// transcript, or once Claude Code cleaned that up, its prompts in `history.jsonl`.
     pub(crate) fn read_conversation(&mut self, row: &SessionRow) {
-        let Some(path) = row.transcript_path.clone() else { return };
         self.conversation_pattern = self.matcher.as_ref().map(|m| m.pattern().to_string());
-        self.conversation_seq = self.store.read_conversation(row.id.to_string(), path, row.project_path.to_string(), self.matcher.clone());
+        let (id, matcher) = (row.id.to_string(), self.matcher.clone());
+        self.conversation_seq = match row.transcript_path.clone() {
+            Some(path) => self.store.read_conversation(id, path, row.project_path.to_string(), matcher),
+            None => self.store.read_history(id, row.project_key.to_string(), matcher),
+        };
     }
 
     /// The selected session's conversation arrived. Read again for another search, it keeps
@@ -665,10 +666,13 @@ impl AppRoot {
     /// with compactions, AUTO cards, interruptions; the step is skipped without it) steer it;
     /// `ASM_AUTOPLAY_STEP` picks what `step-open` opens instead of a failed tool call:
     /// `cut-output` (a tool output core cut, shown whole; also `ASM_AUTOPLAY_CUT_OUTPUT=1`),
-    /// `thinking`, or `mcp` (an MCP tool call).
+    /// `thinking`, or `mcp` (an MCP tool call). After the 70MB session: a history-only session's
+    /// prompt cards, a reply with a code block (in `ASM_AUTOPLAY_SESSION`'s session again),
+    /// `]` pressed twice from the top, and that session's Metadata (the files it changed).
     fn detail_autoplay(&self, window: &Window, cx: &mut Context<Self>) -> Task<()> {
         let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
         let session = var("ASM_AUTOPLAY_SESSION");
+        let code_session = session.clone();
         let regex = var("ASM_AUTOPLAY_REGEX").unwrap_or_else(|| "cargo (test|build)".into());
         let special = var("ASM_AUTOPLAY_SPECIAL");
         // false: nothing to do, the step is skipped
@@ -718,6 +722,23 @@ impl AppRoot {
                     this.autoplay_select(Some("5f6eea99"), cx)
                 }),
             ),
+            ("history-session", Box::new(|this, _, cx| this.autoplay_select_history(cx))),
+            ("code-block", Box::new(move |this, _, cx| this.autoplay_select(code_session.as_deref(), cx))),
+            (
+                "next-turn",
+                Box::new(|this, window, cx| {
+                    // through the key binding's action, from the table that has the focus
+                    this.detail.list.scroll_to(ListOffset::default());
+                    window.dispatch_action(Box::new(NextTurn), cx);
+                    window.dispatch_action(Box::new(NextTurn), cx);
+                    this.status = "autoplay: ] twice from the top".into();
+                    true
+                }),
+            ),
+            ("metadata", Box::new(|this, _, cx| {
+                this.set_detail_tab(DetailTab::Metadata, cx);
+                true
+            })),
         ];
         cx.spawn_in(window, async move |this, cx| {
             // sessions are picked from the table: let the start-up scan fill it first
@@ -753,6 +774,7 @@ impl AppRoot {
                         "special" => this.autoplay_scroll_to_special(),
                         // every turn is there, however long the session: show its very end
                         "big-session" => this.detail.list.scroll_to_end(),
+                        "code-block" => this.autoplay_show_a_code_block(),
                         _ => {}
                     }
                     cx.notify();
@@ -823,6 +845,38 @@ impl AppRoot {
         self.table.update(cx, |table, cx| table.scroll_to_row(target, cx));
         self.select_row(target, cx);
         true
+    }
+
+    /// Select the first listed history-only session with three prompts or more (else the first
+    /// one), scrolled into view.
+    fn autoplay_select_history(&mut self, cx: &mut Context<Self>) -> bool {
+        let delegate = self.table.read(cx).delegate();
+        let history = || (0..delegate.ix.len()).filter(|ix| delegate.row(*ix).kind == Kind::History);
+        let Some(target) = history().find(|ix| delegate.row(*ix).prompts >= 3).or_else(|| history().next()) else { return false };
+        self.table.update(cx, |table, cx| table.scroll_to_row(target, cx));
+        self.select_row(target, cx);
+        true
+    }
+
+    /// Show the reply with a code block nearest its start: unfolded, its card's tail at the top.
+    fn autoplay_show_a_code_block(&mut self) {
+        use crate::conversation::{Row, Segment, Tail};
+        let Some(view) = self.detail.view.clone() else { return };
+        let replies = view.cards.iter().enumerate().filter_map(|(ix, card)| {
+            let Card::Turn(turn) = card else { return None };
+            let Tail::Reply { text, .. } = &turn.tail else { return None };
+            let code = text.segments.iter().find_map(|s| if let Segment::Code { range } = s { Some(range.start) } else { None })?;
+            Some((ix, text.fold.is_some(), text.text[..code].lines().count()))
+        });
+        let Some((card, folded, _)) = replies.min_by_key(|(_, _, lines)| *lines) else {
+            self.status = "autoplay: no reply with a code block in this session".into();
+            return;
+        };
+        if folded && !self.detail.unfolded.contains(&(card, agent_session_core::model::Part::Reply)) {
+            self.detail.toggle_fold(card, agent_session_core::model::Part::Reply);
+        }
+        self.detail.scroll_to(Row::Tail(card));
+        self.status = format!("autoplay: the reply of card {card}, with a code block").into();
     }
 
     /// Open the turn with the most steps and scroll to it.
@@ -970,6 +1024,8 @@ impl Render for AppRoot {
             .on_action(cx.listener(|this, _: &ToggleCase, _, cx| this.toggle_case(cx)))
             .on_action(cx.listener(|this, _: &NextHit, _, cx| this.step_hit(true, cx)))
             .on_action(cx.listener(|this, _: &PrevHit, _, cx| this.step_hit(false, cx)))
+            .on_action(cx.listener(|this, _: &NextTurn, _, cx| this.step_turn(true, cx)))
+            .on_action(cx.listener(|this, _: &PrevTurn, _, cx| this.step_turn(false, cx)))
             .on_action(cx.listener(|this, _: &Preview1, _, cx| this.set_mode(DisplayMode::Title, cx)))
             .on_action(cx.listener(|this, _: &Preview2, _, cx| this.set_mode(DisplayMode::FirstPrompt, cx)))
             .on_action(cx.listener(|this, _: &Preview3, _, cx| this.set_mode(DisplayMode::LastPrompt, cx)))
@@ -1049,6 +1105,8 @@ fn bind_keys(cx: &mut App) {
         // plain keys only while the table has the focus, never while typing in the search box
         KeyBinding::new("n", NextHit, Some("DataTable")),
         KeyBinding::new("shift-n", PrevHit, Some("DataTable")),
+        KeyBinding::new("]", NextTurn, Some("DataTable")),
+        KeyBinding::new("[", PrevTurn, Some("DataTable")),
         // in the search box cmd-c copies text as usual
         KeyBinding::new("cmd-c", CopySessionId { id: None }, Some("DataTable")),
         KeyBinding::new("cmd-shift-c", CopyResume { id: None }, Some("DataTable")),

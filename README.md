@@ -84,7 +84,7 @@ All common commands are in the `Makefile`. `make` or `make help` lists them.
 | `make parity` | Diff `asm` against `~/Code/scripts/claude_session_search.py` on the real `~/.claude` |
 | `make screenshot` | Wake the screen, launch the app and save three window screenshots to `tmp/<date>-screenshots/` (override with `SHOT_DIR=…`) |
 | `make screenshot-search` | Run the scripted search session (`ASM_SEARCH_AUTOPLAY=1`) and save seven screenshots; types and clicks nothing |
-| `make screenshot-detail` | Tour the Conversation tab (`ASM_DETAIL_AUTOPLAY=1`: turn cards, steps, a search hit in a tool output, special cards, the biggest session) and save up to eight screenshots; types and clicks nothing |
+| `make screenshot-detail` | Tour the Conversation tab (`ASM_DETAIL_AUTOPLAY=1`: turn cards, steps, a search hit in a tool output, special cards, the biggest session, a history-only session, a code block, `]` twice, Metadata) and save up to twelve screenshots; types and clicks nothing |
 | `make bin` | Print the debug binary path |
 | `make clean` | Remove only this project's artifacts |
 

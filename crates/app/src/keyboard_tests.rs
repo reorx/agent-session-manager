@@ -493,3 +493,74 @@ fn copying_the_resume_command_of_a_history_session_copies_nothing(cx: &mut TestA
     press(cx, &h, "cmd-c");
     assert_eq!(clipboard(cx).as_deref(), Some(S4), "its id can still be copied");
 }
+
+/// The row at the top of the conversation list.
+fn top_row(app: &AppRoot, _: &App) -> Option<crate::conversation::Row> {
+    app.detail.rows.get(app.detail.list.logical_scroll_top().item_ix).copied()
+}
+
+fn conversation_shown(app: &AppRoot, _: &App) -> bool {
+    app.detail.load == crate::detail::Load::Ready && app.detail.has_conversation()
+}
+
+#[gpui_kit::test]
+fn brackets_jump_between_turns_and_stop_at_the_ends(cx: &mut TestAppContext) {
+    use crate::conversation::Row::Head;
+    let h = launch(cx);
+    select(cx, &h, S1);
+    wait_until(cx, &h, "the conversation of S1", conversation_shown);
+    // a short session fits the window, and the list pulls a scroll past its end back: a small one
+    cx.simulate_window_resize(h.window, gpui_kit::size(gpui_kit::px(1000.), gpui_kit::px(300.)));
+    h.app.update(cx, |app, _| app.detail.toggle_turn(1));
+    let open = h.app.read_with(cx, |app, _| app.detail.open_turns.clone());
+    assert_eq!(h.app.read_with(cx, top_row), Some(Head(0)));
+
+    for expected in [Head(1), Head(2), Head(3), Head(3)] {
+        press(cx, &h, "]");
+        assert_eq!(h.app.read_with(cx, top_row), Some(expected));
+    }
+    for expected in [Head(2), Head(1), Head(0), Head(0)] {
+        press(cx, &h, "[");
+        assert_eq!(h.app.read_with(cx, top_row), Some(expected), "and back, to the first card");
+    }
+    h.app.read_with(cx, |app, _| assert_eq!(app.detail.open_turns, open, "jumping opens and closes nothing"));
+}
+
+#[gpui_kit::test]
+fn brackets_do_nothing_on_the_metadata_tab(cx: &mut TestAppContext) {
+    use crate::conversation::Row::Head;
+    use crate::detail::DetailTab;
+    let h = launch(cx);
+    select(cx, &h, S1);
+    wait_until(cx, &h, "the conversation of S1", conversation_shown);
+    cx.simulate_window_resize(h.window, gpui_kit::size(gpui_kit::px(1000.), gpui_kit::px(300.)));
+    h.app.update(cx, |app, cx| app.set_detail_tab(DetailTab::Metadata, cx));
+    press(cx, &h, "]");
+    press(cx, &h, "]");
+    h.app.read_with(cx, |app, cx| {
+        assert!(app.detail.tab == DetailTab::Metadata);
+        assert_eq!(top_row(app, cx), Some(Head(0)), "the hidden conversation stays where it was");
+    });
+    h.app.update(cx, |app, cx| app.set_detail_tab(DetailTab::Conversation, cx));
+    press(cx, &h, "]");
+    assert_eq!(h.app.read_with(cx, top_row), Some(Head(1)), "back on Conversation the keys work");
+}
+
+#[gpui_kit::test]
+fn a_history_session_shows_its_prompts_as_cards(cx: &mut TestAppContext) {
+    use crate::conversation::{Card, Row};
+    let h = launch(cx);
+    select(cx, &h, S4);
+    wait_until(cx, &h, "the prompts of S4", conversation_shown);
+    h.app.read_with(cx, |app, _| {
+        let view = app.detail.view.as_ref().unwrap();
+        assert!(view.history);
+        assert_eq!(view.summary, "4 prompts from history.jsonl");
+        assert!(matches!(&view.cards[1], Card::Turn(t) if t.prompt_only && t.prompt.text.contains("line1\nline2\nline3")), "pasted text restored");
+        assert_eq!(app.detail.rows, [Row::Head(0), Row::Head(1), Row::Head(2), Row::Head(3)]);
+    });
+    // (a search never lists a history-only session: search mode reads transcripts only)
+    cx.simulate_window_resize(h.window, gpui_kit::size(gpui_kit::px(1000.), gpui_kit::px(300.)));
+    press(cx, &h, "]");
+    assert_eq!(h.app.read_with(cx, top_row), Some(Row::Head(1)), "] steps from prompt to prompt");
+}

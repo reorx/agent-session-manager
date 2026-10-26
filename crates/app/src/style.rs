@@ -165,6 +165,15 @@ pub fn tick_thinking() -> Hsla {
 pub fn compact_rule() -> Hsla {
     hex(0xd6d6db)
 }
+/// A fenced code block in a prompt, process text or reply (mockup 2's `.block`), framed in
+/// `hairline`.
+pub fn code_block_bg() -> Hsla {
+    hex(0xf7f7f9)
+}
+/// Under inline code (mockup 2's `.ic`).
+pub fn inline_code_bg() -> Hsla {
+    hex(0xededf0)
+}
 
 // Search (not in the mockup): hits are marked like a text marker, the hit the detail panel is
 // parked on gets the stronger one; toggled toolbar buttons carry the accent. Hit badges and the

@@ -138,7 +138,7 @@ Root
 
 **窗口刚打开时没有焦点，此时任何快捷键和菜单项都到不了 `AppRoot`。** 动作从有焦点的元素沿祖先向上分发，没有焦点就只到窗口的根。`AppRoot` 创建时把焦点给了表格；规则在 [运行时架构](app-architecture.md) 的"键盘焦点"一节。
 
-**单键快捷键要限定上下文。** 组件各有自己的 key context（表格是 `"DataTable"`，输入框是 `"Input"`），绑定时把它作为第三个参数，快捷键就只在该组件有焦点时生效。`n` / `shift-n` 绑在表格的上下文上，所以在搜索框里打字不会被吞掉。带修饰键的快捷键不受打字影响，可以绑成全局。
+**单键快捷键要限定上下文。** 组件各有自己的 key context（表格是 `"DataTable"`，输入框是 `"Input"`），绑定时把它作为第三个参数，快捷键就只在该组件有焦点时生效。`n` / `shift-n`、`[` / `]` 绑在表格的上下文上，所以在搜索框里打字不会被吞掉。带修饰键的快捷键不受打字影响，可以绑成全局。
 
 ## 命中高亮
 
@@ -148,6 +148,21 @@ Root
 - 区间要按起点升序、互不重叠。源码按顺序累加各段长度，不排序也不合并
 - 高亮样式（背景色、前景色）和其他色值一样集中在 `style.rs`
 - 放在会截断的单元格里时，截断发生在右侧，排在后面的高亮可能被裁掉。表格的片段因此让首个命中尽量靠前
+
+## 行内代码和代码块
+
+prompt、过程文字和回复按段显示（`conversation::segments`）：围栏代码块一段，其余是正文，正文里记着行内代码的区间。区间都是原文的字节区间，命中不用换算，渲染时按段切开（`turn_cards.rs` 的 `marked`）。工具的输入输出、thinking、compact 摘要不分段。
+
+**行内代码和命中画在同一段 `StyledText` 里，用 `with_highlights` 加 `with_font_family_overrides`，不用 `with_runs`。** M4b spec 设想的是自己拼 `Vec<TextRun>`，但 `TextRun` 要给出完整的字体和颜色，而这些是从父元素继承的（prompt 是 medium 字重，AUTO 卡是灰字，回复是正文色），自己拼就要把每处的样式抄一遍。`with_highlights` 在布局时按继承来的样式算 run，只覆盖给出的那几项；`with_font_family_overrides` 换字体族，两者可以一起用（`gpui-pre-0.3.5/src/elements/text.rs`）。
+
+- **字体覆盖只对整个落在覆盖区间里的 run 生效**（`apply_font_family_overrides`）。run 的边界来自高亮区间，所以高亮必须在行内代码的每个边界上都切开，否则跨边界的那一段命中不会换成等宽字。`conversation::text_runs` 把行内代码、反引号、命中的边界合在一起切，每一段标上是不是代码、是不是反引号、是不是命中（测试含中文，切点都在字符边界上）
+- **命中盖在行内代码上面**：命中那段用命中的高亮（黄 / 橙底），字体仍是等宽；不是命中的代码段用灰底（`style::inline_code_bg`）
+- **高亮的颜色是叠加的，不是替换**：`TextStyle::highlight` 里 `color = 原色.blend(新色)`，所以给透明色等于什么都没改。要把字藏起来用 `fade_out: Some(1.)`（把 alpha 乘到 0）。反引号就是这样藏的：它们留在文字里（区间不变），不画出来，正好当灰底左右的留白
+- 字号不能按 run 换（`TextRun` 没有字号），行内代码和正文同一个字号，只换字体和底色；画稿里的 11px 和 3px 内边距做不到
+
+**代码块**是一个单独的框（`turn_cards.rs::code_block`）：`.whitespace_nowrap()` 让文字不按宽度折行（`TextLayout` 只在 `WhiteSpace::Normal` 时给折行宽度，换行符照常分行），`.overflow_hidden()` 加 `.min_w_0()` 把超宽的部分裁掉；框里的命中照常用 `with_highlights`。
+
+**分段后命中的停靠标记**（`reveal_marker`）要两份布局：命中所在那段的 `TextLayout`（算命中的位置），和第一段的（算整段文字的顶端）。只看命中那段的顶端，命中排在一个长代码块后面时就会以为它离顶端很近而不滚动。
 
 ## 不定高的长列表：`list` 与 `ListState`
 
@@ -202,6 +217,7 @@ edition 2024 下，`fn f(cx: &App) -> impl IntoElement` 的返回值会捕获 `c
 | 定时器 | 防抖这类定时器走测试时钟，用 `cx.executor().advance_clock(..)` 推进 |
 | 剪贴板 | 测试平台有自己的剪贴板：应用里 `cx.write_to_clipboard(..)` 写进去，测试里 `cx.read_from_clipboard()` 读出来，不碰系统剪贴板 |
 | 保存 / 打开对话框 | `cx.simulate_new_path_selection(..)` / `simulate_path_prompt_response(..)` 回答；测试平台的 `reveal_path` 是 `unimplemented!()`，测试里不要走到它 |
+| 测滚动位置 | 测试窗口照常布局和绘制，`list` 会把滚过头的位置拉回来：fixture 的对话很短，整个放得下时 `scroll_to` 到第二张卡，下一帧就回到顶端。先 `cx.simulate_window_resize(window, size(..))` 把窗口压矮（`brackets_*` 用 300px 高） |
 
 这类测试能证明按键到动作到状态的整条路径，证明不了系统把物理按键交给 GPUI 的那一段，也不看像素。
 
@@ -219,7 +235,7 @@ use core::prelude::v1::test;
 
 下拉菜单这类弹出层目前没有找到程序化打开的办法，只能用 cliclick 真点击。点击坐标是相对窗口的固定值，任何让控件移位的布局改动都要重新校对；工具栏按钮的位置取决于左边按钮的标签长度（选了项目、出现日期选择器都会把右边的按钮推开）。脚本启动的窗口不在前台，第一次点击只会激活窗口；GPUI 按上一帧的悬停状态判定点中了什么，指针瞬移过去立刻点击可能落空。所以 `screenshot-clicks.sh` 先点一下标题栏，每次点击前先把指针移过去停 200ms。详情面板的标题限制为单行也是这个原因：两行标题会把下面的 tab 和对话顶栏推下去 25px。
 
-**不要用固定的 `sleep` 等界面就绪。** 新编译的二进制首次启动要几秒才出窗口，等不够就截到空窗口或上一帧的画面；`set -euo pipefail` 下这类失败经常没有任何输出，看起来就像脚本正常跑完了。做法是让 app 在每一步稳定后打一行标记（`autoplay-search: <step>`），脚本轮询窗口 id 和日志里的标记，超时就报错并指向 app 日志。`screenshot-search.sh` 是这个写法的参考；`screenshot-detail.sh`（`ASM_DETAIL_AUTOPLAY`，详情面板的 8 步）同样写法，没有可做的步骤打 `autoplay-detail: <step> skipped`，脚本跳过不截。
+**不要用固定的 `sleep` 等界面就绪。** 新编译的二进制首次启动要几秒才出窗口，等不够就截到空窗口或上一帧的画面；`set -euo pipefail` 下这类失败经常没有任何输出，看起来就像脚本正常跑完了。做法是让 app 在每一步稳定后打一行标记（`autoplay-search: <step>`），脚本轮询窗口 id 和日志里的标记，超时就报错并指向 app 日志。`screenshot-search.sh` 是这个写法的参考；`screenshot-detail.sh`（`ASM_DETAIL_AUTOPLAY`，详情面板的 12 步）同样写法，没有可做的步骤打 `autoplay-detail: <step> skipped`，脚本跳过不截。
 
 **脚本里"挑一个最有代表性的"要从当前可见的行里算，不要从全量数据里算。** 真实数据的分布很不均匀，按 session 数挑"最忙的项目"会稳定挑中某个工具批量产生的 history session，截出来的图说明不了任何功能。autoplay 选项目就是从过滤后的索引向量里取的。
 

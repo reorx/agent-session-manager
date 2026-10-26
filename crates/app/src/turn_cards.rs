@@ -4,7 +4,9 @@
 //! look like one card while the list lays out only the rows on screen.
 //!
 //! Every string comes pre-formatted in `ConversationView`; what is open, folded or hovered is
-//! `DetailState`'s. Sizes and colors follow the M4 mockups 1–4.
+//! `DetailState`'s. Sizes and colors follow the M4 mockups 1–5.
+
+use std::ops::Range;
 
 use agent_session_core::model::{HitPlace, Part};
 use gpui_kit::component::scroll::ScrollableElement;
@@ -12,9 +14,8 @@ use gpui_kit::component::skeleton::Skeleton;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::*;
 
-use crate::conversation::{Card, CompactCard, Folded, InputKind, Row, Status, StepBody, StepView, Tail, TickKind, TurnCard};
-use crate::detail::Load;
-use crate::model::SessionRow;
+use crate::conversation::{Card, CompactCard, Folded, InputKind, Row, RunStyle, Segment, Status, StepBody, StepView, Tail, TickKind, TurnCard, text_runs};
+use crate::detail::{DetailTab, Load};
 use crate::style::{self, FluentBuilder};
 use crate::AppRoot;
 
@@ -30,7 +31,7 @@ const STEP_ROW_H: f32 = 22.;
 const TOOL_NAME_W: f32 = 56.;
 const TOOL_NAME_MAX_W: f32 = 168.;
 
-const HISTORY_NOTE: &str = "The transcript was cleaned up by Claude Code; only the prompts kept in history.jsonl remain (see Metadata).";
+const HISTORY_NOTE: &str = "Claude Code cleaned up this session's transcript. Only its prompts in history.jsonl are left: no replies, tool calls or cost.";
 
 /// Ids of elements inside rows: unique per card and step, whatever row the list puts them in.
 fn element_id(name: &'static str, card: usize, ix: usize) -> ElementId {
@@ -52,6 +53,90 @@ fn part_ix(part: Part) -> usize {
 fn folded_text(text: &Folded, open: bool, marks: HighlightStyle) -> StyledText {
     let (shown, hits) = if open { (&text.text, &text.hits) } else { (&text.short, &text.short_hits) };
     StyledText::new(shown.clone()).with_highlights(hits.iter().map(|r| (r.clone(), marks)))
+}
+
+/// Segments that are the whole text, as it is: nothing to cut.
+fn is_plain(segments: &[Segment], len: usize) -> bool {
+    match segments {
+        [] => true,
+        [Segment::Text { range, inline_code }] => range.len() == len && inline_code.is_empty(),
+        _ => false,
+    }
+}
+
+/// A stretch of `text_runs`: a hit is marked (over inline code's gray), inline code is gray and
+/// its backticks are not drawn. Every stretch of inline code also gets the mono font, through
+/// the font overrides of its `StyledText`.
+fn run_highlight(run: RunStyle, marks: HighlightStyle) -> HighlightStyle {
+    if run.hit {
+        return marks;
+    }
+    // a highlight's color is blended over the text's, so a transparent one changes nothing:
+    // fading out all the way hides the backtick
+    HighlightStyle { background_color: Some(style::inline_code_bg()), fade_out: run.backtick.then_some(1.), ..Default::default() }
+}
+
+/// A fenced code block (mockup 2's `.block`): mono on light gray in a thin frame; lines never
+/// wrap, what is too wide is cut off. `after` / `before`: text comes before / after it.
+fn code_block(text: StyledText, after: bool, before: bool, cx: &App) -> Div {
+    div()
+        .when(after, |el| el.mt(px(6.)))
+        .when(before, |el| el.mb(px(6.)))
+        .min_w_0()
+        .overflow_hidden()
+        .px(px(8.))
+        .py(px(6.))
+        .bg(style::code_block_bg())
+        .border_1()
+        .border_color(style::hairline())
+        .rounded(px(4.))
+        .font_family(style::mono(cx))
+        .font_weight(FontWeight::NORMAL)
+        .text_size(px(11.))
+        .line_height(px(15.))
+        .text_color(style::asst_text())
+        .whitespace_nowrap()
+        .child(text)
+}
+
+/// `[` `]` jump between turns, in key caps (mockup 2's `.kbd`).
+fn turn_keys_hint(cx: &App) -> Div {
+    let key = |glyph: &'static str| {
+        div()
+            .min_w(px(14.))
+            .px(px(3.))
+            .flex()
+            .justify_center()
+            .border_1()
+            .border_b_2()
+            .border_color(style::control_border())
+            .rounded(px(3.))
+            .bg(style::white())
+            .font_family(style::mono(cx))
+            .text_size(px(9.5))
+            .line_height(px(12.))
+            .text_color(style::head_fg())
+            .child(glyph)
+    };
+    h_flex().flex_none().items_center().gap(px(3.)).text_color(style::muted()).child(key("[")).child(key("]")).child(div().ml(px(1.)).child("jump between turns"))
+}
+
+/// Above the cards of a history-only session (mockup 5's `.note`): where its replies went.
+fn history_note() -> Div {
+    div().flex_none().bg(style::conversation_bg()).px(px(CARD_X)).pt(px(8.)).child(
+        div()
+            .px(px(10.))
+            .py(px(7.))
+            .bg(style::head_bg())
+            .border_1()
+            .border_dashed()
+            .border_color(style::control_border())
+            .rounded(px(CARD_RADIUS))
+            .text_size(px(11.))
+            .line_height(px(15.))
+            .text_color(style::head_fg())
+            .child(HISTORY_NOTE),
+    )
 }
 
 /// A row's slice of a card: the sides always, the top edge on the head, the bottom one on the tail.
@@ -134,26 +219,27 @@ fn skeleton() -> Div {
 }
 
 impl AppRoot {
-    pub(crate) fn render_conversation(&self, row: &SessionRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let body = if row.transcript_path.is_none() {
-            conversation_note(HISTORY_NOTE.into(), style::muted_light()).into_any_element()
-        } else {
-            match (&self.detail.load, &self.detail.view) {
-                (Load::Failed(message), _) => conversation_note(message.clone(), style::error_text()).into_any_element(),
-                (Load::Ready, Some(view)) if view.cards.is_empty() => conversation_note("No messages in this session".into(), style::muted_light()).into_any_element(),
-                (Load::Ready, Some(_)) => self.render_list(cx).into_any_element(),
-                _ => skeleton().into_any_element(),
-            }
+    /// The bar, the cards; for a history-only session (`3 prompts from history.jsonl`) a note
+    /// between them says where its replies went.
+    pub(crate) fn render_conversation(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let body = match (&self.detail.load, &self.detail.view) {
+            (Load::Failed(message), _) => conversation_note(message.clone(), style::error_text()).into_any_element(),
+            (Load::Ready, Some(view)) if view.cards.is_empty() => conversation_note("No messages in this session".into(), style::muted_light()).into_any_element(),
+            (Load::Ready, Some(_)) => self.render_list(cx).into_any_element(),
+            _ => skeleton().into_any_element(),
         };
-        let bar = row.transcript_path.is_some().then(|| self.render_conversation_bar(cx));
-        v_flex().flex_1().min_h_0().children(bar).child(body)
+        let note = self.detail.view.as_ref().is_some_and(|v| v.history).then(history_note);
+        v_flex().flex_1().min_h_0().child(self.render_conversation_bar(cx)).children(note).child(body)
     }
 
-    /// `9 turns · 214 tool calls`, `▲ 3 / 9 hits ▼`, Expand all.
+    /// `9 turns · 214 tool calls`, the `[ ]` hint or `▲ 3 / 9 hits ▼`, Expand all.
     fn render_conversation_bar(&self, cx: &mut Context<Self>) -> Div {
         let view = self.detail.view.as_ref();
         let has_steps = view.is_some_and(|v| v.cards.iter().any(|c| matches!(c, Card::Turn(t) if !t.steps.is_empty())));
         let all_open = self.detail.all_open();
+        let hit_position = self.detail.hit_position();
+        // a search's hit navigation takes the place of the hint
+        let hint = hit_position.is_none() && view.is_some_and(|v| v.cards.iter().any(|c| matches!(c, Card::Turn(_))));
         h_flex()
             .flex_none()
             .h(px(28.))
@@ -166,8 +252,9 @@ impl AppRoot {
             .text_size(px(11.))
             .text_color(style::text_secondary())
             .child(div().font_family(style::mono(cx)).child(view.map(|v| v.summary.clone()).unwrap_or_default()))
+            .when(hint, |el| el.child(turn_keys_hint(cx)))
             .child(div().flex_1())
-            .children(self.detail.hit_position().map(|(at, of)| self.render_hit_nav(at, of, cx)))
+            .children(hit_position.map(|(at, of)| self.render_hit_nav(at, of, cx)))
             .when(has_steps, |el| {
                 el.child(
                     div()
@@ -217,6 +304,14 @@ impl AppRoot {
         cx.notify();
     }
 
+    /// `[` / `]`: only while the Conversation tab is on screen.
+    pub fn step_turn(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if self.detail_visible && self.detail.tab == DetailTab::Conversation {
+            self.detail.step_turn(forward);
+            cx.notify();
+        }
+    }
+
     fn render_list(&self, cx: &mut Context<Self>) -> Div {
         let view = cx.entity();
         // `list` calls back with `&mut App`: rows are rendered through the entity
@@ -259,17 +354,54 @@ impl AppRoot {
         self.detail.current_place() == Some(&HitPlace { item: card, part })
     }
 
-    /// A folded text of `part`, its hits marked.
-    fn marked(&self, text: &Folded, open: bool, card: usize, part: Part) -> Div {
-        let first_hit = if open { text.hits.first() } else { text.short_hits.first() };
-        self.revealing(folded_text(text, open, self.marks(card, part)), first_hit.map(|hit| hit.start), self.is_current(card, part))
+    /// A folded text of `part`, its hits marked. A prompt, process text or reply shows in
+    /// segments: code blocks in a box, inline code in mono on gray.
+    fn marked(&self, text: &Folded, open: bool, card: usize, part: Part, cx: &App) -> Div {
+        let (shown, hits, segments) = if open { (&text.text, &text.hits, &text.segments) } else { (&text.short, &text.short_hits, &text.short_segments) };
+        let (marks, current) = (self.marks(card, part), self.is_current(card, part));
+        if is_plain(segments, shown.len()) {
+            return self.revealing(folded_text(text, open, marks), hits.first().map(|hit| hit.start), current);
+        }
+        let mono = style::mono(cx);
+        let mut pieces = Vec::with_capacity(segments.len());
+        // the first piece's layout is where the text starts; the hit's, where in it the hit is
+        let mut layouts: Option<(TextLayout, Option<(TextLayout, usize)>)> = None;
+        for (ix, segment) in segments.iter().enumerate() {
+            let range = match segment {
+                Segment::Text { range, .. } | Segment::Code { range } => range.clone(),
+            };
+            let piece_hits: Vec<Range<usize>> =
+                hits.iter().filter(|h| h.start < range.end && h.end > range.start).map(|h| h.start.max(range.start) - range.start..h.end.min(range.end) - range.start).collect();
+            let piece = SharedString::from(shown[range.clone()].to_string());
+            let styled = match segment {
+                Segment::Text { inline_code, .. } => {
+                    let code: Vec<Range<usize>> = inline_code.iter().map(|r| r.start - range.start..r.end - range.start).collect();
+                    let runs = text_runs(&code, &piece_hits);
+                    StyledText::new(piece).with_highlights(runs.into_iter().map(|(r, run)| (r, run_highlight(run, marks)))).with_font_family_overrides(code.into_iter().map(|r| (r, mono.clone())))
+                }
+                Segment::Code { .. } => StyledText::new(piece).with_highlights(piece_hits.iter().map(|r| (r.clone(), marks))),
+            };
+            let (_, hit) = layouts.get_or_insert_with(|| (styled.layout().clone(), None));
+            if hit.is_none() && let Some(first) = piece_hits.first() {
+                *hit = Some((styled.layout().clone(), first.start));
+            }
+            pieces.push(match segment {
+                Segment::Text { .. } => div().child(styled),
+                Segment::Code { .. } => code_block(styled, ix > 0, ix + 1 < segments.len(), cx),
+            });
+        }
+        let marker = match layouts {
+            Some((top, Some((layout, at)))) if current && self.detail.reveal.get() => Some(reveal_marker(self.detail.reveal.clone(), top, layout, at)),
+            _ => None,
+        };
+        v_flex().relative().children(pieces).children(marker)
     }
 
     /// `text` in a block. Parking scrolls to the top of the row with the hit, which a long
     /// prompt or output can leave far below; so while a park is still to be shown, a block of
     /// the current hit place gets a marker that asks the list to bring the hit near the top.
     fn revealing(&self, text: StyledText, first_hit: Option<usize>, current: bool) -> Div {
-        let marker = first_hit.filter(|_| current && self.detail.reveal.get()).map(|at| reveal_marker(self.detail.reveal.clone(), text.layout().clone(), at));
+        let marker = first_hit.filter(|_| current && self.detail.reveal.get()).map(|at| reveal_marker(self.detail.reveal.clone(), text.layout().clone(), text.layout().clone(), at));
         div().relative().child(text).children(marker)
     }
 
@@ -314,7 +446,7 @@ impl AppRoot {
                         .text_size(px(12.))
                         .line_height(px(16.))
                         .map(|el| if t.auto { el.text_color(style::text_secondary()) } else { el.font_weight(FontWeight::MEDIUM) })
-                        .child(self.marked(&t.prompt, prompt_open, c, Part::Prompt)),
+                        .child(self.marked(&t.prompt, prompt_open, c, Part::Prompt, cx)),
                 )
             })
             .children(cut_note(&t.prompt, prompt_open))
@@ -334,8 +466,10 @@ impl AppRoot {
                         .child(label.clone())
                 })))
             });
+        // a prompt kept in history.jsonl is the whole card (mockup 5)
+        let only = t.prompt_only;
         row_frame(true).child(
-            card_slice(true, false)
+            card_slice(true, only)
                 .child(
                     h_flex()
                         .items_start()
@@ -344,13 +478,12 @@ impl AppRoot {
                         .pr(px(12.))
                         .py(px(7.))
                         .bg(bg)
-                        .border_b_1()
-                        .border_color(border)
                         .rounded_t(px(CARD_RADIUS - 1.))
+                        .map(|el| if only { el.rounded_b(px(CARD_RADIUS - 1.)) } else { el.border_b_1().border_color(border) })
                         .child(label_column(Some(t.label.clone()), t.time.clone(), label_fg, time_fg, cx))
                         .child(prompt),
                 )
-                .child(self.render_status(c, t, cx)),
+                .when(!only, |el| el.child(self.render_status(c, t, cx))),
         )
     }
 
@@ -506,7 +639,7 @@ impl AppRoot {
                     v_flex()
                         .flex_1()
                         .min_w_0()
-                        .child(div().text_size(px(11.5)).line_height(px(15.)).text_color(style::text_secondary()).child(self.marked(text, open, c, Part::Step(s))))
+                        .child(div().text_size(px(11.5)).line_height(px(15.)).text_color(style::text_secondary()).child(self.marked(text, open, c, Part::Step(s), cx)))
                         .children(cut_note(text, open))
                         .children(self.fold_link(text, c, Part::Step(s), cx)),
                 ),
@@ -600,7 +733,7 @@ impl AppRoot {
                     .children(output.as_ref().filter(|out| !out.text.is_empty()).map(|out| {
                         v_flex()
                             .child(caption("output"))
-                            .child(code_box(cx).text_color(if step.error { style::error_text() } else { style::asst_text() }).child(self.marked(out, output_open, c, Part::Step(s))).children(cut_note(out, output_open)))
+                            .child(code_box(cx).text_color(if step.error { style::error_text() } else { style::asst_text() }).child(self.marked(out, output_open, c, Part::Step(s), cx)).children(cut_note(out, output_open)))
                             .when(out.fold.is_some(), |el| {
                                 el.child(
                                     div()
@@ -621,7 +754,7 @@ impl AppRoot {
             }
             StepBody::Thinking(text) | StepBody::Text(text) => {
                 v_flex()
-                    .child(div().text_size(px(11.)).line_height(px(15.)).italic().text_color(style::head_fg()).child(self.marked(text, true, c, Part::Step(s))))
+                    .child(div().text_size(px(11.)).line_height(px(15.)).italic().text_color(style::head_fg()).child(self.marked(text, true, c, Part::Step(s), cx)))
                     .children(cut_note(text, true))
             }
         };
@@ -654,7 +787,7 @@ impl AppRoot {
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .child(div().text_size(px(12.)).line_height(px(16.)).text_color(style::asst_text()).child(self.marked(text, open, c, Part::Reply)))
+                            .child(div().text_size(px(12.)).line_height(px(16.)).text_color(style::asst_text()).child(self.marked(text, open, c, Part::Reply, cx)))
                             .children(cut_note(text, open))
                             .children(self.fold_link(text, c, Part::Reply, cx)),
                     ),
@@ -761,7 +894,7 @@ impl AppRoot {
                         .text_size(px(11.))
                         .line_height(px(15.))
                         .text_color(style::text_secondary())
-                        .child(self.marked(summary, true, c, Part::Summary))
+                        .child(self.marked(summary, true, c, Part::Summary, cx))
                         .children(cut_note(summary, true))
                 }))
             })
@@ -778,7 +911,9 @@ const LIST_CHROME_H: f32 = 300.;
 
 /// Zero-size marker after a text holding the current hit: on the first prepaint after a park
 /// (the text before it is laid out by then) it asks the list to scroll the hit near the top.
-fn reveal_marker(pending: std::rc::Rc<std::cell::Cell<bool>>, layout: TextLayout, at: usize) -> impl IntoElement {
+/// `top` is the layout of the text's first piece (where the text starts), `layout` that of the
+/// piece with the hit, `at` the hit's place in it; a text shown whole is one piece.
+fn reveal_marker(pending: std::rc::Rc<std::cell::Cell<bool>>, top: TextLayout, layout: TextLayout, at: usize) -> impl IntoElement {
     canvas(
         move |_, window, _| {
             if !pending.replace(false) {
@@ -786,7 +921,7 @@ fn reveal_marker(pending: std::rc::Rc<std::cell::Cell<bool>>, layout: TextLayout
             }
             let Some(hit) = layout.position_for_index(at) else { return };
             let line = layout.line_height();
-            if hit.y - layout.bounds().top() < px(REVEAL_BELOW) {
+            if hit.y - top.bounds().top() < px(REVEAL_BELOW) {
                 return;
             }
             // as tall as the list, so the list puts the hit near its top whichever way it scrolls

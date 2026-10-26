@@ -46,6 +46,8 @@ pub struct ConversationView {
     pub pattern: Option<String>,
     /// Transcript size at read time.
     pub bytes: u64,
+    /// The prompts of a history-only session (`history.jsonl`): prompt-only cards, no replies.
+    pub history: bool,
 }
 
 #[derive(Debug)]
@@ -94,6 +96,9 @@ pub struct TurnCard {
     pub hits: usize,
     /// `2 hits`; empty without hits.
     pub hits_fmt: SharedString,
+    /// A prompt kept in `history.jsonl`: the card is its head (title and prompt), with no
+    /// status line, ticks or tail.
+    pub prompt_only: bool,
 }
 
 #[derive(Debug)]
@@ -129,6 +134,11 @@ pub struct Folded {
     /// `cut · showing 3,000 of 14,212 chars`, shown at the end of the whole text when core kept
     /// only part of it; empty when nothing was cut.
     pub cut: SharedString,
+    /// Code blocks and inline code of `text` (`segments`) for a prompt, process text or reply;
+    /// empty for a text shown as it is (tool output, thinking, compaction summary, API error).
+    pub segments: Vec<Segment>,
+    /// The same for `short`.
+    pub short_segments: Vec<Segment>,
 }
 
 impl Folded {
@@ -136,8 +146,158 @@ impl Folded {
         // blank lines at the end would show as empty space under the text or above its link
         let short = fold.map(|at| SharedString::from(trim_end_keeping(&text[..at], &hits).to_string()));
         let text: SharedString = trim_end_keeping(text, &hits).to_string().into();
-        Folded { short: short.unwrap_or_else(|| text.clone()), short_hits: hits.clone(), text, hits, fold, more, cut }
+        Folded { short: short.unwrap_or_else(|| text.clone()), short_hits: hits.clone(), text, hits, fold, more, cut, segments: Vec::new(), short_segments: Vec::new() }
     }
+
+    /// Cut into segments: code blocks get a box, inline code a mono font on gray.
+    fn segmented(mut self) -> Folded {
+        self.segments = segments(&self.text);
+        self.short_segments = if self.short == self.text { self.segments.clone() } else { segments(&self.short) };
+        self
+    }
+}
+
+/// A stretch of a prompt, process text or reply. Ranges are byte ranges of the text, so search
+/// hits need no conversion; rendering cuts the text by segment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Segment {
+    /// Plain text; `inline_code` holds each `` `…` `` with its backticks, in order.
+    Text { range: Range<usize>, inline_code: Vec<Range<usize>> },
+    /// What a fenced block holds, without the fence lines; a fence never closed runs to the end.
+    Code { range: Range<usize> },
+}
+
+/// A fenced code block: the whole of it, fence lines included, and the code between them.
+struct Fence {
+    block: Range<usize>,
+    code: Range<usize>,
+}
+
+/// The fenced code blocks of `text`: a line of three or more backticks (indented or not, then
+/// an info string without backticks) opens one, a line of at least as many backticks and
+/// nothing else closes it.
+fn fences(text: &str) -> Vec<Fence> {
+    let mut found = Vec::new();
+    // (block start, code start, backticks of the opening fence)
+    let mut open: Option<(usize, usize, usize)> = None;
+    let mut pos = 0;
+    for line in text.split_inclusive('\n') {
+        let start = pos;
+        pos += line.len();
+        let content = line.trim_end_matches(['\n', '\r']);
+        let body = content.trim_start();
+        let ticks = body.len() - body.trim_start_matches('`').len();
+        let rest = &body[ticks..];
+        match open {
+            None if ticks >= 3 && !rest.contains('`') => open = Some((start, pos, ticks)),
+            Some((block_start, code_start, n)) if ticks >= n && rest.trim().is_empty() => {
+                found.push(Fence { block: block_start..start + content.len(), code: code_start..code_start + without_line_break(&text[code_start..start]).len() });
+                open = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some((block_start, code_start, _)) = open {
+        found.push(Fence { block: block_start..text.len(), code: code_start..code_start + without_line_break(&text[code_start..]).len() });
+    }
+    found
+}
+
+/// `text` without the line break it ends with.
+fn without_line_break(text: &str) -> &str {
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    text.strip_suffix('\r').unwrap_or(text)
+}
+
+/// `text` cut into plain text and code blocks, in order. The line breaks and blank lines next to
+/// a block are its edges, not text; empty stretches are left out, so an empty text has none.
+pub fn segments(text: &str) -> Vec<Segment> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    for fence in fences(text) {
+        push_text(&mut out, text, pos..fence.block.start);
+        out.push(Segment::Code { range: fence.code });
+        pos = fence.block.end;
+    }
+    push_text(&mut out, text, pos..text.len());
+    out
+}
+
+fn push_text(out: &mut Vec<Segment>, text: &str, range: Range<usize>) {
+    let piece = &text[range.clone()];
+    let mut start = range.start;
+    if range.start > 0 {
+        // after a block: from the first line with something on it
+        let lead = piece.len() - piece.trim_start().len();
+        start += piece[..lead].rfind('\n').map_or(0, |at| at + 1);
+    }
+    let end = if range.end < text.len() { range.start + piece.trim_end().len() } else { range.end };
+    if start < end {
+        out.push(Segment::Text { inline_code: inline_code(text, start..end), range: start..end });
+    }
+}
+
+/// `` `code` `` spans in `range`: a single backtick to the next one on the same line. Runs of
+/// two or more backticks open nothing.
+fn inline_code(text: &str, range: Range<usize>) -> Vec<Range<usize>> {
+    let mut found = Vec::new();
+    let mut line_start = range.start;
+    for line in text[range].split_inclusive('\n') {
+        let bytes = line.as_bytes();
+        let mut open = None;
+        let mut ix = 0;
+        while ix < bytes.len() {
+            if bytes[ix] != b'`' {
+                ix += 1;
+                continue;
+            }
+            let run = bytes[ix..].iter().take_while(|b| **b == b'`').count();
+            if run == 1 {
+                match open.take() {
+                    Some(start) => found.push(line_start + start..line_start + ix + 1),
+                    None => open = Some(ix),
+                }
+            }
+            ix += run;
+        }
+        line_start += line.len();
+    }
+    found
+}
+
+/// How a stretch of plain text is drawn: inline code (mono on gray), one of the backticks around
+/// it (kept so ranges stay those of the text, but not drawn: they pad the gray), a search hit
+/// (marked; over inline code the mark replaces the gray).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunStyle {
+    pub code: bool,
+    pub backtick: bool,
+    pub hit: bool,
+}
+
+/// A text segment cut wherever inline code, its backticks or a hit starts or ends, with the
+/// style of each stretch; stretches drawn plain are left out. Ranges are sorted, do not
+/// overlap and fall on the boundaries of the given ranges (char boundaries, all of them).
+pub fn text_runs(inline_code: &[Range<usize>], hits: &[Range<usize>]) -> Vec<(Range<usize>, RunStyle)> {
+    let mut cuts: Vec<usize> = inline_code.iter().flat_map(|r| [r.start, r.start + 1, r.end - 1, r.end]).chain(hits.iter().flat_map(|r| [r.start, r.end])).collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut runs: Vec<(Range<usize>, RunStyle)> = Vec::new();
+    for pair in cuts.windows(2) {
+        let (start, end) = (pair[0], pair[1]);
+        let code = inline_code.iter().find(|r| r.start <= start && end <= r.end);
+        let style = RunStyle {
+            code: code.is_some(),
+            backtick: code.is_some_and(|r| start == r.start || end == r.end),
+            hit: hits.iter().any(|r| r.start <= start && end <= r.end),
+        };
+        match runs.last_mut() {
+            _ if style == RunStyle::default() => {}
+            Some((last, last_style)) if last.end == start && *last_style == style && !style.backtick => last.end = end,
+            _ => runs.push((start..end, style)),
+        }
+    }
+    runs
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -274,12 +434,13 @@ pub fn build(conv: &Conversation, project_path: &str, today: NaiveDate) -> Conve
             let time = time_label(ts, day);
             day = date_of(ts).unwrap_or(day);
             match item {
+                ConvItem::Turn(t) if conv.history_only => Card::Turn(prompt_card(t, time, hits)),
                 ConvItem::Turn(t) => Card::Turn(turn_card(t, time, day, hits, &paths)),
                 ConvItem::Compact(c) => Card::Compact(compact_card(c, time, hits)),
             }
         })
         .collect();
-    ConversationView { summary: summary(conv).into(), cards, hits, pattern: None, bytes: conv.bytes }
+    ConversationView { summary: summary(conv).into(), cards, hits, pattern: None, bytes: conv.bytes, history: conv.history_only }
 }
 
 /// The row table: every card's rows in order, open turns with their steps between head and tail.
@@ -301,6 +462,7 @@ pub fn card_rows(ix: usize, card: &Card, open: bool) -> Vec<Row> {
 fn push_rows(rows: &mut Vec<Row>, ix: usize, card: &Card, open: bool) {
     match card {
         Card::Compact(_) => rows.push(Row::Compact(ix)),
+        Card::Turn(turn) if turn.prompt_only => rows.push(Row::Head(ix)),
         Card::Turn(turn) => {
             rows.push(Row::Head(ix));
             if open {
@@ -326,13 +488,34 @@ pub fn row_of(rows: &[Row], place: &HitPlace) -> Option<usize> {
 /// Where `text` folds to show at most `max_lines` source lines and `max_chars` characters;
 /// `None` when it fits, or when a hit lies past the fold (the text then opens by itself).
 pub fn fold(text: &str, hits: &[Range<usize>], max_lines: usize, max_chars: usize) -> Option<usize> {
+    unless_a_hit_is_past(fold_point(text, max_lines, max_chars)?, hits)
+}
+
+/// `fold` for a text with code blocks, whose fence lines count like any other: a fold inside a
+/// block moves back to before it, so the folded view never shows part of a block. A block that
+/// opens the text is the exception: moving back would show nothing, so the folded view shows
+/// its first lines (as a block).
+pub fn fold_code(text: &str, hits: &[Range<usize>], max_lines: usize, max_chars: usize) -> Option<usize> {
+    let mut at = fold_point(text, max_lines, max_chars)?;
+    if let Some(fence) = fences(text).into_iter().find(|f| f.block.start < at && at < f.block.end)
+        && !text[..fence.block.start].trim().is_empty()
+    {
+        at = fence.block.start;
+    }
+    unless_a_hit_is_past(at, hits)
+}
+
+fn fold_point(text: &str, max_lines: usize, max_chars: usize) -> Option<usize> {
     let more_after = |at: &usize| !text[*at..].trim().is_empty();
     let by_lines = text.match_indices('\n').nth(max_lines.saturating_sub(1)).map(|(at, _)| at).filter(more_after);
     let by_chars = text.char_indices().nth(max_chars).map(|(at, _)| at).filter(more_after);
-    let at = match (by_lines, by_chars) {
-        (Some(a), Some(b)) => a.min(b),
-        (a, b) => a.or(b)?,
-    };
+    match (by_lines, by_chars) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+fn unless_a_hit_is_past(at: usize, hits: &[Range<usize>]) -> Option<usize> {
     (!hits.iter().any(|hit| hit.end > at)).then_some(at)
 }
 
@@ -380,6 +563,9 @@ fn elide_middle(path: &str, max: usize) -> String {
 }
 
 fn summary(conv: &Conversation) -> String {
+    if conv.history_only {
+        return format!("{} from history.jsonl", count(conv.items.len(), "prompt", "prompts"));
+    }
     let (mut turns, mut autos, mut tools) = (0, 0, 0);
     for item in &conv.items {
         let ConvItem::Turn(t) = item else { continue };
@@ -431,8 +617,36 @@ fn turn_card(t: &Turn, time: SharedString, day: NaiveDate, hits: usize, paths: &
         steps,
         tail,
         hits,
-        hits_fmt: if hits == 0 { SharedString::default() } else { count(hits, "hit", "hits").into() },
+        hits_fmt: hits_fmt(hits),
+        prompt_only: false,
     }
+}
+
+/// A prompt kept in `history.jsonl`: title and prompt, nothing else.
+fn prompt_card(t: &Turn, time: SharedString, hits: usize) -> TurnCard {
+    TurnCard {
+        label: t.number.map_or_else(|| "AUTO".to_string(), |n| format!("TURN {n}")).into(),
+        auto: t.number.is_none(),
+        origin: SharedString::default(),
+        time,
+        status: Status::Off,
+        meta: SharedString::default(),
+        errors: SharedString::default(),
+        end_note: SharedString::default(),
+        prompt: folded(&t.prompt, PROMPT_LINES),
+        attachments: Vec::new(),
+        ticks: Vec::new(),
+        stats: SharedString::default(),
+        steps: Vec::new(),
+        tail: Tail::Empty,
+        hits,
+        hits_fmt: hits_fmt(hits),
+        prompt_only: true,
+    }
+}
+
+fn hits_fmt(hits: usize) -> SharedString {
+    if hits == 0 { SharedString::default() } else { count(hits, "hit", "hits").into() }
 }
 
 /// A task notification is a block of tags around one readable sentence: it folds to its
@@ -445,7 +659,7 @@ fn notification_gist(t: &Turn) -> Option<Folded> {
     let m = &t.prompt;
     let summary = tag_text(&m.text, "summary")?;
     if m.hits.iter().any(|hit| hit.start < summary.start || hit.end > summary.end) {
-        return Some(Folded::new(&m.text, m.hits.clone(), None, SharedString::default(), cut_note(m)));
+        return Some(Folded::new(&m.text, m.hits.clone(), None, SharedString::default(), cut_note(m)).segmented());
     }
     let mut gist = m.text[summary.clone()].to_string();
     let status = tag_text(&m.text, "status").map(|r| &m.text[r]);
@@ -462,7 +676,10 @@ fn notification_gist(t: &Turn) -> Option<Folded> {
         short: gist.into(),
         short_hits: m.hits.iter().map(|hit| hit.start - summary.start..hit.end - summary.start).collect(),
         cut: cut_note(m),
-    })
+        segments: Vec::new(),
+        short_segments: Vec::new(),
+    }
+    .segmented())
 }
 
 /// Byte range of what `<tag>…</tag>` holds, spaces trimmed; `None` without the tag or text in it.
@@ -631,11 +848,11 @@ fn output_folded(r: &ToolResult) -> Folded {
     Folded::new(&m.text, m.hits.clone(), fold, more.into(), cut_note(m))
 }
 
-/// A prompt, reply or process text folded at `max_lines`.
+/// A prompt, reply or process text folded at `max_lines`, cut into segments.
 fn folded(m: &Marked, max_lines: usize) -> Folded {
-    let fold = fold(&m.text, &m.hits, max_lines, FOLD_CHARS);
+    let fold = fold_code(&m.text, &m.hits, max_lines, FOLD_CHARS);
     let more = show_all(fold, trim_end_keeping(&m.text, &m.hits).lines().count(), m.kept, max_lines, kept_of(m).as_deref());
-    Folded::new(&m.text, m.hits.clone(), fold, more, cut_note(m))
+    Folded::new(&m.text, m.hits.clone(), fold, more, cut_note(m)).segmented()
 }
 
 fn plain_folded(text: &str, max_lines: usize) -> Folded {
@@ -1303,6 +1520,157 @@ pub mod tests {
         };
         let view = view_of(vec![ConvItem::Turn(pasted)]);
         assert_eq!(turn_card(&view, 0).attachments, ["image · 1.2 MB", "document · 860 KB"]);
+    }
+
+    /// What each segment shows, and whether it is a code block.
+    fn shown<'a>(text: &'a str, segments: &[Segment]) -> Vec<(&'a str, bool)> {
+        segments
+            .iter()
+            .map(|s| match s {
+                Segment::Text { range, .. } => (&text[range.clone()], false),
+                Segment::Code { range } => (&text[range.clone()], true),
+            })
+            .collect()
+    }
+
+    fn inline_code<'a>(text: &'a str, segments: &[Segment]) -> Vec<&'a str> {
+        segments.iter().flat_map(|s| match s {
+            Segment::Text { inline_code, .. } => inline_code.iter().map(|r| &text[r.clone()]).collect(),
+            Segment::Code { .. } => Vec::new(),
+        }).collect()
+    }
+
+    #[test]
+    fn fenced_code_becomes_a_code_segment_and_an_unclosed_fence_runs_to_the_end() {
+        let reply = "预设现在是：\n\n```rust\npub enum RangePreset {\n    Today,\n}\n```\n\n已修。";
+        assert_eq!(
+            shown(reply, &segments(reply)),
+            [("预设现在是：", false), ("pub enum RangePreset {\n    Today,\n}", true), ("已修。", false)],
+            "the fences and the blank lines around the block are its edges, not text"
+        );
+        let open = "看这个：\n```\nfn a() {}\nfn b() {}";
+        assert_eq!(shown(open, &segments(open)), [("看这个：", false), ("fn a() {}\nfn b() {}", true)], "never closed: code to the end");
+
+        let listed = "1. step\n   ```\n   cargo test\n   ```\n2. done";
+        assert_eq!(shown(listed, &segments(listed)), [("1. step", false), ("   cargo test", true), ("2. done", false)], "indented fences count");
+        let nested = "````\n```\ninner\n```\n````";
+        assert_eq!(shown(nested, &segments(nested)), [("```\ninner\n```", true)], "a closing fence has at least as many backticks");
+        let empty = "```\n```\nafter";
+        assert_eq!(shown(empty, &segments(empty)), [("", true), ("after", false)]);
+
+        let not_fences = "a ```b``` c\n```x```\nend";
+        assert_eq!(segments(not_fences), [Segment::Text { range: 0..not_fences.len(), inline_code: Vec::new() }], "backticks in a line, or after a fence's backticks, open nothing");
+        assert_eq!(segments("plain\ntext"), [Segment::Text { range: 0..10, inline_code: Vec::new() }], "a text without code is one segment, all of it");
+        assert_eq!(segments(""), []);
+    }
+
+    #[test]
+    fn inline_code_is_found_in_text_segments_only() {
+        let source = "改 `fmt_usd`，再跑 `make parity`：\n```\nlet a = `not inline`;\n```\n`human_size` 也换掉；`` 不算，`跨\n行` 也不算";
+        let segs = segments(source);
+        assert_eq!(shown(source, &segs).iter().map(|s| s.1).collect::<Vec<_>>(), [false, true, false]);
+        assert_eq!(inline_code(source, &segs), ["`fmt_usd`", "`make parity`", "`human_size`"], "with their backticks; none in the block, none across lines, `` opens nothing");
+
+        let view = view_of(vec![ConvItem::Turn(Turn { reply: Some(Reply { ts: None, text: text("用 `asm cost` 看") }), ..turn(Some(1), None, "跑 `make test`", vec![says("先看 `parse.rs`")]) })]);
+        let card = turn_card(&view, 0);
+        let Tail::Reply { text: reply, .. } = &card.tail else { panic!("expected a reply") };
+        assert_eq!(inline_code(&reply.text, &reply.segments), ["`asm cost`"]);
+        assert_eq!(inline_code(&card.prompt.text, &card.prompt.segments), ["`make test`"]);
+        let StepBody::Text(said) = &card.steps[0].body else { panic!("expected process text") };
+        assert_eq!(inline_code(&said.text, &said.segments), ["`parse.rs`"]);
+
+        let output = tool("Bash", "x", Some(("```\nnot a block\n```", false)));
+        let view = view_of(vec![ConvItem::Turn(turn(Some(1), None, "go", vec![output, thinks("`plain`")]))]);
+        let card = turn_card(&view, 0);
+        assert!(matches!(&card.steps[0].body, StepBody::Tool { output: Some(out), .. } if out.segments.is_empty()), "tool output is shown as it is");
+        assert!(matches!(&card.steps[1].body, StepBody::Thinking(t) if t.segments.is_empty()), "and so is a thinking");
+    }
+
+    #[test]
+    fn folding_counts_lines_across_segments_and_does_not_cut_inside_a_code_block() {
+        let reply = |t: &str| {
+            let view = view_of(vec![ConvItem::Turn(Turn { reply: Some(Reply { ts: None, text: text(t) }), ..turn(Some(1), None, "p", vec![]) })]);
+            let Card::Turn(card) = view.cards.into_iter().next().unwrap() else { panic!("expected a turn") };
+            let Tail::Reply { text, .. } = card.tail else { panic!("expected a reply") };
+            text
+        };
+
+        // the fence lines count: the 6th line ends inside the block
+        let cut = reply("a\nb\n```\nc1\nc2\nc3\nc4\n```\nafter");
+        assert_eq!(cut.short, "a\nb", "the fold moves back to before the block");
+        assert_eq!(shown(&cut.short, &cut.short_segments), [("a\nb", false)]);
+        assert_eq!(cut.more, "Show all · 9 lines");
+        assert_eq!(shown(&cut.text, &cut.segments), [("a\nb", false), ("c1\nc2\nc3\nc4", true), ("after", false)], "opened, it shows whole");
+
+        let after = reply("```\nx\n```\nl1\nl2\nl3\nl4\nl5");
+        assert_eq!(shown(&after.short, &after.short_segments), [("x", true), ("l1\nl2\nl3", false)], "a block before the fold is shown whole, its lines counted");
+
+        let hit = view_of(vec![ConvItem::Turn(Turn { reply: Some(Reply { ts: None, text: marked("a\nb\n```\nc1\nc2\nc3\nc4\n```\nafter", "c1") }), ..turn(Some(1), None, "p", vec![]) })]);
+        assert!(matches!(&turn_card(&hit, 0).tail, Tail::Reply { text, .. } if text.fold.is_none()), "a hit in the block is past the moved fold: shown whole");
+
+        // nothing before the block to fold to: the folded view shows its first lines, as a block
+        let pasted = view_of(vec![ConvItem::Turn(turn(Some(1), None, "```\n1\n2\n3\n4\n5\n```\nwhy does this fail?", vec![]))]);
+        let prompt = &turn_card(&pasted, 0).prompt;
+        assert_eq!(shown(&prompt.short, &prompt.short_segments), [("1\n2\n3", true)]);
+        assert_eq!(prompt.more, "Show all · 8 lines");
+
+        let wide = format!("intro\n```\n{}\n```", "x".repeat(2000));
+        assert_eq!(fold_code(&wide, &[], REPLY_LINES, FOLD_CHARS), Some("intro\n".len()), "a fold by characters moves back too, to the fence line");
+        assert_eq!(fold(&wide, &[], REPLY_LINES, FOLD_CHARS).map(|at| at > 5), Some(true), "plain texts fold where they are");
+    }
+
+    #[test]
+    fn inline_code_and_hits_combine_into_runs_with_the_hit_on_top() {
+        let text = "把 `fmt_usd` 换成 `human_size`，见 api_usage";
+        let Segment::Text { inline_code, .. } = &segments(text)[0] else { panic!("one text segment") };
+        let find = |s: &str| text.find(s).map(|at| at..at + s.len()).unwrap();
+        let hits = [find("usd` 换"), find("human"), find("api_usage")];
+        let runs = text_runs(inline_code, &hits);
+        assert!(runs.iter().all(|(r, _)| text.is_char_boundary(r.start) && text.is_char_boundary(r.end)), "every cut on a char boundary");
+        assert!(runs.windows(2).all(|w| w[0].0.end <= w[1].0.start), "in order, not overlapping");
+        let style = |code, backtick, hit| RunStyle { code, backtick, hit };
+        let got: Vec<(&str, RunStyle)> = runs.iter().map(|(r, s)| (&text[r.clone()], *s)).collect();
+        assert_eq!(
+            got,
+            [
+                ("`", style(true, true, false)),
+                ("fmt_", style(true, false, false)),
+                ("usd", style(true, false, true)),
+                ("`", style(true, true, true)),
+                (" 换", style(false, false, true)),
+                ("`", style(true, true, false)),
+                ("human", style(true, false, true)),
+                ("_size", style(true, false, false)),
+                ("`", style(true, true, false)),
+                ("api_usage", style(false, false, true)),
+            ],
+            "plain text without a hit has no run; a hit inside code keeps the code's font, its mark goes on top"
+        );
+        assert_eq!(text_runs(&[], &[]), []);
+    }
+
+    #[test]
+    fn a_history_session_is_one_prompt_only_card_per_prompt() {
+        let prompt = |n: u32, ts, t: &str| Turn { reply: None, end: TurnEnd::NoReply, ..turn(Some(n), ts, t, vec![]) };
+        let history = Conversation {
+            history_only: true,
+            items: vec![ConvItem::Turn(prompt(1, at(10, 17, 10, 29, 0), "部署前检查一下 nginx 配置")), ConvItem::Turn(prompt(2, at(10, 17, 10, 35, 0), "改到 50m"))],
+            bytes: 0,
+            skipped_lines: 0,
+        };
+        let view = build(&history, PROJECT, today());
+        assert!(view.history);
+        assert_eq!(view.summary, "2 prompts from history.jsonl");
+        let card = turn_card(&view, 1);
+        assert_eq!((card.label.as_ref(), card.time.as_ref()), ("TURN 2", "10:35"));
+        assert!(card.prompt_only, "no lamp, no ticks, no tail");
+        assert_eq!(card.end_note, "", "a prompt kept in history.jsonl is not a turn without a reply");
+        assert_eq!(rows(&view, &HashSet::new()), [Row::Head(0), Row::Head(1)], "a prompt-only card is its head");
+
+        let one = Conversation { history_only: true, items: vec![ConvItem::Turn(prompt(1, None, "x"))], bytes: 0, skipped_lines: 0 };
+        assert_eq!(build(&one, PROJECT, today()).summary, "1 prompt from history.jsonl");
+        assert!(!view_of(vec![ConvItem::Turn(prompt(1, None, "x"))]).history, "a transcript's turn without a reply is a normal card");
+        assert!(!turn_card(&view_of(vec![ConvItem::Turn(prompt(1, None, "x"))]), 0).prompt_only);
     }
 
     #[test]
