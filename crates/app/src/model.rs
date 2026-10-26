@@ -55,6 +55,8 @@ pub struct SessionRow {
     pub favorite: bool,
     pub favorite_path: SharedString,
     pub id: SharedString,
+    /// False for a history session from before Claude Code recorded session ids: `id` is made up.
+    pub id_known: bool,
     pub short_id: SharedString,
     pub project_key: SharedString,
     /// Last segment of the project path.
@@ -104,7 +106,6 @@ pub struct SessionRow {
     pub top_tools: SharedString,
     pub subagents_fmt: SharedString,
     pub pr_url: SharedString,
-    pub resume: SharedString,
     pub first_prompt_full: SharedString,
     pub last_prompt_full: SharedString,
     pub last_message_full: SharedString,
@@ -212,11 +213,11 @@ impl SessionRow {
     pub fn from_summary(s: &SessionSummary) -> SessionRow {
         let short_id = if s.id_known { s.id.chars().take(8).collect() } else { "(unknown)".to_string() };
         let context_pct = s.context_ratio().map(|r| r as f32);
-        let resume = if s.id_known { format!("claude --resume {}", s.id) } else { NONE.to_string() };
         SessionRow {
             favorite: s.favorite,
             favorite_path: if s.favorite { s.file_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default().into() } else { NONE.into() },
             id: s.id.clone().into(),
+            id_known: s.id_known,
             short_id: short_id.into(),
             project_key: s.project_key.clone().into(),
             project: project_name(s).into(),
@@ -256,7 +257,6 @@ impl SessionRow {
             top_tools: top_tools(s),
             subagents_fmt: s.subagent_count.to_string().into(),
             pr_url: or_none(s.pr_url.as_deref()),
-            resume: resume.into(),
             first_prompt_full: detail_text(Some(&s.first_prompt)),
             last_prompt_full: detail_text(s.last_prompt.as_deref()),
             last_message_full: detail_text(s.last_message.as_deref()),
@@ -614,7 +614,6 @@ pub mod tests {
         assert_eq!(r.project_path, "/Users/me/Code/alpha");
         assert_eq!(r.project_key, "-Users-me-Code-alpha");
         assert_eq!(r.short_id, "11111111");
-        assert_eq!(r.resume, "claude --resume 11111111-aaaa-4bbb-8ccc-000000000001");
     }
 
     #[test]
@@ -670,8 +669,7 @@ pub mod tests {
         assert_eq!((r.cost_fmt.as_ref(), r.cost), ("—", None));
         assert_eq!((r.cc_cost_fmt.as_ref(), r.context_fmt.as_ref(), r.context_pct), ("—", "—", None));
         assert_eq!(r.context_detail, "—");
-        assert_eq!(r.short_id, "(unknown)");
-        assert_eq!(r.resume, "—", "an anonymous history session cannot be resumed");
+        assert_eq!((r.short_id.as_ref(), r.id_known), ("(unknown)", false));
     }
 
     #[test]

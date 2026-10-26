@@ -23,7 +23,7 @@ tags:
 | 主线程 | 全部行、过滤排序后的顺序、选中、视图状态 | 渲染；过滤与排序；应用后台事件 |
 | `asm-store` | 索引的读写连接 | 读索引、扫描并写索引、收藏与目录迁移 |
 | `asm-search` | 索引的只读连接 | 文本搜索查全文索引；正则搜索扫 transcript 文件 |
-| `asm-reader` | 无（不碰索引） | 给详情面板直接读一个 session 的记录文件，转换成回合卡 |
+| `asm-reader` | 无（不碰索引） | 给详情面板直接读一个 session 的记录文件（或 History session 在 `history.jsonl` 里的 prompt），转换成回合卡；写导出的 TXT |
 | rayon 线程池 | 无 | 扫描时并行解析文件，正则搜索时并行扫文件 |
 
 界面向后台线程发请求，后台线程用事件回应。两个方向都是无界队列，发送方不等待接收方。主线程给每条后台线程配一个接收任务。
@@ -106,7 +106,16 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 
 `Store::read_conversation(session_id, 记录文件路径, 项目目录, matcher)` 把请求交给 `asm-reader` 线程，返回这次请求的 `seq`。线程读文件（core 的 `read_conversation`，给了 matcher 就顺便标出命中），再在同一条线程上转换成回合卡（app 的 `conversation::build`），发出 `Conversation` 事件。
 
-- **新请求取代旧请求，做法照搬搜索。** 发请求时 `seq` 加一。线程每次醒来先把队列里积压的请求取完，只读最后一个；开始读之前和读完之后各看一次最新的 `seq`，过期就不发。所以快速换行时只有最后选中的那个 session 被读，界面收到的 `Conversation` 事件序号只增不减；界面仍要按 `seq` 和当前选中的 session 核对再用
+读取线程的队列里是 `ReadRequest`，三种：
+
+| 请求 | 入口 | 做什么 | 回应 |
+|---|---|---|---|
+| `Conversation` | `Store::read_conversation` | 读记录文件 | `Conversation` |
+| `History` | `Store::read_history(session_id, project_key, matcher)` | 读 `history.jsonl` 里这个 History session 的 prompt（core `history_prompts`，分组和表格一致），每个 prompt 一张卡（`conversation_from_history`） | `Conversation`，和记录文件的同一种事件 |
+| `Export` | `Store::export(记录文件, 目标路径)` | core `read_transcript` 得到和 `transcript-reader` 逐字相同的 TXT，写到目标路径 | `Exported { dest, result }`：成功是跳过的坏行数，失败是说明。不走 `Failed`，那个事件会把状态栏改成索引出错 |
+
+- **新请求取代旧请求，做法照搬搜索，只对 `Conversation` / `History` 生效。** 它们共用一个 `seq`，发请求时加一。线程每次醒来先把队列里积压的请求取完，其中的导出按到达顺序全部执行，`Conversation` / `History` 只读最后一个；开始读之前和读完之后各看一次最新的 `seq`，过期就不发。所以快速换行时只有最后选中的那个 session 被读，界面收到的 `Conversation` 事件序号只增不减；界面仍要按 `seq` 和当前选中的 session 核对再用。导出没有 `seq`，换行再快也不会被丢掉（`store.rs` 的 `an_export_is_not_superseded_by_a_conversation_request`）
+- **`read_history` 还没有接到选中上**：现在选中 History session 仍不发请求，显示一句说明；接线和 History 卡片的样式是 M4b 下一个任务的事
 - **转换也在读取线程上做。** 卡片上的全部字符串（时间、用时、统计行、结果摘要、折叠位置）都在转换时算好，主线程只拿 `Arc<ConversationView>` 生成行表（`conversation::rows`）和绘制。记录文件读完就在读取线程上释放，内存里只留截断后的文本。release 下 70MB 的 `5f6eea99` 读取约 18ms、转换 0.2ms；465 次工具调用的 `4e5802b6` 读取 21ms、转换 1.1ms
 - **`ConversationView.pattern` 记着读取时用的 `Matcher::pattern()`**（带大小写标记）。搜索词变了要重读才能重新标记（详情里没有全文的缓存）；pattern 相同就不必重读
 - **读不了文件不会带走线程。** 文件被删、没有权限时，事件里是 `Err(说明)`，下一个请求照常处理
@@ -121,6 +130,16 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 | 读取失败 | 对话区显示事件里的说明 |
 
 每次换 session，第一帧画出对话时 stdout 打一行 `detail: <短 id> <大小> read <ms> build <ms> first frame <ms>`，起点是 `select_row`，终点是这一帧的 paint（列表后面的一个 `canvas` 在 paint 阶段打这行）。debug 下 70MB 的 `5f6eea99` 约 read 21ms、build 0.7ms、first frame 50–70ms。
+
+## 操作入口
+
+复制 resume 命令、复制 session ID、在 Finder 中显示记录文件、打开项目目录、导出 TXT、收藏，都在 `actions.rs`。详情标题行的按钮、表格行的右键菜单、`⌘C` / `⇧⌘C` 三个入口派发同一组 action，处理函数只写一遍：
+
+- **action 带 `id: Option<String>`。** 右键菜单派发 `Some(那一行的 id)`，作用于右键点中的行（不一定是选中的行，右键不改选中）；快捷键绑定的是 `None`，和标题行按钮一样作用于选中的行
+- **能不能做由纯函数 `actions::available(row, 原记录在不在, 项目目录在不在)` 决定**，每项是 `Ok` 或带英文原因的 `Err`。不能做时标题行按钮置灰、悬停提示写原因，菜单项置灰，快捷键弹通知说明原因、什么也不复制
+- **可用性要碰文件系统（`is_dir`、收藏的原记录 `is_file`），只在需要时由 `actions::check` 做**：选中一行时（`select_row`，结果存在 `DetailState::actions`，标题行和 Metadata 的 Resume 一行读它）、打开右键菜单时、执行 action 时各做一次，每次两三个 stat。不放进 `SessionRow::from_summary`：那是整表加载的路径，几千行逐个 stat 不值得。`SessionTableDelegate` 创建时带着 `ClaudeDir`，菜单才能查收藏的原记录
+- **恢复命令**：项目目录在时 `cd '<项目目录>' && claude --resume <id>`（路径总是单引号，里面的单引号写成 `'\''`），目录不在时 `claude --resume <id>`（Claude Code 2.1.223 起按 id 在所有项目里找）；只剩收藏副本时不提供。依据见 `kb/sessions/2026-10-27-asm-m4b-resume.md`
+- **导出**：保存对话框的默认目录是这次运行里上一次导出的目录（`AppRoot::last_export_dir`，不持久化），第一次是"下载"；默认文件名 `<项目名>-<id 前 8 位>.txt`。选好路径后交给读取线程写，`Exported` 到了再弹通知
 
 ## 收藏与目录切换
 
@@ -188,6 +207,7 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 | `cmd-f` | 搜索框 |
 | 搜索框里按 Enter 或 Escape | 表格 |
 | 在日期区间选择器里选完区间（或点了快捷项） | 表格 |
+| 导出 TXT 的保存对话框关闭（保存或取消） | 表格 |
 
 新增会拿走焦点的界面（弹出层、对话框）时，关闭后要把焦点还给表格或搜索框。
 
@@ -218,7 +238,8 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 
 ## 相关文件
 
-- `crates/app/src/store.rs` — store 线程、读取线程、请求与事件类型；文件头注释有启动顺序，测试断言了冷启动、热启动、Rebuild 的事件序列，以及读取在扫描期间照常返回、新请求取代旧请求
+- `crates/app/src/store.rs` — store 线程、读取线程、请求与事件类型；文件头注释有启动顺序，测试断言了冷启动、热启动、Rebuild 的事件序列，以及读取在扫描期间照常返回、新请求取代旧请求、History 的 prompt、导出与导出不被取代
+- `crates/app/src/actions.rs` — 操作的可用性（`available` / `check`）、恢复命令、导出文件名、各 action 与处理函数
 - `crates/app/src/conversation.rs` — 回合卡的转换（`build`）与行表（`rows`、`card_rows`、`row_of`、`fold`）；`real_transcript_timings` 是量真实文件读取与转换耗时的 ignored 测试
 - `crates/app/src/detail.rs` — 详情的状态（`DetailState`：加载状态、行表、展开 / 折叠、命中位置与停靠）
 - `crates/app/src/turn_cards.rs` — 回合卡的绘制（`list` 的每一行），刻度的悬停与点击
@@ -227,6 +248,6 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 - `crates/app/src/toolbar.rs` — 过滤条件的应用、搜索的防抖与重跑
 - `crates/app/src/table.rs` — 全部行与过滤排序后的顺序、搜索对象的生成
 - `crates/app/src/settings.rs` — 视图状态的读写与容错测试
-- `crates/app/src/keyboard_tests.rs` — 启动焦点与搜索的键盘路径（`cmd-f`、Enter、Escape、`n`、`cmd-g`）的行为测试
+- `crates/app/src/keyboard_tests.rs` — 启动焦点与搜索的键盘路径（`cmd-f`、Enter、Escape、`n`、`cmd-g`）、`cmd-c` / `cmd-shift-c` 复制（用测试平台的剪贴板）的行为测试
 - `crates/core/src/index/indexer.rs` — 流式扫描与单事务写入
 - `kb/notes/2026-09-21-m2-real-data.md`、`kb/notes/2026-09-21-m3-search.md` — 上述数字的来源与当时的取舍

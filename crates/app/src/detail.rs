@@ -10,11 +10,13 @@ use std::sync::Arc;
 
 use agent_session_core::model::{HitPlace, Part};
 use gpui_kit::component::scroll::ScrollableElement;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{Sizable, h_flex, v_flex};
+use gpui_kit::component::{Disableable, Icon, Sizable, h_flex, v_flex};
 use gpui_kit::*;
 
+use crate::actions::{Availability, CopyResume, CopySessionId, SessionActions};
 use crate::conversation::{Card, ConversationView, Row, StepBody, card_rows, row_of, rows};
 use crate::model::SessionRow;
 use crate::style::{self, FluentBuilder};
@@ -64,6 +66,9 @@ pub struct DetailState {
     /// Set by a park, taken by the first frame that lays out the hit: that frame scrolls the hit
     /// itself into view (see `turn_cards::reveal_marker`).
     pub(crate) reveal: Rc<Cell<bool>>,
+    /// What the header buttons and the Resume line of the selected session offer, checked on
+    /// disk when it was selected (`AppRoot::select_row`).
+    pub actions: SessionActions,
 }
 
 impl Default for DetailState {
@@ -81,6 +86,7 @@ impl Default for DetailState {
             pointed: None,
             current_hit: None,
             reveal: Rc::default(),
+            actions: SessionActions::default(),
         }
     }
 }
@@ -331,6 +337,35 @@ fn section(title: &'static str, body: SharedString) -> Div {
         .child(div().text_size(px(12.)).line_height(px(16.)).child(body))
 }
 
+/// One of the header's action buttons (the mockup's `.btn` / `.ibtn`: 22px high, a 14px icon,
+/// icon-only ones square). A disabled one fades and its tooltip says why.
+fn action_button(id: &'static str, icon: Icon, label: Option<&'static str>, allowed: Availability, cx: &App) -> Button {
+    let variant = ButtonCustomVariant::new(cx).color(style::white()).foreground(style::text()).hover(style::control_hover()).active(style::control_hover());
+    let button = Button::new(id)
+        .custom(variant)
+        .small()
+        .h(px(22.))
+        .border_1()
+        .border_color(style::control_border())
+        .rounded(px(5.))
+        .disabled(allowed.is_err())
+        .when_some(allowed.err(), |b, reason| b.opacity(0.4).tooltip(reason))
+        .child(icon.with_size(px(14.)));
+    match label {
+        Some(label) => button.px(px(7.)).child(div().text_size(px(11.)).child(label)),
+        None => button.w(px(22.)).px(px(0.)),
+    }
+}
+
+/// The tooltip of an enabled button; a disabled one has its reason instead.
+fn tip(button: Button, allowed: Availability, text: &'static str, shortcut: Option<(&dyn Action, Option<&str>)>) -> Button {
+    match (allowed, shortcut) {
+        (Err(_), _) => button,
+        (Ok(()), Some((action, context))) => button.tooltip_with_action(text, action, context),
+        (Ok(()), None) => button.tooltip(text),
+    }
+}
+
 fn meta_pair(label: &'static str, value: AnyElement) -> Div {
     h_flex()
         .flex_1()
@@ -389,8 +424,12 @@ impl AppRoot {
             .pb(px(8.))
             .border_b_1()
             .border_color(style::border_soft())
-             .child(h_flex().gap(px(6.)).child(div().flex_1().truncate().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).line_height(px(18.)).child(row.title.clone()))
-                .child(Button::new("favorite-session").ghost().small().label(if row.favorite { "★" } else { "☆" }).text_color(style::favorite()).on_click(cx.listener(|this, _, window, cx| this.toggle_favorite(window, cx)))))
+            .child(
+                h_flex()
+                    .gap(px(4.))
+                    .child(div().flex_1().min_w_0().mr(px(6.)).truncate().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).line_height(px(18.)).child(row.title.clone()))
+                    .child(self.render_action_buttons(row, cx)),
+            )
             .child(
                 h_flex()
                     .mt(px(3.))
@@ -425,6 +464,33 @@ impl AppRoot {
                     .child(div().flex_1())
                     .child(div().font_family(mono(cx)).text_size(px(11.)).text_color(style::muted()).child(summary)),
             )
+    }
+
+    /// ★, Copy resume, copy ID, reveal, project folder, export: each runs the selected session's
+    /// action (`actions.rs`), greyed out with the reason when the session does not allow it.
+    fn render_action_buttons(&self, row: &SessionRow, cx: &mut Context<Self>) -> Div {
+        let a = &self.detail.actions;
+        let icon = |name: IconName| Icon::new(name).text_color(style::text_secondary());
+        let star = match row.favorite {
+            true => Icon::new(IconName::StarFill).text_color(style::favorite()),
+            false => icon(IconName::Star),
+        };
+        let favorite_tip = if row.favorite { "Unfavorite" } else { "Favorite" };
+        h_flex()
+            .flex_none()
+            .gap(px(4.))
+            .child(tip(action_button("favorite-session", star, None, a.favorite, cx), a.favorite, favorite_tip, Some((&crate::ToggleFavorite, None))).on_click(cx.listener(|this, _, window, cx| this.toggle_favorite(window, cx))))
+            .child(
+                tip(action_button("copy-resume", icon(IconName::SquareTerminal), Some("Copy resume"), a.copy_resume, cx), a.copy_resume, "Copy resume command", Some((&CopyResume { id: None }, Some("DataTable"))))
+                    .on_click(cx.listener(|this, _, window, cx| this.copy_resume(None, window, cx))),
+            )
+            .child(
+                tip(action_button("copy-id", icon(IconName::Copy), None, a.copy_id, cx), a.copy_id, "Copy session ID", Some((&CopySessionId { id: None }, Some("DataTable"))))
+                    .on_click(cx.listener(|this, _, window, cx| this.copy_session_id(None, window, cx))),
+            )
+            .child(tip(action_button("reveal-transcript", icon(IconName::FileSearch), None, a.reveal, cx), a.reveal, "Reveal transcript in Finder", None).on_click(cx.listener(|this, _, window, cx| this.reveal_transcript(None, window, cx))))
+            .child(tip(action_button("open-folder", icon(IconName::FolderOpen), None, a.open_folder, cx), a.open_folder, "Open project folder", None).on_click(cx.listener(|this, _, window, cx| this.open_project_folder(None, window, cx))))
+            .child(tip(action_button("export-txt", icon(IconName::Download), None, a.export, cx), a.export, "Export transcript as TXT…", None).on_click(cx.listener(|this, _, window, cx| this.export_transcript(None, window, cx))))
     }
 
     fn render_metadata(&self, row: &Arc<SessionRow>, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -492,11 +558,21 @@ impl AppRoot {
                     .child(meta_pair("Models", mono_value(row.models.clone(), cx).into_any_element()))
                     .child(meta_pair("Top tools", mono_value(row.top_tools.clone(), cx).into_any_element()))
                     .child(meta_pair("PR", mono_value(row.pr_url.clone(), cx).into_any_element()))
-                    .child(meta_pair("Resume", mono_value(row.resume.clone(), cx).text_color(style::text_secondary()).into_any_element()))
+                    .child(meta_pair("Resume", self.resume_value(cx)))
                     .child(section("First prompt", row.first_prompt_full.clone()))
                     .child(section("Last prompt", row.last_prompt_full.clone()))
                     .child(section("Last message", row.last_message_full.clone())),
             )
+    }
+
+    /// The command Copy resume copies, or why there is none.
+    fn resume_value(&self, cx: &App) -> AnyElement {
+        let actions = &self.detail.actions;
+        match (&actions.resume, actions.copy_resume) {
+            (Some(command), _) => mono_value(command.clone().into(), cx).text_color(style::text_secondary()).into_any_element(),
+            (None, Err(reason)) => div().truncate().text_size(px(11.)).text_color(style::muted()).child(reason).into_any_element(),
+            (None, Ok(())) => mono_value("—".into(), cx).into_any_element(),
+        }
     }
 }
 

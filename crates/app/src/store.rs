@@ -7,20 +7,23 @@
 //! were streamed before their project's path was known end up exact.
 //!
 //! A second thread, `asm-reader`, reads transcripts for the detail panel straight from the file
-//! (no `Db`), so a conversation shows up while a scan holds the store thread. Its requests
-//! supersede each other like searches do (`seq`, see `search.rs`), and its `Conversation` events
-//! go out on the same channel.
+//! (no `Db`), so a conversation shows up while a scan holds the store thread. It also reads the
+//! prompts of a history-only session from `history.jsonl`, and writes TXT exports. Conversation
+//! and history requests supersede each other like searches do (`seq`, see `search.rs`); exports
+//! all run. Its `Conversation` and `Exported` events go out on the same channel.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use agent_session_core::claude::conversation::read_conversation;
+use agent_session_core::claude::conversation::{conversation_from_history, read_conversation};
+use agent_session_core::claude::history::history_prompts;
 use agent_session_core::claude::paths::ClaudeDir;
 use agent_session_core::index::{Db, IndexStats, Indexer, ListFilter, Order, Progress, ScanEvent, ScanReport};
-use agent_session_core::model::SessionSummary;
+use agent_session_core::model::{Conversation, SessionSummary};
 use agent_session_core::search::Matcher;
+use agent_session_core::transcript::read_transcript;
 use anyhow::{Result, anyhow, ensure};
 use agent_session_core::{config, favorites::{self, FavoritesDir}};
 use async_channel::{Receiver, Sender};
@@ -44,9 +47,13 @@ pub enum StoreEvent {
     /// One session written by the running scan (new or changed).
     Session(SessionSummary),
     ScanDone { report: ScanReport, stats: IndexStats },
-    /// A transcript read for the detail panel (`Store::read_conversation`), already built into
-    /// cards. `read` is the file read, `build` the conversion; both ran on the reader thread.
+    /// A transcript read for the detail panel (`Store::read_conversation`), or the prompts of a
+    /// history-only session (`Store::read_history`), already built into cards. `read` is the
+    /// file read, `build` the conversion; both ran on the reader thread.
     Conversation { seq: u64, session_id: String, conversation: Result<Arc<ConversationView>, String>, read: Duration, build: Duration },
+    /// A TXT export (`Store::export`) was written to `dest`: the lines of the transcript that
+    /// could not be parsed and were left out, or what went wrong.
+    Exported { dest: PathBuf, result: Result<usize, String> },
     FavoriteChanged { id: String, favorite: bool },
     FavoritesDirChanged { dir: PathBuf, moved: usize, skipped: usize },
     RebuildingRoots,
@@ -59,12 +66,20 @@ pub struct Store {
     latest: Arc<AtomicU64>,
 }
 
-struct ReadRequest {
-    seq: u64,
-    session_id: String,
-    path: PathBuf,
-    project_path: String,
-    matcher: Option<Matcher>,
+enum ReadRequest {
+    Conversation { seq: u64, session_id: String, path: PathBuf, project_path: String, matcher: Option<Matcher> },
+    History { seq: u64, session_id: String, project_key: String, matcher: Option<Matcher> },
+    Export { src: PathBuf, dest: PathBuf },
+}
+
+impl ReadRequest {
+    /// Requests for the detail panel have one; a newer one supersedes them. Exports have none.
+    fn seq(&self) -> Option<u64> {
+        match self {
+            ReadRequest::Conversation { seq, .. } | ReadRequest::History { seq, .. } => Some(*seq),
+            ReadRequest::Export { .. } => None,
+        }
+    }
 }
 
 impl Store {
@@ -73,14 +88,14 @@ impl Store {
         let (event_tx, events) = async_channel::unbounded();
         let (reads, read_rx) = mpsc::channel();
         let latest = Arc::new(AtomicU64::new(0));
-        let (reader_latest, reader_events) = (latest.clone(), event_tx.clone());
+        let (reader_latest, reader_events, reader_claude) = (latest.clone(), event_tx.clone(), claude.clone());
         std::thread::Builder::new()
             .name("asm-store".into())
             .spawn(move || run(claude, db_path, favorites, request_rx, event_tx))
             .expect("failed to spawn the store thread");
         std::thread::Builder::new()
             .name("asm-reader".into())
-            .spawn(move || serve_reads(read_rx, reader_latest, reader_events))
+            .spawn(move || serve_reads(read_rx, reader_latest, reader_events, reader_claude))
             .expect("failed to spawn the reader thread");
         (Store { requests, reads, latest }, events)
     }
@@ -94,42 +109,83 @@ impl Store {
     /// requests are stale from now on.
     pub fn read_conversation(&self, session_id: String, path: PathBuf, project_path: String, matcher: Option<Matcher>) -> u64 {
         let seq = self.latest.fetch_add(1, Ordering::SeqCst) + 1;
-        self.reads.send(ReadRequest { seq, session_id, path, project_path, matcher }).ok();
+        self.reads.send(ReadRequest::Conversation { seq, session_id, path, project_path, matcher }).ok();
         seq
     }
+
+    /// Like `read_conversation`, for a history-only session: its prompts in `history.jsonl`,
+    /// one card each.
+    // TODO(M4b extras): `select_row` asks for this once History cards are drawn
+    #[allow(dead_code)]
+    pub fn read_history(&self, session_id: String, project_key: String, matcher: Option<Matcher>) -> u64 {
+        let seq = self.latest.fetch_add(1, Ordering::SeqCst) + 1;
+        self.reads.send(ReadRequest::History { seq, session_id, project_key, matcher }).ok();
+        seq
+    }
+
+    /// Write the TXT export of the transcript at `src` to `dest` on the reader thread; answered
+    /// by `Exported`. Never superseded.
+    pub fn export(&self, src: PathBuf, dest: PathBuf) {
+        self.reads.send(ReadRequest::Export { src, dest }).ok();
+    }
 }
 
-/// Reader thread body: only the newest request is read; whatever queued up before it, or was
-/// superseded while being read, is dropped. Never touches the index, so a scan never delays it.
-fn serve_reads(requests: mpsc::Receiver<ReadRequest>, latest: Arc<AtomicU64>, events: Sender<StoreEvent>) {
+/// Reader thread body: of the conversation and history requests only the newest is read;
+/// whatever queued up before it, or was superseded while being read, is dropped. Every export
+/// runs, in order. Never touches the index, so a scan never delays it.
+fn serve_reads(requests: mpsc::Receiver<ReadRequest>, latest: Arc<AtomicU64>, events: Sender<StoreEvent>, claude: ClaudeDir) {
     let stale = |seq: u64| latest.load(Ordering::SeqCst) != seq;
-    while let Ok(mut request) = requests.recv() {
-        while let Ok(newer) = requests.try_recv() {
-            request = newer;
-        }
-        if stale(request.seq) {
-            continue;
-        }
-        let seq = request.seq;
-        let event = read(request);
-        if !stale(seq) {
-            events.send_blocking(event).ok();
+    while let Ok(first) = requests.recv() {
+        let mut queued = vec![first];
+        queued.extend(requests.try_iter());
+        let newest = queued.iter().rposition(|r| r.seq().is_some());
+        for (ix, request) in queued.into_iter().enumerate() {
+            let event = match request {
+                ReadRequest::Export { src, dest } => export(src, dest),
+                _ if Some(ix) != newest || request.seq().is_some_and(stale) => continue,
+                request => read(request, &claude),
+            };
+            if !event_is_stale(&event, &stale) {
+                events.send_blocking(event).ok();
+            }
         }
     }
 }
 
-fn read(request: ReadRequest) -> StoreEvent {
+fn event_is_stale(event: &StoreEvent, stale: impl Fn(u64) -> bool) -> bool {
+    matches!(event, StoreEvent::Conversation { seq, .. } if stale(*seq))
+}
+
+fn read(request: ReadRequest, claude: &ClaudeDir) -> StoreEvent {
     let started = Instant::now();
-    let conversation = read_conversation(&request.path, request.matcher.as_ref());
+    let (seq, session_id, project_path, matcher, conversation) = match request {
+        ReadRequest::Conversation { seq, session_id, path, project_path, matcher } => {
+            let conversation = read_conversation(&path, matcher.as_ref());
+            (seq, session_id, project_path, matcher, conversation)
+        }
+        ReadRequest::History { seq, session_id, project_key, matcher } => {
+            let conversation = history_prompts(claude, &project_key, &session_id).map(|prompts| conversation_from_history(&prompts, matcher.as_ref()));
+            (seq, session_id, String::new(), matcher, conversation)
+        }
+        ReadRequest::Export { .. } => unreachable!("exports are not read for the detail panel"),
+    };
     let read = started.elapsed();
-    let conversation = conversation
-        .map(|conv| {
-            let mut view = conversation::build(&conv, &request.project_path, Local::now().date_naive());
-            view.pattern = request.matcher.as_ref().map(|m| m.pattern().to_string());
-            Arc::new(view)
-        })
-        .map_err(|e| format!("{e:#}"));
-    StoreEvent::Conversation { seq: request.seq, session_id: request.session_id, conversation, read, build: started.elapsed() - read }
+    let conversation = conversation.map(|conv| Arc::new(view_of(&conv, &project_path, matcher.as_ref()))).map_err(|e| format!("{e:#}"));
+    StoreEvent::Conversation { seq, session_id, conversation, read, build: started.elapsed() - read }
+}
+
+fn view_of(conv: &Conversation, project_path: &str, matcher: Option<&Matcher>) -> ConversationView {
+    let mut view = conversation::build(conv, project_path, Local::now().date_naive());
+    view.pattern = matcher.map(|m| m.pattern().to_string());
+    view
+}
+
+fn export(src: PathBuf, dest: PathBuf) -> StoreEvent {
+    let result = read_transcript(&src).and_then(|export| {
+        std::fs::write(&dest, export.text).map_err(|e| anyhow!("write {}: {e}", dest.display()))?;
+        Ok(export.skipped_lines)
+    });
+    StoreEvent::Exported { dest, result: result.map_err(|e| format!("{e:#}")) }
 }
 
 /// Thread body: every failure becomes a `Failed` event instead of taking the thread down.
@@ -233,6 +289,7 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conversation::Card;
 
     const S1: &str = "11111111-aaaa-4bbb-8ccc-000000000001";
 
@@ -402,10 +459,10 @@ mod tests {
         let (event_tx, events) = async_channel::unbounded();
         let latest = Arc::new(AtomicU64::new(3));
         for (seq, id) in [(1, S1), (2, S2), (3, S1)] {
-            requests.send(ReadRequest { seq, session_id: id.into(), path: transcript(id), project_path: ALPHA.into(), matcher: None }).unwrap();
+            requests.send(ReadRequest::Conversation { seq, session_id: id.into(), path: transcript(id), project_path: ALPHA.into(), matcher: None }).unwrap();
         }
         drop(requests);
-        serve_reads(queue, latest, event_tx);
+        serve_reads(queue, latest, event_tx, fixture_claude());
         let served: Vec<u64> = std::iter::from_fn(|| events.try_recv().ok()).map(|e| conversation_of(&e).0).collect();
         assert_eq!(served, [3]);
 
@@ -419,6 +476,79 @@ mod tests {
         let conversations: Vec<(u64, &str)> = seen.iter().filter(|e| matches!(e, StoreEvent::Conversation { .. })).map(|e| { let (seq, id, _) = conversation_of(e); (seq, id) }).collect();
         assert_eq!(conversations.last(), Some(&(new, S2)));
         assert!(conversations[..conversations.len() - 1].iter().all(|(seq, _)| *seq == old), "{conversations:?}");
+    }
+
+    #[test]
+    fn history_prompts_are_served_for_a_history_session() {
+        const S4: &str = "44444444-aaaa-4bbb-8ccc-000000000004";
+        let dir = tempfile::tempdir().unwrap();
+        let (store, events) = spawn(fixture_claude(), dir.path().join("index.sqlite"));
+
+        let matcher = Matcher::words("flaky").unwrap();
+        let seq = store.read_history(S4.into(), "-Users-me-Code-alpha".into(), Some(matcher.clone()));
+        let seen = until_conversation(&events, seq);
+        let (_, session_id, view) = conversation_of(seen.last().unwrap());
+        let view = view.as_ref().unwrap();
+        assert_eq!(session_id, S4);
+        assert_eq!(view.cards.len(), 4, "one card per prompt of the session in history.jsonl");
+        let Card::Turn(second) = &view.cards[1] else { panic!("a prompt is a turn card") };
+        assert_eq!(second.label, "TURN 2");
+        assert!(second.prompt.text.contains("Fix the flaky test") && second.prompt.text.contains("line1\nline2\nline3"), "pasted text restored: {:?}", second.prompt.text);
+        assert_eq!((view.pattern.as_deref(), view.hits.len()), (Some(matcher.pattern()), 1), "marked like a transcript");
+
+        let seq = store.read_history("history:-Users-me-Code-beta:1748736000000".into(), "-Users-me-Code-beta".into(), None);
+        let seen = until_conversation(&events, seq);
+        assert_eq!(conversation_of(seen.last().unwrap()).2.as_ref().unwrap().cards.len(), 2, "an anonymous session is its time group");
+    }
+
+    /// Events up to and including the first `Exported`.
+    fn until_exported(events: &Receiver<StoreEvent>) -> (PathBuf, Result<usize, String>) {
+        loop {
+            if let StoreEvent::Exported { dest, result } = events.recv_blocking().expect("store threads ended early") {
+                return (dest, result);
+            }
+        }
+    }
+
+    #[test]
+    fn an_export_writes_the_file_and_reports_skipped_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join(format!("{S1}.jsonl"));
+        let mut text = std::fs::read_to_string(transcript(S1)).unwrap();
+        text.push_str("not json\n");
+        std::fs::write(&src, text).unwrap();
+        let (store, events) = spawn(fixture_claude(), dir.path().join("index.sqlite"));
+
+        let dest = dir.path().join("out").join("alpha-11111111.txt");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        store.export(src.clone(), dest.clone());
+        let expected = agent_session_core::transcript::read_transcript(&src).unwrap();
+        assert!(expected.skipped_lines >= 1);
+        assert_eq!(until_exported(&events), (dest.clone(), Ok(expected.skipped_lines)));
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), expected.text, "what transcript-reader writes");
+
+        store.export(dir.path().join("gone.jsonl"), dir.path().join("gone.txt"));
+        let (_, result) = until_exported(&events);
+        assert!(result.is_err_and(|e| e.contains("gone.jsonl")));
+    }
+
+    #[test]
+    fn an_export_is_not_superseded_by_a_conversation_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("s1.txt");
+        let (requests, queue) = mpsc::channel();
+        let (event_tx, events) = async_channel::unbounded();
+        let conversation = |seq, id| ReadRequest::Conversation { seq, session_id: String::from(id), path: transcript(id), project_path: ALPHA.into(), matcher: None };
+        requests.send(conversation(1, S1)).unwrap();
+        requests.send(ReadRequest::Export { src: transcript(S1), dest: dest.clone() }).unwrap();
+        requests.send(conversation(2, S2)).unwrap();
+        requests.send(conversation(3, S1)).unwrap();
+        drop(requests);
+        serve_reads(queue, Arc::new(AtomicU64::new(3)), event_tx, fixture_claude());
+
+        let served: Vec<StoreEvent> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(matches!(&served[..], [StoreEvent::Exported { result: Ok(_), .. }, StoreEvent::Conversation { seq: 3, .. }]), "{served:?}");
+        assert!(dest.is_file());
     }
 
     #[test]

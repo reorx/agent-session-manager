@@ -6,10 +6,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use agent_session_core::claude::paths::ClaudeDir;
+use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::*;
 
+use crate::actions::{self, CopyResume, CopySessionId, ExportTranscript, HideProject, OpenProjectFolder, RevealTranscript};
+use crate::favorites::FavoriteSession;
 use crate::model::{DisplayMode, Filter, SessionRow};
 use crate::search::{RowHit, SearchTarget};
 use crate::style::{self, FluentBuilder};
@@ -28,6 +32,11 @@ pub const MATCHES_W: f32 = 64.;
 const FIXED_COLS_W: f32 = PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + COST_W + CTX_W + SIZE_W + KIND_W;
 pub const PREVIEW_MIN_W: f32 = 200.;
 pub const ROW_H: f32 = 36.;
+/// The row context menu (mockup 6), wide enough for the start of a resume command.
+const MENU_W: f32 = 330.;
+/// What a menu item leaves for its content: the menu's 4px edge and the item's 8px padding,
+/// on both sides.
+const MENU_ITEM_W: f32 = MENU_W - 24.;
 
 const PREVIEW_COL: usize = 1;
 const MATCHES_COL: usize = 2;
@@ -49,6 +58,8 @@ pub struct SessionTableDelegate {
     /// Cost of the rows in `ix` (the status bar shows it).
     pub shown_cost: f64,
     pub last_filter_ms: u128,
+    /// The context menu checks whether a favorite's original transcript is still there.
+    claude: ClaudeDir,
 }
 
 fn col(key: &'static str, name: &'static str, width: f32) -> Column {
@@ -56,7 +67,7 @@ fn col(key: &'static str, name: &'static str, width: f32) -> Column {
 }
 
 impl SessionTableDelegate {
-    pub fn new() -> Self {
+    pub fn new(claude: ClaudeDir) -> Self {
         let columns = vec![
             col("project", "Project", PROJECT_W).sortable(),
             col("preview", "Preview", 460.).resizable(false),
@@ -79,6 +90,7 @@ impl SessionTableDelegate {
             sort: None,
             shown_cost: 0.0,
             last_filter_ms: 0,
+            claude,
         }
     }
 
@@ -295,6 +307,11 @@ impl SessionTableDelegate {
     }
 }
 
+/// A context menu label with its shortcut on the right.
+fn menu_line(label: &'static str, shortcut: &'static str) -> Div {
+    h_flex().w_full().gap(px(12.)).items_center().justify_between().child(label).child(div().text_size(px(11.)).text_color(style::muted()).child(shortcut))
+}
+
 /// A missing value sorts below any present one.
 fn cmp_missing_low<T: Copy>(a: Option<T>, b: Option<T>, cmp: impl Fn(&T, &T) -> Ordering) -> Ordering {
     match (a, b) {
@@ -335,12 +352,41 @@ impl TableDelegate for SessionTableDelegate {
             .child(column.name.clone())
     }
 
-    fn context_menu(&mut self, row_ix: usize, menu: gpui_kit::component::menu::PopupMenu, _: &mut Window, _: &mut Context<TableState<Self>>) -> gpui_kit::component::menu::PopupMenu {
-        use gpui_kit::component::menu::PopupMenuItem;
+    /// The actions of the right-clicked row, which need not be the selected one; greyed out as
+    /// in the detail header. Items with an id find no key binding by themselves (a binding is
+    /// for `id: None`), so the ones with a shortcut draw its hint.
+    fn context_menu(&mut self, row_ix: usize, menu: PopupMenu, _: &mut Window, cx: &mut Context<TableState<Self>>) -> PopupMenu {
         let row = self.row(row_ix).clone();
-        let path = row.transcript_path.clone();
-        menu.menu(if row.favorite { "取消收藏" } else { "收藏" }, Box::new(crate::favorites::FavoriteSession { id: row.id.to_string() }))
-            .item(PopupMenuItem::new("在 Finder 中显示").on_click(move |_, _, cx| { if let Some(path) = &path { cx.reveal_path(path); } }))
+        let a = actions::check(&row, &self.claude);
+        let id = || Some(row.id.to_string());
+        let favorite = if row.favorite { "Unfavorite" } else { "Favorite" };
+        // what Copy Resume Command copies, or why it cannot
+        let preview: SharedString = a.resume.clone().map(Into::into).or(a.copy_resume.err().map(Into::into)).unwrap_or_default();
+        let mono = style::mono(cx);
+        menu.min_w(px(MENU_W))
+            .max_w(px(MENU_W))
+            .item(PopupMenuItem::element(move |_, _| menu_line(favorite, "⌘D")).action(Box::new(FavoriteSession { id: row.id.to_string() })).disabled(a.favorite.is_err()))
+            .separator()
+            .item(PopupMenuItem::element(|_, _| menu_line("Copy Session ID", "⌘C")).action(Box::new(CopySessionId { id: id() })).disabled(a.copy_id.is_err()))
+            .item(
+                PopupMenuItem::element(move |_, _| {
+                    // a fixed width: the item's own wrapper would grow to the whole command
+                    v_flex()
+                        .w(px(MENU_ITEM_W))
+                        .overflow_hidden()
+                        .py(px(3.))
+                        .child(menu_line("Copy Resume Command", "⇧⌘C"))
+                        .child(div().truncate().font_family(mono.clone()).text_size(px(10.)).line_height(px(13.)).text_color(style::muted()).child(preview.clone()))
+                })
+                .action(Box::new(CopyResume { id: id() }))
+                .disabled(a.copy_resume.is_err()),
+            )
+            .separator()
+            .menu_with_disabled("Reveal Transcript in Finder", Box::new(RevealTranscript { id: id() }), a.reveal.is_err())
+            .menu_with_disabled("Open Project Folder", Box::new(OpenProjectFolder { id: id() }), a.open_folder.is_err())
+            .menu_with_disabled("Export Transcript as TXT…", Box::new(ExportTranscript { id: id() }), a.export.is_err())
+            .separator()
+            .menu(format!("Hide Project “{}”", row.project), Box::new(HideProject { id: id() }))
     }
 
     fn render_td(&mut self, row_ix: usize, col_ix: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
@@ -390,6 +436,10 @@ mod tests {
     use crate::model::tests::{row, summary};
     use crate::model::{Kind, KindSet};
 
+    fn delegate() -> SessionTableDelegate {
+        SessionTableDelegate::new(ClaudeDir::new("/nonexistent"))
+    }
+
     fn ids(d: &SessionTableDelegate) -> Vec<&str> {
         (0..d.ix.len()).map(|i| d.row(i).id.as_ref()).collect()
     }
@@ -402,7 +452,7 @@ mod tests {
 
     #[test]
     fn rows_show_newest_first_by_default() {
-        let mut d = SessionTableDelegate::new();
+        let mut d = delegate();
         d.set_rows(vec![row("a", "/p/x", 100), row("c", "/p/x", 300), row("b", "/p/y", 200)]);
         assert_eq!(ids(&d), ["c", "b", "a"]);
         assert_eq!(d.position_of("b"), Some(1));
@@ -411,7 +461,7 @@ mod tests {
 
     #[test]
     fn streamed_rows_are_inserted_in_order_and_changed_rows_replace_the_old_ones() {
-        let mut d = SessionTableDelegate::new();
+        let mut d = delegate();
         d.set_rows(vec![row("a", "/p/x", 100), row("b", "/p/x", 200)]);
         d.upsert(vec![row("c", "/p/x", 150), row("a", "/p/x", 400)]);
         assert_eq!(ids(&d), ["a", "b", "c"], "a moved to the top after its update, the new c is the oldest");
@@ -420,7 +470,7 @@ mod tests {
 
     #[test]
     fn the_filter_and_the_sort_survive_new_data() {
-        let mut d = SessionTableDelegate::new();
+        let mut d = delegate();
         d.set_rows(vec![with_prompts("a", "/p/x", 100, 5), with_prompts("b", "/p/y", 200, 9), with_prompts("c", "/p/x", 300, 1)]);
         d.set_filter(Filter { project: Some("-p-x".into()), ..Default::default() });
         d.set_sort("prompts", ColumnSort::Descending);
@@ -440,7 +490,7 @@ mod tests {
 
     #[test]
     fn the_kind_filter_survives_new_data() {
-        let mut d = SessionTableDelegate::new();
+        let mut d = delegate();
         d.set_rows(vec![row("a", "/p/x", 100), history("h1", "/p/x", 200), row("b", "/p/y", 300)]);
         let mut kinds = KindSet::default();
         kinds.toggle(Kind::History);
@@ -464,7 +514,7 @@ mod tests {
 
     #[test]
     fn a_search_shows_only_the_sessions_with_hits_and_stacks_with_the_filters() {
-        let mut d = SessionTableDelegate::new();
+        let mut d = delegate();
         d.set_rows(vec![row("a", "/p/x", 100), row("b", "/p/y", 200), row("c", "/p/x", 300)]);
         d.set_search(true);
         assert!(ids(&d).is_empty(), "a search that found nothing (yet) shows nothing");
@@ -481,7 +531,7 @@ mod tests {
 
     #[test]
     fn the_matches_column_exists_only_while_searching_and_sorts_by_hit_count() {
-        let mut d = SessionTableDelegate::new();
+        let mut d = delegate();
         let before = keys(&d);
         d.set_rows(vec![row("a", "/p/x", 100), row("b", "/p/y", 200), row("c", "/p/x", 300)]);
         d.set_search(true);
@@ -503,7 +553,7 @@ mod tests {
 
     #[test]
     fn search_targets_are_the_filtered_sessions_newest_first() {
-        let mut d = SessionTableDelegate::new();
+        let mut d = delegate();
         d.set_rows(vec![row("a", "/p/x", 100), row("b", "/p/y", 200), row("c", "/p/x", 300), history("h", "/p/x", 400)]);
         d.set_filter(Filter { project: Some("-p-x".into()), ..Default::default() });
         d.set_search(true);
@@ -514,7 +564,7 @@ mod tests {
 
     #[test]
     fn a_hidden_project_stays_hidden_when_new_sessions_of_it_arrive() {
-        let mut d = SessionTableDelegate::new();
+        let mut d = delegate();
         d.set_rows(vec![row("a", "/p/x", 100), row("p1", "/p/probe", 200)]);
         let mut filter = Filter::default();
         filter.hide_project("-p-probe".into());
@@ -527,7 +577,7 @@ mod tests {
 
     #[test]
     fn equal_sort_values_fall_back_to_newest_first() {
-        let mut d = SessionTableDelegate::new();
+        let mut d = delegate();
         d.set_rows(vec![with_prompts("old", "/p/x", 100, 2), with_prompts("new", "/p/x", 300, 2), with_prompts("top", "/p/x", 200, 8)]);
         d.set_sort("prompts", ColumnSort::Ascending);
         assert_eq!(ids(&d), ["new", "old", "top"]);
@@ -538,7 +588,7 @@ mod tests {
         let arrows = |d: &SessionTableDelegate| -> Vec<(String, ColumnSort)> {
             d.columns.iter().filter_map(|c| c.sort.map(|s| (c.key.to_string(), s))).filter(|(_, s)| *s != ColumnSort::Default).collect()
         };
-        let mut d = SessionTableDelegate::new();
+        let mut d = delegate();
         assert_eq!(arrows(&d), [("updated".to_string(), ColumnSort::Descending)]);
         d.set_sort("size", ColumnSort::Ascending);
         assert_eq!(arrows(&d), [("size".to_string(), ColumnSort::Ascending)]);
@@ -559,14 +609,14 @@ mod tests {
 
     #[test]
     fn cost_and_context_columns_sit_after_prompts() {
-        let d = SessionTableDelegate::new();
+        let d = delegate();
         assert_eq!(keys(&d), ["project", "preview", "started", "updated", "prompts", "cost", "context", "size", "kind"]);
         assert_eq!(FIXED_COLS_W, PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + COST_W + CTX_W + SIZE_W + KIND_W);
     }
 
     #[test]
     fn cost_and_context_sort_the_most_first_and_rows_without_data_last() {
-        let mut d = SessionTableDelegate::new();
+        let mut d = delegate();
         d.set_rows(vec![
             priced("a", "/p/x", 100, Some(1.0), Some(100_000)),
             priced("b", "/p/x", 200, None, None),
@@ -583,7 +633,7 @@ mod tests {
 
     #[test]
     fn the_shown_cost_adds_up_the_rows_on_screen() {
-        let mut d = SessionTableDelegate::new();
+        let mut d = delegate();
         d.set_rows(vec![priced("a", "/p/x", 100, Some(1.0), None), priced("b", "/p/y", 200, Some(2.5), None), priced("c", "/p/x", 300, None, None)]);
         assert_eq!(d.shown_cost, 3.5);
         d.set_filter(Filter { project: Some("-p-x".into()), ..Default::default() });

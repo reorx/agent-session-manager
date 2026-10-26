@@ -111,6 +111,22 @@ Root
 - 按钮外观：`ButtonCustomVariant` 定底色和 hover 色，边框、高度、圆角直接链在 `Button` 上。实例样式最后生效，能覆盖变体
 - 搜索框旁的开关（`.*`、`Aa`）也是自定义外观的 `Button`，开和关各用一套颜色，没有用 `Switch` 或 `ToggleGroup`。悬停说明用 `.tooltip(..)`
 
+### 右键菜单与带参数的 action
+
+表格行的右键菜单由 `TableDelegate::context_menu(row_ix, menu, ..)` 构造，每次打开时调用，`row_ix` 是右键点中的行（`TableState::right_clicked_row`），不是选中的行。菜单项派发的 action 从表格的焦点向上冒泡，到达 `AppRoot` 的 `on_action`。
+
+- **菜单右侧的快捷键提示是按 action 相等去查绑定的**（`popup_menu.rs::render_key_binding`）。本项目的 action 带 `id: Option<String>`：菜单项派发 `Some(id)`，快捷键绑定的是 `None`，两者不相等，所以普通的 `menu(..)` 项不会显示 `⌘C`。要显示就自己画：`PopupMenuItem::element(|_, _| 左标签 + 右提示).action(Box::new(..)).disabled(..)`。核实过（M4b spec 风险第 3 条）：element 项支持 `disabled`，点击时照常派发 action 并关闭菜单，不需要退回 `menu_with_disabled`
+- **element 项的外层 `h_flex` 没有 `min_w_0`**，内容里有一段很长的不换行文字（resume 命令预览）时，它会按整段文字撑宽，`truncate()` 不起作用，右侧提示被推到菜单外。给自绘内容一个固定宽度：菜单宽度减去菜单边距 4px 和项内边距 8px（两侧共 24px），见 `table.rs` 的 `MENU_ITEM_W`
+- 普通项置灰用 `menu_with_disabled(label, action, disabled)`。菜单项没有悬停提示，置灰的原因只能写在项里（本项目把它写在 Copy Resume Command 的预览行）
+
+### 按钮的图标与置灰
+
+- **补图标**：`gpui_kit::assets::Assets` 只带组件库用到的 101 个图标。要别的 Lucide 图标，用 `gpui_kit::assets::icon_assets!(ExtraIcons, [SquareTerminal, ..])` 生成只含这几个的 `AssetSource`，再写一个自己的 `AssetSource`：先查 `ExtraIcons`，查不到回落到 `Assets`，`list` 合并去重（`main.rs` 的 `AppAssets`，照 gpui-kit-assets README 的写法）。变体名是文件名的驼峰形式（`file-search.svg` → `FileSearch`），`gpui_kit::assets::IconName` 里能直接用
+- **图标尺寸**：`Button::icon(..)` 按按钮尺寸缩放图标，以 rem 计；本项目 rem 是 12px，小号按钮的图标只有 10px 左右。要画稿的 14px，就把 `Icon::new(..).with_size(px(14.))` 作为 child 放进按钮
+- **置灰的按钮照样显示悬停提示。** gpui-base 的 `Button` 置灰时只拦 mouse down 和 click，悬停不拦，`tooltip(..)` 照常出现。所以标题行置灰的按钮把提示换成原因
+- **置灰的外观**：自定义变体（`ButtonCustomVariant`）置灰时背景是底色的 15%、边框是底色的 15%（白底就看不见了）。实例上链的 `.border_color(..)` 在置灰状态下也会覆盖回来，再加 `.opacity(0.4)` 就是画稿的样子
+- 带快捷键的按钮用 `tooltip_with_action(文字, &action, Some("DataTable"))`，提示里会画出键帽
+
 ## 搜索框与键盘
 
 搜索框是 `Input`，状态在 `InputState` 里，两者分开：状态在构造视图时创建并订阅事件，render 时用 `Input::new(&state)` 画出来。
@@ -184,6 +200,8 @@ edition 2024 下，`fn f(cx: &App) -> impl IntoElement` 的返回值会捕获 `c
 | 后台线程 | 先调 `cx.executor().allow_parking()`。测试调度器默认把别的线程发来的唤醒当成"测试不确定"而报错，而 store 和搜索线程是真线程 |
 | 等后台结果 | 真实时间轮询：`run_until_parked()` 后检查条件，不满足就睡 10ms 再看。`wait_for` 走的是测试时钟，等不到真线程 |
 | 定时器 | 防抖这类定时器走测试时钟，用 `cx.executor().advance_clock(..)` 推进 |
+| 剪贴板 | 测试平台有自己的剪贴板：应用里 `cx.write_to_clipboard(..)` 写进去，测试里 `cx.read_from_clipboard()` 读出来，不碰系统剪贴板 |
+| 保存 / 打开对话框 | `cx.simulate_new_path_selection(..)` / `simulate_path_prompt_response(..)` 回答；测试平台的 `reveal_path` 是 `unimplemented!()`，测试里不要走到它 |
 
 这类测试能证明按键到动作到状态的整条路径，证明不了系统把物理按键交给 GPUI 的那一段，也不看像素。
 
@@ -229,6 +247,8 @@ use core::prelude::v1::test;
 | 输入框的 Escape | 是 `component::input::Escape` 这个 Action，在上层用 `.on_action(..)` 接 |
 | `TableState::scroll_to_row` | 把目标行滚到顶部；`set_selected_row` 也会滚动 |
 | 自绘滚动条 | 容器 `.overflow_y_scroll().track_scroll(&handle)`，外层 `.vertical_scrollbar(&handle)`；不需要句柄时直接 `.overflow_y_scrollbar()` |
+| 剪贴板、Finder、保存对话框 | `cx.write_to_clipboard(ClipboardItem::new_string(..))`；`cx.reveal_path(path)` 在 Finder 里选中，`cx.open_with_system(dir)` 打开目录；`cx.prompt_for_new_path(dir, Some(文件名))` 返回 oneshot，结果是 `Result<Option<PathBuf>>`，取消是 `Ok(None)` |
+| 带字段的 action | `#[derive(Clone, PartialEq, serde::Deserialize, gpui_kit::Action)]` 加 `#[action(namespace = app, no_json)]`；`KeyBinding::new("cmd-c", CopySessionId { id: None }, Some("DataTable"))` 直接绑一个值 |
 
 ## 相关文件
 

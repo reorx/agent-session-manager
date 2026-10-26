@@ -8,6 +8,7 @@
 //! `ASM_DETAIL_AUTOPLAY=1` to tour the Conversation tab (`make screenshot-detail`);
 //! `ASM_CLAUDE_DIR`, `ASM_DB` and `ASM_STATE` point the app at other data.
 
+mod actions;
 mod conversation;
 mod detail;
 mod favorites;
@@ -39,6 +40,7 @@ use gpui_kit::component::table::{ColumnSort, DataTable, TableEvent, TableState};
 use gpui_kit::component::{ResizableState, Root, Sizable, h_resizable, resizable_panel, v_flex};
 use gpui_kit::*;
 
+use crate::actions::{CopyResume, CopySessionId, ExportTranscript, HideProject, OpenProjectFolder, RevealTranscript};
 use crate::conversation::{Card, ConversationView};
 use crate::detail::{DETAIL_W, DetailState, DetailTab, Load};
 use crate::model::{DisplayMode, Filter, Kind, ProjectEntry, RangePreset, SessionRow, kind_counts, project_entries, split_hidden};
@@ -67,8 +69,7 @@ gpui_kit::actions!(
         Preview4,
         Rescan,
         RebuildIndex,
-        ToggleEmptySessions,
-        HideSelectedProject
+        ToggleEmptySessions
     ]
 );
 
@@ -135,6 +136,8 @@ pub struct AppRoot {
     conversation_pattern: Option<String>,
     detail_timing: Option<DetailTiming>,
     detail_visible: bool,
+    /// Where the last TXT export of this run went: the save dialog starts there next time.
+    last_export_dir: Option<PathBuf>,
     status: SharedString,
     index_status: IndexStatus,
     db_info: SharedString,
@@ -185,7 +188,7 @@ impl AppRoot {
     fn new(paths: AppPaths, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state_path = paths.state;
         let saved = ViewState::load(&state_path);
-        let mut delegate = SessionTableDelegate::new();
+        let mut delegate = SessionTableDelegate::new(paths.claude.clone());
         delegate.mode = saved.mode;
         let (since_ms, until_ms) = saved.range.bounds(saved.custom_range);
         delegate.set_filter(Filter {
@@ -299,6 +302,7 @@ impl AppRoot {
             conversation_pattern: None,
             detail_timing: None,
             detail_visible: saved.detail_visible,
+            last_export_dir: None,
             status: "".into(),
             index_status: IndexStatus::Loading,
             db_info: "".into(),
@@ -360,6 +364,7 @@ impl AppRoot {
                         self.show_conversation(conversation, read, build);
                     }
                 }
+                StoreEvent::Exported { dest, result } => self.exported(&dest, result, window, cx),
                 StoreEvent::FavoriteChanged { id, favorite } => {
                     use gpui_kit::component::WindowExt;
                     window.push_notification(format!("{} {}", if favorite { "已收藏" } else { "已取消收藏" }, id), cx);
@@ -430,6 +435,8 @@ impl AppRoot {
             if !same_session {
                 self.open_conversation(&row);
             }
+            // a few stats; the row may also have changed (favorited, the transcript cleaned up)
+            self.detail.actions = actions::check(&row, &self.claude);
             self.wanted_id = None;
             self.selected = Some(row);
             self.persist(cx);
@@ -951,7 +958,12 @@ impl Render for AppRoot {
             .on_action(cx.listener(|this, _: &Rescan, _, cx| this.rescan(false, cx)))
             .on_action(cx.listener(|this, _: &RebuildIndex, _, cx| this.rescan(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleEmptySessions, _, cx| this.toggle_empty_sessions(cx)))
-            .on_action(cx.listener(|this, _: &HideSelectedProject, _, cx| this.hide_selected_project(cx)))
+            .on_action(cx.listener(|this, action: &HideProject, _, cx| this.hide_project_of(action.id.as_deref(), cx)))
+            .on_action(cx.listener(|this, action: &CopySessionId, window, cx| this.copy_session_id(action.id.as_deref(), window, cx)))
+            .on_action(cx.listener(|this, action: &CopyResume, window, cx| this.copy_resume(action.id.as_deref(), window, cx)))
+            .on_action(cx.listener(|this, action: &RevealTranscript, window, cx| this.reveal_transcript(action.id.as_deref(), window, cx)))
+            .on_action(cx.listener(|this, action: &OpenProjectFolder, window, cx| this.open_project_folder(action.id.as_deref(), window, cx)))
+            .on_action(cx.listener(|this, action: &ExportTranscript, window, cx| this.export_transcript(action.id.as_deref(), window, cx)))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)))
             .on_action(cx.listener(|this, _: &Escape, window, cx| this.clear_search(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| this.toggle_regex(cx)))
@@ -995,6 +1007,30 @@ impl Render for AppRoot {
     }
 }
 
+// Only the icons the component bundle lacks (the detail header's buttons); see gpui-kit-assets'
+// README, "Default component icons and application extras".
+gpui_kit::assets::icon_assets!(ExtraIcons, [SquareTerminal, FileSearch, Download]);
+
+/// The default component icons plus `ExtraIcons`.
+struct AppAssets;
+
+impl AssetSource for AppAssets {
+    fn load(&self, path: &str) -> Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        match ExtraIcons.load(path)? {
+            Some(bytes) => Ok(Some(bytes)),
+            None => gpui_kit::assets::Assets.load(path),
+        }
+    }
+
+    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+        let mut paths = gpui_kit::assets::Assets.list(path)?;
+        paths.extend(ExtraIcons.list(path)?);
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+}
+
 /// `ASM_AUTOPLAY_STEP`, or `cut-output` for the older `ASM_AUTOPLAY_CUT_OUTPUT=1`.
 fn autoplay_step() -> Option<String> {
     std::env::var("ASM_AUTOPLAY_STEP").ok().filter(|v| !v.is_empty()).or_else(|| std::env::var_os("ASM_AUTOPLAY_CUT_OUTPUT").map(|_| "cut-output".into()))
@@ -1013,6 +1049,9 @@ fn bind_keys(cx: &mut App) {
         // plain keys only while the table has the focus, never while typing in the search box
         KeyBinding::new("n", NextHit, Some("DataTable")),
         KeyBinding::new("shift-n", PrevHit, Some("DataTable")),
+        // in the search box cmd-c copies text as usual
+        KeyBinding::new("cmd-c", CopySessionId { id: None }, Some("DataTable")),
+        KeyBinding::new("cmd-shift-c", CopyResume { id: None }, Some("DataTable")),
         KeyBinding::new("cmd-1", Preview1, None),
         KeyBinding::new("cmd-2", Preview2, None),
         KeyBinding::new("cmd-3", Preview3, None),
@@ -1022,7 +1061,7 @@ fn bind_keys(cx: &mut App) {
 }
 
 fn main() {
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    let app = gpui_kit::application().with_assets(AppAssets);
     app.run(move |cx| {
         gpui_kit::init(cx);
         style::install_theme(cx);
@@ -1045,7 +1084,7 @@ fn main() {
                 MenuItem::action("Preview: Last Message", Preview4),
                 MenuItem::separator(),
                 MenuItem::action("Show / Hide Sessions Without Prompts", ToggleEmptySessions),
-                MenuItem::action("Hide Project of Selected Session", HideSelectedProject),
+                MenuItem::action("Hide Project of Selected Session", HideProject { id: None }),
             ]),
             Menu::new("Favorites").items(vec![
                 MenuItem::action("Toggle Favorite", ToggleFavorite),

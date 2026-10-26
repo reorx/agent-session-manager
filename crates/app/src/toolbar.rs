@@ -124,12 +124,6 @@ impl AppRoot {
         self.apply_filter(filter, cx);
     }
 
-    pub fn hide_selected_project(&mut self, cx: &mut Context<Self>) {
-        if let Some(key) = self.selected.as_ref().map(|row| row.project_key.clone()) {
-            self.hide_project(key, cx);
-        }
-    }
-
     pub fn set_range(&mut self, range: RangePreset, cx: &mut Context<Self>) {
         self.range = range;
         let mut filter = self.current_filter(cx);

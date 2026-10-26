@@ -440,3 +440,56 @@ fn last_copy_requires_confirmation_and_cancel_keeps_it(cx: &mut TestAppContext) 
     assert!(h.app.read_with(cx, |app, _| app.selected.as_ref().unwrap().transcript_path.as_ref().unwrap().exists()));
     assert_eq!(focus(cx, &h), (false, true));
 }
+
+const S1: &str = "11111111-aaaa-4bbb-8ccc-000000000001";
+const S4: &str = "44444444-aaaa-4bbb-8ccc-000000000004";
+
+fn select(cx: &mut TestAppContext, h: &Harness, id: &str) {
+    h.app.update(cx, |app, cx| {
+        let row = app.table.read(cx).delegate().position_of(id).expect("the session is listed");
+        app.select_row(row, cx);
+    });
+}
+
+/// The test platform's clipboard: the system one is never touched.
+fn clipboard(cx: &mut TestAppContext) -> Option<String> {
+    cx.read_from_clipboard().and_then(|item| item.text())
+}
+
+#[gpui_kit::test]
+fn command_c_copies_the_session_id_and_shift_command_c_the_resume_command(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    select(cx, &h, S1);
+    assert_eq!(focus(cx, &h), (false, true));
+    press(cx, &h, "cmd-c");
+    assert_eq!(clipboard(cx).as_deref(), Some(S1));
+    press(cx, &h, "cmd-shift-c");
+    // without a cd when the fixture's project folder is not on this machine
+    let project = "/Users/me/Code/alpha";
+    assert_eq!(clipboard(cx), crate::actions::resume_command(S1, project, std::path::Path::new(project).is_dir()));
+    assert!(clipboard(cx).unwrap().ends_with(&format!("claude --resume {S1}")));
+}
+
+#[gpui_kit::test]
+fn command_c_in_the_search_box_does_not_copy_the_session_id(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    select(cx, &h, S1);
+    press(cx, &h, "cmd-f");
+    type_text(cx, &h, "parser");
+    press(cx, &h, "cmd-a");
+    press(cx, &h, "cmd-c");
+    assert_eq!(clipboard(cx).as_deref(), Some("parser"), "the box copies its own text");
+    press(cx, &h, "escape");
+    press(cx, &h, "cmd-c");
+    assert_eq!(clipboard(cx).as_deref(), Some(S1), "back in the table cmd-c copies the id again");
+}
+
+#[gpui_kit::test]
+fn copying_the_resume_command_of_a_history_session_copies_nothing(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    select(cx, &h, S4);
+    press(cx, &h, "cmd-shift-c");
+    assert_eq!(clipboard(cx), None, "the transcript is gone: there is nothing to resume");
+    press(cx, &h, "cmd-c");
+    assert_eq!(clipboard(cx).as_deref(), Some(S4), "its id can still be copied");
+}
