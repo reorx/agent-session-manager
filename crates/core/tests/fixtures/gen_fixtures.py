@@ -576,6 +576,44 @@ reader_rows = [
     {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': '这是一张图片。'}]}},
 ]
 
+
+# Conversation-specific records do not change the discovery/index fixtures.
+def conversation_rows():
+    def u(text, **kw):
+        return dict(type='user', message={'content': text}, **kw)
+    def a(blocks, mid=None, **kw):
+        return dict(type='assistant', message={'id': mid, 'content': blocks}, **kw)
+    def text(t):
+        return {'type': 'text', 'text': t}
+    call = {'type': 'tool_use', 'id': 'bash', 'name': 'Bash',
+            'input': {'timeout': 1000, 'command': 'echo needle', 'description': 'inspect'}}
+    return [
+        a([text('startup')]),
+        u([text('first needle'), {'type': 'image', 'source': {'data': 'YWJj'}}], uuid='prompt'),
+        u('duplicate', uuid='prompt'),
+        u('injected', isMeta=True),
+        a([{'type': 'thinking', 'thinking': '', 'signature': 'sig'},
+           {'type': 'thinking', 'thinking': 'think needle'}, text('working'), call], 'work'),
+        u([{'type': 'tool_result', 'tool_use_id': 'bash', 'content': 'line\n' * 900 + 'needle', 'is_error': True}]),
+        a([{'type': 'tool_use', 'id': 'read', 'name': 'Read', 'input': {'file_path': '/tmp/a'}}]),
+        u([{'type': 'tool_result', 'tool_use_id': 'read', 'content': [text('array result')]}]),
+        u([{'type': 'tool_result', 'tool_use_id': 'missing', 'content': 'orphan'}]),
+        a([text('reply needle')], 'final'),
+        a([text('second block')], 'final'),
+        {'type': 'system', 'subtype': 'turn_duration', 'durationMs': 100},
+        {'type': 'system', 'subtype': 'turn_duration', 'durationMs': 200},
+        u('second'),
+        u('[Request interrupted by user]\n', interruptedMessageId='x'),
+        u('task needle', origin={'kind': 'task-notification'}),
+        a([text('API Error: unavailable')], isApiErrorMessage=True),
+        {'type': 'system', 'subtype': 'compact_boundary'},
+        u('summary needle', isCompactSummary=True),
+        'broken json',
+    ]
+
 if __name__ == '__main__':
     main()
     write_jsonl(OUT.parent / 'reader.jsonl', reader_rows)
+    write_jsonl(OUT.parent / 'conversation.jsonl', conversation_rows())
+    with (OUT.parent / 'conversation.jsonl').open('a') as fp:
+        fp.write('{"type":')

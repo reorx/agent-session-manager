@@ -43,35 +43,42 @@ pub fn resolve_transcript(claude: &ClaudeDir, favorites: Option<&ClaudeDir>, inp
 }
 
 #[derive(Deserialize)]
-struct Record<'a> {
+pub(crate) struct Record<'a> {
     #[serde(rename = "type")]
-    kind: Option<String>,
-    uuid: Option<String>,
-    subtype: Option<String>,
+    pub(crate) kind: Option<String>,
+    pub(crate) uuid: Option<String>,
+    pub(crate) subtype: Option<String>,
     #[serde(rename = "isMeta", default)]
-    is_meta: bool,
+    pub(crate) is_meta: bool,
     #[serde(rename = "isSidechain", default)]
-    is_sidechain: bool,
+    pub(crate) is_sidechain: bool,
     #[serde(rename = "isCompactSummary", default)]
-    is_compact_summary: bool,
+    pub(crate) is_compact_summary: bool,
     #[serde(rename = "isAbortedMidStream", default)]
-    is_aborted: bool,
-    origin: Option<Origin>,
+    pub(crate) is_aborted: bool,
+    pub(crate) timestamp: Option<String>,
+    #[serde(rename = "isApiErrorMessage", default)]
+    pub(crate) is_api_error: bool,
+    #[serde(rename = "interruptedMessageId")]
+    pub(crate) interrupted_message_id: Option<String>,
+    #[serde(rename = "durationMs")]
+    pub(crate) duration_ms: Option<i64>,
+    pub(crate) origin: Option<Origin>,
     #[serde(borrow)]
-    message: Option<Message<'a>>,
+    pub(crate) message: Option<Message<'a>>,
 }
 
 #[derive(Deserialize)]
-struct Origin {
-    kind: Option<String>,
+pub(crate) struct Origin {
+    pub(crate) kind: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct Message<'a> {
-    id: Option<String>,
-    stop_reason: Option<String>,
+pub(crate) struct Message<'a> {
+    pub(crate) id: Option<String>,
+    pub(crate) stop_reason: Option<String>,
     #[serde(borrow)]
-    content: Option<&'a RawValue>,
+    pub(crate) content: Option<&'a RawValue>,
 }
 
 #[derive(Default)]
@@ -153,20 +160,27 @@ fn write_body(output: &mut String, role: &str, text: &str) {
     output.push_str(&format!("<{role}>\n{body}\n</{role}>\n\n"));
 }
 
-fn human_text(record: &Record, content: &Content) -> Option<String> {
+pub(crate) fn is_human_input(record: &Record, content: &Content) -> bool {
     if record.is_meta || record.is_compact_summary
         || record.origin.as_ref().and_then(|o| o.kind.as_deref()).is_some_and(|kind| kind != "human") {
-        return None;
+        return false;
     }
     if let Content::Blocks(blocks) = content {
         if blocks.iter().any(|b| b.kind.as_deref() == Some("tool_result")) {
-            return None;
+            return false;
         }
     }
     let text = user_text(content).unwrap_or_default();
     if text.starts_with("[Image: source:") {
-        return None;
+        return false;
     }
+    !clean_prompt(&text).is_empty() || matches!(content, Content::Blocks(blocks)
+        if blocks.iter().any(|b| matches!(b.kind.as_deref(), Some("image" | "document"))))
+}
+
+fn human_text(record: &Record, content: &Content) -> Option<String> {
+    if !is_human_input(record, content) { return None; }
+    let text = user_text(content).unwrap_or_default();
     let mut text = clean_prompt(&text);
     if let Content::Blocks(blocks) = content {
         for block in blocks {

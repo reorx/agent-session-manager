@@ -53,6 +53,12 @@ enum Cmd {
     /// Show the session whose id starts with ID
     Session {
         id: String,
+        /// Read turn cards directly from the transcript, without accessing the index
+        #[arg(long)]
+        conversation: bool,
+        /// Highlight a regular expression in the conversation
+        #[arg(long = "match", requires = "conversation")]
+        pattern: Option<String>,
         #[arg(short = 'n', long, default_value_t = 200)]
         limit: usize,
         #[arg(long)]
@@ -231,7 +237,10 @@ fn main() -> ExitCode {
         Cmd::Transcript(args) => transcript::run(args, &app.claude, &app.db_path, &mut app.out),
         Cmd::Index { rebuild } => app.index(rebuild),
         Cmd::List(args) => app.list(args),
-        Cmd::Session { id, limit, no_scan } => app.session(&id, limit, no_scan),
+        Cmd::Session { id, limit, no_scan, conversation, pattern } => {
+            if conversation { app.conversation(&id, pattern.as_deref()) }
+            else { app.session(&id, limit, no_scan) }
+        },
         Cmd::Search(args) => app.search(args),
         Cmd::Cost(args) => app.cost(args),
         Cmd::Stats => app.stats(),
@@ -250,6 +259,44 @@ fn main() -> ExitCode {
 }
 
 impl App {
+    fn conversation(&mut self, id: &str, pattern: Option<&str>) -> Result<()> {
+        use agent_session_core::{claude::conversation::read_conversation, model::{ConvItem, StepKind, TurnEnd}, search::Matcher};
+        let favorites = ClaudeDir::new(agent_session_core::config::favorites_dir(&self.db_path)?.join("claude"));
+        let path = agent_session_core::transcript::resolve_transcript(&self.claude, Some(&favorites), id)?;
+        let matcher = pattern.map(|p| Matcher::regex(p, true));
+        let start = std::time::Instant::now();
+        let conv = read_conversation(&path, matcher.as_ref())?;
+        let elapsed = start.elapsed();
+        let hits = conv.hit_places();
+        let mut counts = vec![0; conv.items.len()];
+        for hit in &hits { counts[hit.item] += 1; }
+        let (mut turns, mut autos, mut compacts, mut tools) = (0, 0, 0, 0);
+        let (mut interrupted, mut errors, mut completed, mut no_reply) = (0, 0, 0, 0);
+        for (i, item) in conv.items.iter().enumerate() {
+            match item {
+                ConvItem::Compact(_) => {
+                    compacts += 1;
+                    writeln!(self.out, "COMPACT hits={}", counts[i])?;
+                }
+                ConvItem::Turn(t) => {
+                    let label = if let Some(n) = t.number { turns += 1; format!("TURN {n}") }
+                        else { autos += 1; format!("AUTO {}", t.origin.as_deref().unwrap_or("unknown")) };
+                    tools += t.steps.iter().filter(|s| matches!(s.kind, StepKind::Tool(_))).count();
+                    let end = match t.end {
+                        TurnEnd::Completed => { completed += 1; "completed" }
+                        TurnEnd::Interrupted { .. } => { interrupted += 1; "interrupted" }
+                        TurnEnd::ApiError { .. } => { errors += 1; "api-error" }
+                        TurnEnd::NoReply => { no_reply += 1; "no-reply" }
+                    };
+                    writeln!(self.out, "{label} steps={} end={end} hits={}", t.steps.len(), counts[i])?;
+                }
+            }
+        }
+        writeln!(self.out, "total turns={turns} auto={autos} compact={compacts} tools={tools} completed={completed} interrupted={interrupted} api-error={errors} no-reply={no_reply} hits={} skipped={} bytes={} read_ms={:.3}",
+            hits.len(), conv.skipped_lines, conv.bytes, elapsed.as_secs_f64() * 1000.)?;
+        Ok(())
+    }
+
     fn favorite(&mut self, id: &str, remove: bool, yes: bool) -> Result<()> {
         use agent_session_core::{config, favorites};
         let mut db = self.open_db(true)?;

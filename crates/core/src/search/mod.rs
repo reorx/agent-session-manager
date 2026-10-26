@@ -41,9 +41,16 @@ impl Highlighted {
 #[derive(Clone, Debug)]
 pub struct Matcher {
     re: Regex,
+    pattern: String,
 }
 
 impl Matcher {
+    /// Stable identity of the effective expression, including its case-sensitivity flag.
+    /// Consumers can compare this to decide whether highlighted content needs rereading.
+    pub fn pattern(&self) -> &str { &self.pattern }
+
+    pub(crate) fn re(&self) -> &Regex { &self.re }
+
     /// Text mode: any of the whitespace-separated words, case-insensitive. `None` for a blank query.
     pub fn words(query: &str) -> Option<Matcher> {
         let mut words: Vec<&str> = query.split_whitespace().collect();
@@ -54,12 +61,14 @@ impl Matcher {
         words.sort_by_key(|w| std::cmp::Reverse(w.len()));
         let pattern = words.iter().map(|w| ::regex::escape(w)).collect::<Vec<_>>().join("|");
         let re = regex::compile_query(&pattern, false).expect("escaped words always compile");
-        Some(Matcher { re })
+        Some(Matcher { pattern: format!("(?i:{})", re.as_str()), re })
     }
 
     /// Regex mode; a query that is not a valid regex is matched as literal text.
     pub fn regex(query: &str, case_sensitive: bool) -> Matcher {
-        Matcher { re: regex::compile_query(query, case_sensitive).expect("escaped query always compiles") }
+        let re = regex::compile_query(query, case_sensitive).expect("escaped query always compiles");
+        let flag = if case_sensitive { "-i" } else { "i" };
+        Matcher { pattern: format!("(?{flag}:{})", re.as_str()), re }
     }
 
     pub fn is_match(&self, text: &str) -> bool {

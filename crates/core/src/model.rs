@@ -275,3 +275,66 @@ pub struct TranscriptExport {
     /// Malformed JSON records, including a partially written final line.
     pub skipped_lines: usize,
 }
+
+/// A directly read transcript, in file order, independent of the SQLite index.
+#[derive(Debug)]
+pub struct Conversation {
+    pub items: Vec<ConvItem>,
+    /// File size at read time, including any unfinished tail.
+    pub bytes: u64,
+    /// Invalid complete JSON lines; an unfinished final line is not counted.
+    pub skipped_lines: usize,
+}
+#[derive(Debug)]
+pub enum ConvItem { Turn(Turn), Compact(Compaction) }
+#[derive(Debug)]
+pub struct Turn {
+    /// Human turns count from one; automatic segments have no number.
+    pub number: Option<u32>,
+    pub origin: Option<String>,
+    pub ts: Option<i64>,
+    pub prompt: Marked,
+    pub attachments: Vec<Attachment>,
+    pub steps: Vec<Step>,
+    pub reply: Option<Reply>,
+    pub end: TurnEnd,
+    pub duration_ms: Option<i64>,
+    pub last_ts: Option<i64>,
+}
+#[derive(Debug)]
+pub struct Attachment { pub kind: String, pub bytes: u64 }
+#[derive(Debug)]
+pub struct Step { pub ts: Option<i64>, pub kind: StepKind }
+#[derive(Debug)]
+pub enum StepKind { Text(Marked), Thinking(Marked), Tool(ToolCall) }
+#[derive(Debug)]
+pub struct ToolCall {
+    pub name: String,
+    /// Single-line argument preview, at most 300 characters; paths remain absolute.
+    pub arg: String,
+    pub input: Vec<crate::search::regex::ToolLine>,
+    pub result: Option<ToolResult>,
+}
+#[derive(Debug)]
+pub struct ToolResult { pub output: Marked, pub bytes: usize, pub lines: usize, pub is_error: bool }
+#[derive(Debug)]
+pub struct Reply { pub ts: Option<i64>, pub text: Marked }
+#[derive(Debug)]
+pub enum TurnEnd { Completed, Interrupted { ts: Option<i64> }, ApiError { ts: Option<i64>, text: String }, NoReply }
+#[derive(Debug)]
+pub struct Compaction { pub ts: Option<i64>, pub summary: Option<Marked> }
+#[derive(Debug, Default)]
+pub struct Marked {
+    pub text: String,
+    /// UTF-8 byte ranges in `text`, after truncation and omission markers.
+    pub hits: Vec<std::ops::Range<usize>>,
+    /// Original character and source-line counts, before truncation.
+    pub chars: usize,
+    pub lines: usize,
+    /// The retained window moved to the first match and begins with an ellipsis.
+    pub moved: bool,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Part { Prompt, Step(usize), Reply, Summary }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HitPlace { pub item: usize, pub part: Part }

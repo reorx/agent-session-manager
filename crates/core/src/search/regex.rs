@@ -15,7 +15,7 @@ use regex::{Regex, RegexBuilder};
 use serde_json::{Map, Value};
 
 use super::Highlighted;
-use super::pyjson::stringify;
+pub(crate) use super::pyjson::stringify;
 use crate::claude::discover::{TranscriptFile, discover_all};
 use crate::claude::parse::{Content, LineKind, RawRecord, classify, map_file, parse_content};
 use crate::claude::paths::ClaudeDir;

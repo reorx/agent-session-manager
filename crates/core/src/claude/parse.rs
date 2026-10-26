@@ -656,6 +656,19 @@ pub(crate) struct RawBlock<'a> {
     pub input: Option<&'a RawValue>,
     #[serde(borrow)]
     pub content: Option<&'a RawValue>,
+    #[serde(borrow)]
+    pub id: Option<Cow<'a, str>>,
+    #[serde(borrow)]
+    pub tool_use_id: Option<Cow<'a, str>>,
+    pub is_error: Option<bool>,
+    #[serde(borrow)]
+    pub source: Option<RawSource<'a>>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RawSource<'a> {
+    #[serde(borrow)]
+    pub data: Option<&'a RawValue>,
 }
 
 pub(crate) enum Content<'a> {

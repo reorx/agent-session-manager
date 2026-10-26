@@ -5,3 +5,5 @@ pub mod discover;
 pub mod history;
 pub mod parse;
 pub mod paths;
+
+pub mod conversation;
