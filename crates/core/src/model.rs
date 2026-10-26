@@ -276,9 +276,18 @@ pub struct TranscriptExport {
     pub skipped_lines: usize,
 }
 
-/// A directly read transcript, in file order, independent of the SQLite index.
+/// A prompt recovered from history.jsonl, with its Unix millisecond timestamp.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryPrompt {
+    pub ts: i64,
+    pub text: String,
+}
+
+/// A directly read transcript or history prompts, independent of the SQLite index.
 #[derive(Debug)]
 pub struct Conversation {
+    /// History cards have no reply information; do not present NoReply as a failure.
+    pub history_only: bool,
     pub items: Vec<ConvItem>,
     /// File size at read time, including any unfinished tail.
     pub bytes: u64,

@@ -247,3 +247,35 @@ fn a_tool_use_stop_reason_prevents_a_prior_text_from_becoming_the_reply() {
     assert!(turn(&c, 0).reply.is_none());
     assert!(matches!(turn(&c, 0).end, TurnEnd::NoReply));
 }
+
+#[test]
+fn a_history_conversation_is_one_prompt_only_turn_per_prompt_with_hits_marked() {
+    use agent_session_core::claude::conversation::conversation_from_history;
+    use agent_session_core::model::HistoryPrompt;
+    let prompts = vec![
+        HistoryPrompt { ts: 123, text: "中文 needle".into() },
+        HistoryPrompt { ts: 456, text: format!("{}needle", "长".repeat(ENTRY_CHARS + 1)) },
+        HistoryPrompt { ts: 789, text: String::new() },
+    ];
+    let matcher = Matcher::regex("needle", true);
+    let c = conversation_from_history(&prompts, Some(&matcher));
+    assert!(c.history_only);
+    assert!(!fixture(None).history_only);
+    assert_eq!(c.items.len(), prompts.len());
+    assert_eq!((c.bytes, c.skipped_lines), (0, 0));
+    for (i, p) in prompts.iter().enumerate() {
+        let t = turn(&c, i);
+        assert_eq!(t.number, Some(i as u32 + 1));
+        assert_eq!(t.ts, Some(p.ts));
+        assert_eq!(t.last_ts, Some(p.ts));
+        assert!(t.origin.is_none() && t.duration_ms.is_none());
+        assert!(t.attachments.is_empty() && t.steps.is_empty() && t.reply.is_none());
+        assert!(matches!(t.end, TurnEnd::NoReply));
+    }
+    assert_eq!(turn(&c, 0).prompt.hits, vec![7..13]);
+    assert!(turn(&c, 1).prompt.moved);
+    assert_eq!(c.hit_places(), vec![HitPlace { item: 0, part: Part::Prompt }, HitPlace { item: 1, part: Part::Prompt }]);
+    let empty = conversation_from_history(&[], None);
+    assert!(empty.history_only && empty.items.is_empty());
+    assert!(conversation_from_history(&prompts, None).hit_places().is_empty());
+}

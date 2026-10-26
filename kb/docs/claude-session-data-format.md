@@ -1,6 +1,6 @@
 ---
 created: 2026-09-08
-updated: 2026-10-26
+updated: 2026-10-27
 tags:
   - claude-code
   - data-format
@@ -139,6 +139,7 @@ assistant 特有：`requestId`、`effort`、`message.model`、`message.id`、`me
 - 按 `encode(project)` 分组；有 `sessionId` 的按 id 聚合；没有的按时间间隔 > 2h 切分为匿名 session。
 - transcript 存在时以 transcript 为准；仅当 transcript 缺失时用 history 补位并标记 `source = history`。
 - history 的 `display` 里 `/` 开头的是斜杠命令，取第一条非命令行作为 first_prompt；`[Pasted text #1 +5 lines]` 是粘贴占位符，正文在 `pastedContents`。
+- core 的 `history_sessions` 与 `history_prompts` 共用 `group_history`，详情保留组内每行（含斜杠命令和空文本），条数与表格 Prompts 一致。粘贴正文先从内联内容或 `paste-cache` 还原，再经 `clean_prompt` 清理；无法还原时保留占位符。`conversation_from_history` 将每条 prompt 转成一个 `NoReply` 回合，并设置 `Conversation.history_only`，供界面区分历史提示与普通的缺失回复；History 没有 transcript 字节数，`bytes` 为 0。
 
 ## 5. 增量索引要点
 

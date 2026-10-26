@@ -12,12 +12,23 @@ use super::parse::{Content, RawBlock, map_file, parse_content, user_text};
 use crate::format::parse_ts;
 use crate::model::*;
 use crate::search::{Highlighted, Matcher, regex::{ToolLine, ToolLineKind, stringify}};
-use crate::transcript::{Record, is_human_input};
+use crate::transcript::{Record, is_human_input, is_interruption};
 
 pub const ENTRY_CHARS: usize = 20_000;
 pub const RESULT_CHARS: usize = 3_000;
 pub const INPUT_FIELD_CHARS: usize = 2_000;
 pub const HIT_LEAD_CHARS: usize = 200;
+
+/// History contains prompts only; preserve every row, including commands and empty prompts.
+pub fn conversation_from_history(prompts: &[HistoryPrompt], matcher: Option<&Matcher>) -> Conversation {
+    let items = prompts.iter().enumerate().map(|(i, p)| ConvItem::Turn(Turn {
+        number: Some(i as u32 + 1), origin: None, ts: Some(p.ts),
+        prompt: Marked::new(&p.text, ENTRY_CHARS, matcher),
+        attachments: Vec::new(), steps: Vec::new(), reply: None,
+        end: TurnEnd::NoReply, duration_ms: None, last_ts: Some(p.ts),
+    })).collect();
+    Conversation { history_only: true, items, bytes: 0, skipped_lines: 0 }
+}
 
 impl Marked {
     pub fn new(text: &str, cap: usize, matcher: Option<&Matcher>) -> Self {
@@ -194,7 +205,7 @@ impl Reader<'_> {
                 return;
             }
         }
-        if r.interrupted_message_id.is_some() || text.trim().starts_with("[Request interrupted by user") {
+        if is_interruption(r, &text) {
             self.ensure_turn(ts); self.candidate = None; self.turn().end = TurnEnd::Interrupted { ts }; return;
         }
         if is_human_input(r, content) {
@@ -302,7 +313,7 @@ pub fn read_conversation(path: &Path, matcher: Option<&Matcher>) -> Result<Conve
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let bytes = map_file(&file, file.metadata()?.len())?;
     let mut reader = Reader {
-        conv: Conversation { items: Vec::new(), bytes: bytes.len() as u64, skipped_lines: 0 },
+        conv: Conversation { history_only: false, items: Vec::new(), bytes: bytes.len() as u64, skipped_lines: 0 },
         current: None, number: 0, record_no: 0, candidate: None, tool_messages: HashSet::new(), calls: HashMap::new(), matcher,
     };
     let subagent = path.parent().and_then(Path::file_name).is_some_and(|n| n == "subagents");

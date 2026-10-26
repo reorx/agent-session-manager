@@ -3,7 +3,7 @@
 
 mod common;
 
-use agent_session_core::claude::history::{expand_pasted, history_sessions, load_history};
+use agent_session_core::claude::history::{expand_pasted, history_prompts, history_sessions, load_history};
 use agent_session_core::claude::paths::encode_project_path;
 use agent_session_core::model::Source;
 use common::*;
@@ -96,4 +96,53 @@ fn a_session_made_only_of_commands_uses_the_first_row() {
     let sessions = history_sessions("-p", &rows, std::path::Path::new("/nonexistent"));
     assert_eq!(sessions[0].first_prompt, "/clear");
     assert_eq!(sessions[0].user_msg_count, 2);
+}
+
+#[test]
+fn history_prompts_of_a_session_are_its_rows_with_pasted_text_restored() {
+    let sb = sandbox();
+    let prompts = history_prompts(&sb.claude, ALPHA, S4).unwrap();
+    assert_eq!(prompts.len(), 4);
+    assert_eq!(prompts[0].text, "/model opus");
+    assert_eq!(prompts[0].ts, ms("2026-08-20T01:00:00Z"));
+    assert_eq!(prompts[1].text, "Fix the flaky test\n\nline1\nline2\nline3");
+    assert!(prompts[2].text.contains("cached paste"));
+    assert_eq!(prompts[3].text, "[Pasted text #3 +9 lines]");
+    assert!(history_prompts(&sb.claude, BETA, S4).unwrap().is_empty());
+    assert!(history_prompts(&sb.claude, "missing-project", S4).unwrap().is_empty());
+}
+
+#[test]
+fn an_anonymous_history_session_gets_the_prompts_of_its_time_group() {
+    let sb = sandbox();
+    let id = format!("history:{BETA}:{}", ms("2025-06-01T05:30:00Z"));
+    let prompts = history_prompts(&sb.claude, BETA, &id).unwrap();
+    assert_eq!(prompts.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(), ["/clear", "now add a CLI"]);
+    assert_eq!(prompts[0].ts, ms("2025-06-01T05:30:00Z"));
+}
+
+#[test]
+fn history_sessions_and_history_prompts_group_the_same_way() {
+    let sb = sandbox();
+    // Exactly two hours stays in the anonymous group, even across a known-id row.
+    append(&sb.claude.history_file(), concat!(
+        "{\"display\":\"first\",\"timestamp\":0,\"project\":\"/mixed\"}\n",
+        "{\"display\":\"known\",\"timestamp\":1,\"project\":\"/mixed\",\"sessionId\":\"known\"}\n",
+        "{\"display\":\"\",\"timestamp\":7200000,\"project\":\"/mixed\",\"sessionId\":\"\"}\n",
+        "{\"display\":\"next\",\"timestamp\":14400001,\"project\":\"/mixed\"}\n"
+    ));
+    let projects = load_history(&sb.claude.history_file()).unwrap();
+    for (key, rows) in projects {
+        let sessions = history_sessions(&key, &rows, &sb.claude.paste_cache_dir());
+        if key == "-mixed" {
+            assert_eq!(sessions.iter().map(|s| s.user_msg_count).collect::<Vec<_>>(), [2, 1, 1]);
+        }
+        for session in sessions {
+            let prompts = history_prompts(&sb.claude, &key, &session.id).unwrap();
+            assert_eq!(prompts.len(), session.user_msg_count as usize);
+            assert_eq!(Some(prompts[0].ts), session.started_at);
+            assert_eq!(prompts.last().unwrap().ts, session.updated_at);
+            assert_eq!(Some(&prompts.last().unwrap().text), session.last_prompt.as_ref());
+        }
+    }
 }

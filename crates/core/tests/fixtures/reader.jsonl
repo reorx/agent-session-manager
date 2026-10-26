@@ -12,5 +12,6 @@
 {"type":"user","message":{"content":"继续"}}
 {"type":"assistant","message":{"content":[{"type":"text","text":"正在修改"},{"type":"tool_use","name":"Edit"}]}}
 broken json
+{"type":"user","message":{"content":"[Request interrupted by user]"}}
 {"type":"user","message":{"content":[{"type":"image","source":{"data":"base64-noise"}}]}}
 {"type":"assistant","message":{"content":[{"type":"text","text":"这是一张图片。"}]}}

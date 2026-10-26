@@ -11,7 +11,8 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use super::clean::clean_prompt;
-use super::paths::encode_project_path;
+use super::paths::{ClaudeDir, encode_project_path};
+pub use crate::model::HistoryPrompt;
 use crate::model::SessionSummary;
 
 /// Rows without a session id (pre 2025-11) are split into sessions on this gap.
@@ -68,36 +69,63 @@ pub fn expand_pasted(display: &str, pasted: &Map<String, Value>, cache_dir: &Pat
         .into_owned()
 }
 
-/// Group one project's rows (chronological) into sessions, like the reference `history_sessions`.
-pub fn history_sessions(project_key: &str, rows: &[HistoryRow], cache_dir: &Path) -> Vec<SessionSummary> {
-    let mut groups: Vec<(String, bool, Vec<&HistoryRow>)> = Vec::new();
+/// One chronological history group. Borrow rows instead of copying pasted content.
+#[derive(Debug)]
+pub struct HistoryGroup<'a> {
+    pub id: String,
+    pub id_known: bool,
+    pub rows: Vec<&'a HistoryRow>,
+}
+
+/// Use the same grouping for table summaries and detail prompts.
+pub fn group_history<'a>(project_key: &str, rows: &'a [HistoryRow]) -> Vec<HistoryGroup<'a>> {
+    let mut groups: Vec<HistoryGroup<'a>> = Vec::new();
     let mut by_id: BTreeMap<&str, usize> = BTreeMap::new();
     let mut anon: Option<usize> = None;
     for row in rows {
         match row.session_id.as_deref().filter(|s| !s.is_empty()) {
             Some(sid) => {
                 let ix = *by_id.entry(sid).or_insert_with(|| {
-                    groups.push((sid.to_string(), true, Vec::new()));
+                    groups.push(HistoryGroup { id: sid.to_string(), id_known: true, rows: Vec::new() });
                     groups.len() - 1
                 });
-                groups[ix].2.push(row);
+                groups[ix].rows.push(row);
             }
             None => {
                 let start_new = match anon {
-                    Some(ix) => row.timestamp - groups[ix].2.last().unwrap().timestamp > HISTORY_GAP_MS,
+                    Some(ix) => row.timestamp - groups[ix].rows.last().unwrap().timestamp > HISTORY_GAP_MS,
                     None => true,
                 };
                 if start_new {
-                    groups.push((format!("history:{project_key}:{}", row.timestamp), false, Vec::new()));
+                    groups.push(HistoryGroup { id: format!("history:{project_key}:{}", row.timestamp), id_known: false, rows: Vec::new() });
                     anon = Some(groups.len() - 1);
                 }
-                groups[anon.unwrap()].2.push(row);
+                groups[anon.unwrap()].rows.push(row);
             }
         }
     }
     groups
+}
+
+/// Read one group's prompts in file order, restoring pastes before cleaning text.
+/// Missing history, projects or session IDs return an empty list, as does load_history.
+pub fn history_prompts(claude: &ClaudeDir, project_key: &str, session_id: &str) -> Result<Vec<HistoryPrompt>> {
+    let projects = load_history(&claude.history_file())?;
+    let Some(rows) = projects.get(project_key) else { return Ok(Vec::new()); };
+    let cache = claude.paste_cache_dir();
+    Ok(group_history(project_key, rows).into_iter()
+        .find(|g| g.id == session_id)
+        .map(|g| g.rows.into_iter().map(|r| HistoryPrompt {
+            ts: r.timestamp,
+            text: clean_prompt(&expand_pasted(&r.display, &r.pasted, &cache)),
+        }).collect()).unwrap_or_default())
+}
+
+/// Group one project's rows (chronological) into sessions, like the Python reference.
+pub fn history_sessions(project_key: &str, rows: &[HistoryRow], cache_dir: &Path) -> Vec<SessionSummary> {
+    group_history(project_key, rows)
         .into_iter()
-        .map(|(id, known, grp)| {
+        .map(|HistoryGroup { id, id_known: known, rows: grp }| {
             let first = grp.iter().find(|r| !r.display.starts_with('/')).unwrap_or(&grp[0]);
             let last = grp.last().unwrap();
             let mut s = SessionSummary::history(&id, known, project_key, &grp[0].project);

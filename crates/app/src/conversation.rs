@@ -809,7 +809,7 @@ pub mod tests {
     }
 
     pub fn conv(items: Vec<ConvItem>) -> Conversation {
-        Conversation { items, bytes: 0, skipped_lines: 0 }
+        Conversation { history_only: false, items, bytes: 0, skipped_lines: 0 }
     }
 
     pub fn view_of(items: Vec<ConvItem>) -> ConversationView {

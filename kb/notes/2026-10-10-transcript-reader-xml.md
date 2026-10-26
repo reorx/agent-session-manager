@@ -36,6 +36,7 @@ Called Bash 1 time, Read 3 times.
 - `user` 与 `agent` 按对话顺序排列。正文直接保留 Markdown、HTML、XML 示例，不加 CDATA，也不转义实体；正文里的同名标签也原样保留，由阅读的 agent 结合上下文理解。
 - `turn-summary` 紧邻其所属的 `agent` 之前，用一句纯文本列出按名称排序的工具和调用次数，不再生成工具子元素；没有调用时省略整个摘要。单次为 `1 time`，多次为 `N times`。
 - 未记录最终回复时，使用 `<agent status="missing">` 和简短文字标记。
+- user 记录中的打断标记（`interruptedMessageId` 或 `[Request interrupted by user…` 前缀）不作为用户输入导出，也不另起一轮；已有回复与工具计数按原规则保留，没有最终回复时仍写 `status="missing"`。
 - 正文和摘要中的 `&`、`<`、`>`、`]]>` 原样输出，不做 XML 转义或拆分。只对 session_id 属性中的特殊字符与换行进行实体编码，保持引号边界清晰；不可读控制字符与 U+FFFE/U+FFFF 仍用 U+FFFD 替换。
 - CLI stdout 是此文本，`-o session.txt` 保存新文件；扩展名不强制限制，仍拒绝覆盖已有文件。
 - core API 改为 `transcript::read_transcript` → `model::TranscriptExport { text, skipped_lines }`，GUI 未来复用此接口。

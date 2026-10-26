@@ -5,6 +5,33 @@ use assert_cmd::Command;
 use common::*;
 
 #[test]
+fn an_interruption_marker_is_not_exported_as_user_input() {
+    let path = fixture_root().parent().unwrap().join("reader.jsonl");
+    let export = read_transcript(&path).unwrap();
+    assert!(!export.text.contains("[Request interrupted by user"));
+    assert_eq!(export.text.matches("<user>").count(), 3);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("interrupted.jsonl");
+    for marker in [
+        serde_json::json!({"type":"user", "interruptedMessageId":"api-1", "message":{"content":"marker without standard text"}}),
+        serde_json::json!({"type":"user", "message":{"content":[{"type":"text", "text":"  [Request interrupted by user for tool use]"}]}}),
+    ] {
+        let rows = [
+            serde_json::json!({"type":"user", "message":{"content":"question"}}),
+            serde_json::json!({"type":"assistant", "message":{"content":"answer", "stop_reason":"end_turn"}}),
+            marker,
+        ];
+        std::fs::write(&path, rows.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")).unwrap();
+        let export = read_transcript(&path).unwrap();
+        assert_eq!(export.text.matches("<user>").count(), 1);
+        assert!(export.text.contains("<agent>\nanswer\n</agent>"));
+        assert!(!export.text.contains("marker without standard text"));
+        assert!(!export.text.contains("[Request interrupted by user"));
+    }
+}
+
+#[test]
 fn exports_human_inputs_final_answers_and_tool_counts_without_intermediate_noise() {
     let path = fixture_root().parent().unwrap().join("reader.jsonl");
     let export = read_transcript(&path).unwrap();

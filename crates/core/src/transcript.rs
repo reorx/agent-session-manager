@@ -178,9 +178,14 @@ pub(crate) fn is_human_input(record: &Record, content: &Content) -> bool {
         if blocks.iter().any(|b| matches!(b.kind.as_deref(), Some("image" | "document"))))
 }
 
+pub(crate) fn is_interruption(record: &Record, text: &str) -> bool {
+    record.interrupted_message_id.is_some() || text.trim().starts_with("[Request interrupted by user")
+}
+
 fn human_text(record: &Record, content: &Content) -> Option<String> {
     if !is_human_input(record, content) { return None; }
     let text = user_text(content).unwrap_or_default();
+    if is_interruption(record, &text) { return None; }
     let mut text = clean_prompt(&text);
     if let Content::Blocks(blocks) = content {
         for block in blocks {
