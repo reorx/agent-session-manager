@@ -98,7 +98,7 @@ store 线程启动后先自己走完一遍固定流程，然后才开始处理�
 
 ### 扫描期间请求要排队
 
-store 线程是单循环，扫描进行中到达的请求要等扫描结束。目前受影响的是详情面板的消息：冷启动或 Rebuild 期间选中一行，Conversation 要等扫描完才出现（已登记在 `kb/known-issues.md`）。M4 的方案是给 transcript 读取单开一条线程，见 `kb/plans/2026-09-28-m4-detail-panel.md` §4.1；实现后本文的线程表要随之更新。
+store 线程是单循环，扫描进行中到达的请求要等扫描结束。目前受影响的是详情面板的消息：冷启动或 Rebuild 期间选中一行，Conversation 要等扫描完才出现（已登记在 `kb/known-issues.md`）。M4a 会给记录文件的读取单开一条线程，见 `kb/plans/2026-10-26-m4a-turn-cards-spec.md`；实现后本文的线程表要随之更新。
 
 ## 收藏与目录切换
 

@@ -43,7 +43,7 @@ tags:
 | Session 表格 | ✅ | 9 列（Project / Preview / Started / Updated / Prompts / Cost / Ctx / Size / Kind）、36px 两行、虚拟滚动、行选中、表头排序；Preview 列随窗口自适应 |
 | 费用与 context | ✅ | 2026-10-23 完成：Cost 按 token 用量和官方价格自算（含 subagent），Ctx 是结束时的 context 占用；状态栏合计当前显示行的费用；`asm cost` 命令行同样可用，见 `../plans/2026-10-23-cost-context-columns.md` |
 | Preview 展示模式切换 | ✅ | 工具栏 Preview 下拉或 `cmd-1..4`，四种模式即时切换 |
-| 详情面板 | ✅ Metadata / 🟡 Conversation | 头部 + 两个 tab；Metadata 为真实数据（含自算费用与 Claude Code 记录的费用、token 用量、context、时长、模型、权限模式、top 工具）；Conversation 暂时显示索引里的 user / assistant 文本（前 300 条），工具调用 / thinking 的折叠行要等 M4 直接读 transcript；尚无 Markdown 渲染。M4 方案已写好（`../plans/2026-09-28-m4-detail-panel.md`），尚未开工 |
+| 详情面板 | ✅ Metadata / 🟡 Conversation | 头部 + 两个 tab；Metadata 为真实数据（含自算费用与 Claude Code 记录的费用、token 用量、context、时长、模型、权限模式、top 工具）；Conversation 暂时显示索引里的 user / assistant 文本（前 300 条），工具调用 / thinking 的折叠行要等 M4 直接读 transcript；尚无 Markdown 渲染。M4 方案已定稿（`../plans/2026-10-26-m4-detail-panel.md`），尚未开工 |
 | 分栏与折叠 | ✅ | 拖拽调宽，快捷键折叠 |
 | 状态栏 | ✅ | 左：显示数 / 总数 · 显示行的费用合计；中：操作状态 + 索引状态（loading / indexing n / m / 完成摘要 / 错误）；右：消息数、DB 大小、首批行上屏耗时 |
 | 搜索框与范围切换 | ✅ | 搜索框（`cmd-f` 聚焦、Enter 回到表格、`esc` 清空）、Scope 多选、`.*` 正则开关、`Aa` 大小写、Labels 多选；选项重启后保留 |
@@ -139,23 +139,24 @@ Branch、Tools、ID 不作为列，只在详情面板的 Metadata 里显示（�
 
 **Conversation tab**：顶部 User / Assistant / Tools / Thinking 四个带计数的 chip 可切换显示，右侧 Expand all / Collapse all。user 消息浅蓝底带 `USER #n` 与时间；assistant 消息 `ASST`；thinking 与工具调用默认收成 22px 单行（时间 · ▶ · 工具名 · 参数 · 结果摘要），点击展开 input / output 或 thinking 全文。History 类 session 只显示 user prompt。
 
-**待补充**（M4，尚未开工；实现方案见 `../plans/2026-09-28-m4-detail-panel.md`，其中 6 项选择还在等确认）：
+**待补充**（M4，尚未开工；总 plan 见 `../plans/2026-10-26-m4-detail-panel.md`，画稿链接在其中）：
 
-第一段，决定"打开速度"这项指标：
+M4a，决定"打开速度"这项指标：
 
-- 消息流直接读记录文件，显示全部消息，不再有 300 条和 4000 字的上限
-- 工具调用与 thinking 的折叠行有真实内容；一次工具调用和它的返回结果合成一张卡片
-- 搜索命中落在工具调用或 thinking 里时，详情面板里同样高亮并可跳转
+- 直接读记录文件，显示全部回合，不再有 300 条和 4000 字的上限
+- 每个回合折成一张卡：prompt、一步一格的刻度条、工具统计、最终回复；可展开到每一步，工具调用和它的返回结果合成一行，点开看 input / output。上面描述的 chip 过滤去掉
+- 被打断、API 出错、没有回复的回合有各自的状态；非人工发起的消息显示为不编号的 AUTO 卡，上下文压缩显示为分隔线
+- 搜索命中落在工具调用、thinking 或回复里时，详情面板里同样高亮并可跳转
 - 索引扫描进行中选中一行，对话照常显示
 
-第二段：
+M4b：
 
-- 头部增加修改过的文件列表（折叠）
-- 操作按钮：复制 session ID、复制 `claude --resume <id>`、在 Finder 显示记录文件、打开项目目录、导出 TXT。"在终端打开"方案里默认不做，只复制命令
-- 助手正文 Markdown 渲染，长消息默认折叠 5 行。搜索时有命中的消息会退回带高亮的纯文本显示
-- 工具卡片展开后显示说明（`#`）与命令（`$`），长命令重新排版；连续工具调用分组（设计稿 `groupTools`）需先核对设计稿
-- subagent 列表，点击切换查看其消息流
+- 标题行操作按钮（收藏、复制 resume 命令、复制 session ID、在 Finder 显示记录文件、打开项目目录、导出 TXT），表格右键菜单同样提供，表格有焦点时 `⌘C` / `⇧⌘C` 复制 ID / resume 命令。"在终端打开"放到 M5
+- Metadata 增加修改过的文件列表
+- 回复里的代码块显示成等宽框；不做完整的 Markdown 渲染
+- `[` / `]` 在回合之间跳转
 - History 类 session 显示 history.jsonl 里的 prompt 列表，并提示记录已被清理
+- subagent 查看放到 M5
 
 ### 4.6 索引与实时更新 ✅ 索引与界面 / ⬜ 监听
 
@@ -198,7 +199,7 @@ M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebui
 | 首次全量索引（约 1GB） | < 3s，期间界面可用 |
 | 过滤 / 排序 | < 16ms（M0 实测 10k 行排序 7ms） |
 | 全文搜索 | < 100ms；正则 < 500ms |
-| 打开 30MB 的 session 详情 | < 200ms。本机最大的记录文件已到 70MB，M4 方案建议把口径改为"选中行到对话首帧上屏，以最大的记录文件为基准"，待确认 |
+| 打开 session 详情 | 从选中一行到对话出现 < 200ms，基准为本机最大的记录文件（70MB），以 release 构建为准（2026-10-24 定；立项时是 30MB） |
 | 常驻内存 | < 150MB |
 
 ## 7. 术语
@@ -211,7 +212,7 @@ M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebui
 ## 8. 相关文档
 
 - 原始 PRD（含实现方案与里程碑）：`../plans/2026-09-08-agent-session-manager-prd.md`
-- M4 详情面板实现方案（含待确认项）：`../plans/2026-09-28-m4-detail-panel.md`
+- M4 详情面板总 plan（含画稿链接与两期 spec）：`../plans/2026-10-26-m4-detail-panel.md`
 - M0 验证记录与截图说明：`../notes/2026-09-15-m0-spike.md`；界面重构记录（设计稿、模块划分、gpui-kit 坑、与设计稿差异）：`../notes/2026-09-16-design-refactor.md`；M1 核心库记录（模块、实测、与旧脚本的比对）：`../notes/2026-09-17-m1-core-crate.md`
 - 数据格式：`claude-session-data-format.md`；数据层设计：`data-layer-design.md`；UI 框架：`gpui-framework-research.md`
 

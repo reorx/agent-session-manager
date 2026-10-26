@@ -4,7 +4,7 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格列出本机所有 Cla
 
 ## 当前状态
 
-M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，方案在 `kb/plans/2026-09-28-m4-detail-panel.md`（第 1 节的待确认项 D1–D6 还没有答复）。功能状态表在 `kb/docs/product-prd.md`，里程碑定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3。
+M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，按总 plan `kb/plans/2026-10-26-m4-detail-panel.md` 实施：先做 M4a（回合卡与完整对话），合并后再做 M4b（操作入口与其余条目），每期一份 spec，画稿链接在总 plan 里。功能状态表在 `kb/docs/product-prd.md`，里程碑定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3。
 
 - `crates/core`（`agent-session-core`，无 gpui 依赖）：JSONL 解析、增量 SQLite 索引、FTS5 / 正则搜索、`asm` CLI
 - `crates/app`（`agent-session-manager`）：gpui-kit 界面，保持薄。`store.rs` 后台线程独占 `Db`，启动先读索引出表，再流式增量扫描；`search.rs` 是另一条线程，自带只读连接，文本模式走 FTS、正则模式流式扫描 transcript
@@ -74,6 +74,7 @@ M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，方案在 `kb
 - 数据层：SQLite（rusqlite bundled，WAL，单写线程）+ FTS5 trigram，只索引 user / assistant 文本；正则模式用 memmap2 + memchr + `regex` 扫原始文件，在 JSON 解码后的文本上匹配
 - SDK 与后台 session 不隐藏，用 Kind 列徽章区分
 - bundle id 定为 `com.reorx.agent-session-manager`（M5 打包时用）
+- 画稿用 Artifact（HTML 页面），以当前界面的截图和 `style.rs` 的色值为基准；不再使用 Claude Design，2026-09-16 的旧设计稿不再是依据（2026-10-24 决定）
 
 ## 参考
 
@@ -97,4 +98,7 @@ M0–M3 完成（2026-09-21），下一步 **M4：详情面板**，方案在 `kb
 - `kb/notes/2026-09-21-m2-real-data.md` — M2：store 线程与事件流、流式扫描时序、视图状态持久化、相对 PRD 未做的条目；改 `store.rs` / `main.rs` 数据流前读
 - `kb/notes/2026-09-21-m3-search.md` — M3：搜索线程与取代机制、两段式 FTS 的原因与数字、`Matcher`、Matches 列 / 片段 / 详情跳转、实测；改 `search.rs`、`fts.rs`、`regex.rs::scan_sessions` 或搜索界面前读
 - `kb/plans/2026-10-23-cost-context-columns.md` — 费用 / context 列与自定义时间范围：实测依据（去重、subagent、`cost-state` 覆盖率、`[1m]`）、价格表、数据通路；改费用口径、价格表或时间过滤前读
-- `kb/plans/2026-09-28-m4-detail-panel.md` — M4（详情面板，R6）实现方案：现状、实测、数据通路与类型设计、11 个步骤及各自的行为测试、验收规则；开工前先看第 1 节的待确认项 D1–D6 是否已有答复
+- `kb/plans/2026-10-26-m4-detail-panel.md` — M4（详情面板，R6）总 plan：共用概念（回合、AUTO、步骤、命中位置）、画稿、分期、跨期决策 D1–D12；开工 M4a / M4b 前先读它和对应的 spec
+- `kb/plans/2026-10-26-m4a-turn-cards-spec.md` — M4a：直接读记录文件、回合卡、列表行模型、命中跳转、读取线程、打开速度验收
+- `kb/plans/2026-10-26-m4b-actions-and-extras-spec.md` — M4b：标题行按钮、右键菜单、`⌘C` / `⇧⌘C`、导出 TXT、History 的 prompt 列表、修改过的文件、`[` / `]`、代码块
+- `kb/plans/2026-09-28-m4-detail-panel.md` — 已被上面的 M4 plan 取代，只作历史参考

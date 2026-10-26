@@ -11,9 +11,35 @@ tags:
 
 # M4：详情面板（R6）实现方案
 
-PRD 里程碑 M4，对应需求 R6（`2026-09-08-agent-session-manager-prd.md`）。基于 `m3` 分支（7ecdf60）继续。本方案写于开发之前，**第 1 节的待确认项尚未由用户拍板**：全文按每项的"默认"编写，用户改选时只需改动该项"影响"一栏列出的步骤。
+> **已被取代（2026-10-26）**：M4 按 `2026-10-26-m4-detail-panel.md`（总 plan）及其两份 spec 实施，本文件只作历史参考。第 0 节的决定已全部并入新 plan；第 1–8 节是 m3 时期的方案，与现状和新决定多处不符，不要照着实现。
+
+PRD 里程碑 M4，对应需求 R6（`2026-09-08-agent-session-manager-prd.md`）。基于 `m3` 分支（7ecdf60）继续。本方案写于开发之前，第 1 节的待确认项已于 2026-10-24 答复（见第 0 节）。
 
 必读：`CLAUDE.md`、`../notes/2026-09-21-m3-search.md`、`../notes/2026-09-21-m2-real-data.md`、`../docs/product-prd.md` §4.5。
+
+## 0. 2026-10-24 复核后的决定（优先于下文）
+
+方案写于 m3（7ecdf60），之后 22 个提交改变了前提。2026-10-24 与用户复核后定下以下内容；画稿（https://claude.ai/artifact/M31PYmLyK2m5n8Bizyn9fz）确认后，已改写为新 plan `2026-10-26-m4-detail-panel.md`。
+
+**与现状的偏移**
+
+- core 已有 `src/transcript.rs`（导出用的 `read_transcript` / `TranscriptExport`）：详情的读取模块改名，如 `claude/conversation.rs` + `Conversation`，不要再叫 transcript
+- R6.2 头部已由 Metadata tab 覆盖（费用、tokens、context、时长、模型、模式、PR、Resume），步骤 7 只剩"修改过的文件"，放进 Metadata
+- 导出是 XML 标签 TXT，core 已完成；PRD R6.3 的"导出 Markdown"已过时
+- 第 3 节数字过期（2026-10-23 重测）：主 transcript 1942 个，超过 5MB 161 个，超过 30MB 6 个，最大 73.5MB（正在写入），最多 4448 行；subagent 253 个 / 72 个 session
+
+**待确认项的答复**：D1 `list` + `ListState`；D2 拆成 M4a / M4b；D3 M4 不用 `TextView`，改为轻量分段（代码块用等宽框，其余纯文本，按源文本行数折叠），冲突随之消失；D4 起止点不变，基准固定为 `5f6eea99`（70MB，09-14 后未变），另报一个 5MB 级文件，以 release 为准；D5 页内查找语义，不受 Scope / Labels 限制；D6 推迟到 M5。
+
+**新增待定项的答复**
+
+- D7 用户输入：详情按导出的规则（排除 compact 摘要与 `origin.kind != human`，按 uuid 去重），只给真实输入编号；非 human 发起的段落显示为不编号的 AUTO 卡，compact 显示为分隔线。Prompts 列不动（保持与 Python 脚本一致），两边的差异记入 known-issues
+- D8 Resume：复制 `cd <path> && claude --resume <id>`，目录不存在时退回不带 cd（"按当前目录找 session"未验证，实现前确认）
+
+**消息流改为回合卡**（用户补充，参考 `~/Code/vibench/kb/plans/2026-10-21-workbench-activity-and-turn-cards.md` 的 Session 回合卡）：每个回合（一条真实输入到下一条之间）折成一张卡，标题 `TURN n`；卡里依次是 prompt（折叠到 4 行）、状态灯 + 步数 + 用时 + 出错数、一格一步的刻度条（工具调用竖杠，出错红色；过程文字实心点；thinking 空心点；最终回复不进刻度条）、工具统计行（指着某格时改写为该步）、最终回复（折叠到 6 行）。点开后按顺序显示每一步，工具 / thinking 仍是 22px 折叠行。原 chip 过滤与"连续工具调用分组"由回合卡取代。
+
+**范围**：M4a = 读取线程与数据通路、回合卡与虚拟列表、工具 / thinking 内命中（刻度上标出命中，跳到时自动展开回合）、扫描期间可显示。M4b = 操作（头部按钮 + 表格右键菜单 + `cmd-c` / `cmd-shift-c`）、History session 的 prompt 列表、Metadata 加修改过的文件、`[` / `]` 按回合跳转、轻量分段与折叠、图片占位。不做：完整 Markdown、shfmt 重排、subagent 查看（随 R9 放 M5）、拉起终端、实时追加、每轮费用。
+
+**画稿**：不再使用 Claude Design，下文步骤 6 里"核对设计稿 / `/design-login`"作废。
 
 ## 1. 待确认项
 

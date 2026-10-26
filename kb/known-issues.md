@@ -18,19 +18,25 @@
 
 - 记录：2026-09-28（M4 方案调研时读代码发现；`kb/plans/2026-09-28-m4-detail-panel.md` §2）
 - store 线程是单循环，`StoreRequest::Messages` 排在扫描后面。冷启动或 Rebuild 的 3.6–4s 内选中行，Conversation 一直是空的。
-- 处理方向：M4 步骤 2 给 transcript 读取单开一条线程。
+- 处理方向：M4a（`kb/plans/2026-10-26-m4a-turn-cards-spec.md` 步骤 2）给记录文件的读取单开一条线程。
 
 ## 详情：Conversation 只显示索引里的前 300 条 user / assistant 文本，每条截到 4000 字
 
 - 记录：2026-09-28（M2 的过渡实现，有意为之；`kb/notes/2026-09-21-m2-real-data.md`）
 - 该视图没有虚拟化，全量渲染上千条会卡，所以设了上限。工具调用、thinking 不显示，没有 Markdown 渲染。搜索命中落在上限之外时靠两个补丁移动窗口和截断位置。
-- 处理方向：M4 步骤 1–3 直接读 transcript 并虚拟化，届时删掉上限和两个补丁。
+- 处理方向：M4a 直接读记录文件、按回合卡虚拟化显示，届时删掉上限和两个补丁。
 
 ## 搜索：工具调用与 thinking 里的命中在详情面板里看不到
 
 - 记录：2026-09-28（M3 遗留；`kb/notes/2026-09-21-m3-search.md`"已知问题与未做"）
 - 正则 + Tools 范围或选了 Labels 时，命中只在表格的片段里可见，详情面板底部有一句说明。
-- 处理方向：M4 步骤 4。
+- 处理方向：M4a（命中在读取记录文件时标出，覆盖工具输入 / 输出、thinking 和回复）。
+
+## 导出：用户按 Esc 打断时留下的标记被当成一条用户输入导出
+
+- 记录：2026-10-26（写 M4 plan 时在真实数据上核对发现；85 个记录文件里有这种标记）
+- Claude Code 在用户打断时写入一条 user 记录，文字是 `[Request interrupted by user]` 或 `[Request interrupted by user for tool use]`，带 `interruptedMessageId`，没有 `origin` 和 `isMeta`，能通过 `transcript.rs::human_text` 的判断。`asm transcript` / `transcript-reader` 导出的 TXT 里因此多出一段 `<user>[Request interrupted by user]</user>`，交接时读的人会以为是用户说的话，回合也被多切一次。
+- 处理方向：M4b（`kb/plans/2026-10-26-m4b-actions-and-extras-spec.md` 步骤 1），和详情的回合切分共用打断标记的判断。
 
 ## 搜索：正则模式带 Tools 范围的扫描已到 500ms 目标线
 
