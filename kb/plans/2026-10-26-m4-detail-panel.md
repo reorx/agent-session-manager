@@ -126,7 +126,7 @@ M4b 建在 M4a 之上：读取线程和 `StoreRequest` / `StoreEvent` 的通路�
 
 ### 实施步骤
 
-- [ ] M4a：按 [spec](2026-10-26-m4a-turn-cards-spec.md) 实施、验收、提交
+- [x] M4a：按 [spec](2026-10-26-m4a-turn-cards-spec.md) 实施、验收、提交（2026-10-27，验收见 `kb/sessions/2026-10-27-asm-m4a-accept.md`）
 - [ ] M4b：按 [spec](2026-10-26-m4b-actions-and-extras-spec.md) 实施、验收、提交
 
 ### 每期完成后都要更新的文档
