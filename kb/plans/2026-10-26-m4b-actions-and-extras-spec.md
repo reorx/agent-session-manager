@@ -331,6 +331,6 @@ core（[出处](../sessions/2026-10-27-asm-m4b-core.md#注意事项与自己的�
 
 验收（[出处](../sessions/2026-10-27-asm-m4b-accept.md)）：
 
-- History session 不参与搜索（协调者决定，和 Python 脚本一致），PRD 第 5 节和验收标准 8 已改
+- History session 不参与搜索（协调者决定，和 Python 脚本一致，2026-10-27 用户确认），PRD 第 5 节和验收标准 8 已改
 - 右键菜单的截图加在 `screenshot-clicks.sh` 末尾（第三次启动，21、22 两张），History 行用 Kind 收窄到 History 后的第一行
 - 界面导出没能在验收里点完：保存对话框触发了记在 Claude Code 名下的 iCloud Drive 访问授权，交给用户验证；导出内容与 `transcript-reader` 一致由同一个 `read_transcript` 代码路径、store 测试和 CLI 导出核对

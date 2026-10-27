@@ -4,7 +4,7 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格列出本机所有 Cla
 
 ## 当前状态
 
-M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-detail-panel.md`，M4b 有三项待用户人工验证，见 `kb/next-up.md`）。下一个里程碑 M5，定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3。功能状态表在 `kb/docs/product-prd.md`，里程碑定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3。
+M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-detail-panel.md`）。下一个里程碑 M5，定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3。功能状态表在 `kb/docs/product-prd.md`，里程碑定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3。
 
 - `crates/core`（`agent-session-core`，无 gpui 依赖）：JSONL 解析、增量 SQLite 索引、FTS5 / 正则搜索、`asm` CLI
 - `crates/app`（`agent-session-manager`）：gpui-kit 界面，保持薄。`store.rs` 后台线程独占 `Db`，启动先读索引出表，再流式增量扫描；`search.rs` 是另一条线程，自带只读连接，文本模式走 FTS、正则模式流式扫描 transcript
@@ -104,5 +104,5 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 - `kb/plans/2026-10-26-m4a-turn-cards-spec.md` — M4a：直接读记录文件、回合卡、列表行模型、命中跳转、读取线程、打开速度验收
 - `kb/plans/2026-10-26-m4b-actions-and-extras-spec.md` — M4b：标题行按钮、右键菜单、`⌘C` / `⇧⌘C`、导出 TXT、History 的 prompt 列表、修改过的文件、`[` / `]`、代码块
 - `kb/sessions/2026-10-27-asm-m4a-accept.md` — M4a 验收：12 条标准的证据、打开速度实测（热 / 冷页缓存）、各任务与 spec 的差异汇总；core / store / 界面三份任务总结在同目录 `2026-10-2{6,7}-asm-m4a-*.md`
-- `kb/sessions/2026-10-27-asm-m4b-accept.md` — M4b 验收：11 条标准的证据、待用户验证的清单、各任务与 spec 的差异汇总
+- `kb/sessions/2026-10-27-asm-m4b-accept.md` — M4b 验收：11 条标准的证据、用户人工验证的清单、各任务与 spec 的差异汇总
 - `kb/plans/2026-09-28-m4-detail-panel.md` — 已被上面的 M4 plan 取代，只作历史参考

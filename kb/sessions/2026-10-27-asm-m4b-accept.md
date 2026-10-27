@@ -14,19 +14,21 @@ tags:
 
 ## 协调者摘要（asm-m4b-accept）
 
-- 结果：11 条验收标准里 9 条通过；第 2 条（resume 命令粘到终端能恢复）和第 7 条的界面导出部分待用户验证（清单见"请用户验证"）。没有阻塞验收的缺陷
+- 结果：11 条验收标准全部通过。本任务验了 9 条；第 2 条（resume 命令粘到终端能恢复）、第 7 条的界面导出、第 1 条剩下的悬停提示，2026-10-27 由用户按"请用户验证"清单人工验证通过。没有阻塞验收的缺陷
 - 提交：`screenshot-clicks.sh`、Makefile 一行、spec / product-prd / PRD §3 / known-issues / gpui-kit-guide 和本总结在同一个提交里
 - 测试：`cargo test --workspace` core 166、app 127 全过，2 ignored；`make parity` 21/21，一次跑过（`accept/cargo-test.log`、`accept/parity.log`）
 - 截图在 `tmp/2026-10-27-m4b-actions/accept/`：`clicks/` 22 张、`detail/` 12 张、`search/` 7 张，全部用 Read 看过（拼图在 `sheets/`）。另有 `hover/`、`reveal/`、`missing-folder/`、`synthetic/shots/`、`export/`
 - 脚本：`screenshot-clicks.sh` 末尾第三次启动 app：21 是普通行的右键菜单（选中行不变），22 是 History 行的右键菜单（先用 Kind 把列表收窄到 History）；第 10 张改成点第 2 行（原来点第 4 行，今天第 2 个项目只有 2 行，点到了空白处）
-- ⚠️ **屏幕上还留着一个系统授权弹窗，我没点**："“2.1.310” wants to access files managed by “iCloud Drive”"。它是界面导出的保存对话框触发的，因为 app 从本会话启动，记在了 Claude Code 二进制名下。关掉 app 后弹窗仍在，允许还是拒绝请用户决定（见"请用户验证"A）
+- ⚠️ **屏幕上还留着一个系统授权弹窗，我没点**："“2.1.310” wants to access files managed by “iCloud Drive”"。它是界面导出的保存对话框触发的，因为 app 从本会话启动，记在了 Claude Code 二进制名下。关掉 app 后弹窗仍在，允许还是拒绝请用户决定（见"请用户验证"A）。用户已点 Allow
 - 用真实鼠标点过：Reveal 选中的是收藏副本；打开项目目录正确；项目目录不存在时的置灰和提示也对。打开的两个 Finder 窗口已经关掉
 - 缺陷：只有 1 条，可登记：Copy resume 等按钮的悬停提示，在鼠标一直停在按钮上时不随选中行刷新，移出再移回就恢复（交给协调者 1）
 - 自己的决定：界面导出改为三项核对：两边走同一个 `read_transcript`（代码）、store 测试、`transcript-reader` 输出中的打断标记（本机 `067ab941` 记录里有 2 行，导出里没有）。History 行的右键菜单用 Kind 收窄来定位，不依赖它在表里的位置
-- 未验证：resume 的端到端、界面导出与 CLI 的 diff、另外 4 个按钮的悬停提示，都在清单里。没有 ID 的 History session 本机没有数据，只有单元测试覆盖
+- 未验证：resume 的端到端、界面导出与 CLI 的 diff、另外 4 个按钮的悬停提示，都在清单里，用户已验证通过。没有 ID 的 History session 本机没有数据，只有单元测试覆盖
 - 交给协调者：AGENTS.md 里 clicks 的截图数改成 22；悬停提示要不要登记；`kb/sessions/2026-10-27-asm-m4b-resume.md` 还没入库，spec 和本总结都链接了它。见"交给协调者"
 
 ## 请用户验证
+
+2026-10-27 用户做完了 B、C、D，都通过；A 点了 Allow。下面保留原清单。
 
 **A. 系统授权弹窗（现在就在屏幕上）**
 
@@ -61,13 +63,13 @@ tags:
 
 | # | 标准 | 怎么验 | 结果 | 证据 |
 |---|---|---|---|---|
-| 1 | 标题行有 ★、Copy resume 和四个图标按钮，顺序和画稿一致，悬停有提示 | 截图对照画稿 1；真实鼠标悬停 | 通过：按钮顺序是 ★、Copy resume、复制 ID、Finder、项目目录、导出，★ 排第一是 plan 后来定的。看过的提示有 "Copy resume command ⇧⌘C"、"The transcript is gone"、"The project folder no longer exists"；另外 4 个按钮的提示待用户看（清单 D） | `detail/1-conversation.png`、`hover/crop-inside.png`、`hover/crop-reenter.png`、`missing-folder/crop.png` |
-| 2 | Copy resume 复制的命令粘贴到终端能直接恢复 | actions 的命令测试；Metadata 的 Resume 行 | 命令格式通过：`cd '/Users/reorx/Code/campus_watch' && claude --resume 35fec037-…`；项目目录不存在时是 `claude --resume 5f6eea99-…`。端到端待用户验证（清单 B） | `detail/12-metadata.png`、`missing-folder/crop.png` |
+| 1 | 标题行有 ★、Copy resume 和四个图标按钮，顺序和画稿一致，悬停有提示 | 截图对照画稿 1；真实鼠标悬停 | 通过：按钮顺序是 ★、Copy resume、复制 ID、Finder、项目目录、导出，★ 排第一是 plan 后来定的。看过的提示有 "Copy resume command ⇧⌘C"、"The transcript is gone"、"The project folder no longer exists"；另外 4 个按钮的提示用户看过，通过（清单 D） | `detail/1-conversation.png`、`hover/crop-inside.png`、`hover/crop-reenter.png`、`missing-folder/crop.png` |
+| 2 | Copy resume 复制的命令粘贴到终端能直接恢复 | actions 的命令测试；Metadata 的 Resume 行 | 命令格式通过：`cd '/Users/reorx/Code/campus_watch' && claude --resume 35fec037-…`；项目目录不存在时是 `claude --resume 5f6eea99-…`。端到端由用户验证通过（清单 B） | `detail/12-metadata.png`、`missing-folder/crop.png` |
 | 3 | 复制 ID、在 Finder 中显示、打开项目目录都做到它们说的事；收藏的选中收藏副本 | 真实鼠标点击；复制 ID 由键盘测试覆盖 | 通过。合成数据：fixture 的 S1 收藏以后移走原记录，点 Reveal，Finder 选中的是 `11111111-…001.jsonl`。原文件已经不在原处，路径栏是磁盘加 13 层文件夹，和收藏副本的路径对得上（原路径只有 11 层）。打开项目目录打开的是 `/Users/reorx/Code/agent-session-manager`。两个 Finder 窗口都已关掉 | `reveal/2-reveal-small.png`、`reveal/3-open-folder-small.png`、`reveal/favorite-copy-path.txt`；`command_c_copies_the_session_id_and_shift_command_c_the_resume_command` |
 | 4 | 四种情况按表置灰，提示写出原因 | actions 的可用性测试；截图 | 通过（"无 ID"只有单元测试）。History：★、Copy resume、Finder、导出置灰。只剩收藏副本：只有 Copy resume 置灰。项目目录不存在（`5f6eea99`）：只有打开项目目录置灰，提示写原因。本机没有无 ID 的 History session，由 `a_session_without_an_id_can_only_open_its_folder` 覆盖 | `detail/9-history-session.png`、`clicks/22-history-row-menu.png`、`reveal/crop-favorite-header.png`、`missing-folder/crop.png` |
 | 5 | 右键菜单按画稿 6 的顺序，作用于右键点中的行 | `screenshot-clicks.sh` 第 21、22 张 | 通过：第 1 行（本会话）选中时右键第 3 行，菜单预览的是第 3 行的命令 `cd '/Users/reorx/Code/agent-session-manager' && c…`，Hide Project 也是那一行的项目。顺序同画稿 6，最前面多一项 Favorite ⌘D。History 行上 Favorite、Copy Resume（预览行写 "The transcript is gone"）、Reveal、Export 置灰 | `clicks/21-row-menu.png`、`clicks/22-history-row-menu.png` |
 | 6 | 表格有焦点时 `⌘C` / `⇧⌘C` 复制 ID / 命令；搜索框里的 `⌘C` 不受影响 | 键盘测试（测试平台的剪贴板） | 通过 | `command_c_copies_…`、`command_c_in_the_search_box_does_not_copy_the_session_id`、`copying_the_resume_command_of_a_history_session_copies_nothing`（`cargo-test.log`） |
-| 7 | 导出和 `transcript-reader` 逐字一致；打断标记不在 `<user>` 里 | core、store 测试；代码路径；`transcript-reader` 导出 `067ab941` | 内容通过：app 的 `store.rs::export` 和 `transcript-reader` 都是 `read_transcript(path)` 后原样写 `export.text`。store 测试断言文件内容等于 `read_transcript` 的结果。`067ab941` 的记录里有 2 行打断标记，导出里 0 处，只有 1 个 `<user>`。界面上的保存对话框没有点完（见摘要的授权弹窗），diff 待用户做（清单 C） | `export/reader-067ab941.txt`、`export/2-save-panel-screen.png`；`an_interruption_marker_is_not_exported_as_user_input`、`an_export_writes_the_file_and_reports_skipped_lines` |
+| 7 | 导出和 `transcript-reader` 逐字一致；打断标记不在 `<user>` 里 | core、store 测试；代码路径；`transcript-reader` 导出 `067ab941` | 内容通过：app 的 `store.rs::export` 和 `transcript-reader` 都是 `read_transcript(path)` 后原样写 `export.text`。store 测试断言文件内容等于 `read_transcript` 的结果。`067ab941` 的记录里有 2 行打断标记，导出里 0 处，只有 1 个 `<user>`。界面上的保存对话框没有点完（见摘要的授权弹窗），用户做了界面导出和 diff，通过（清单 C） | `export/reader-067ab941.txt`、`export/2-save-panel-screen.png`；`an_interruption_marker_is_not_exported_as_user_input`、`an_export_writes_the_file_and_reports_skipped_lines` |
 | 8 | History 是 prompt 卡片，粘贴文本已还原；不参与搜索；`[` / `]` 可用（新口径） | 截图；合成数据；键盘测试；`asm search` | 通过。`4ea4b5d9` 显示 5 张 prompt 卡、虚线说明和 `[ ]` 提示。fixture 的 `44444444` 里粘贴的 `line1 line2…` 已还原。`asm search 'read big.txt in this directory'` 的结果里没有 `4ea4b5d9`，虽然这句话就是它的第一条 prompt | `detail/9-history-session.png`、`synthetic/shots/crop-9-history-session.png`、`history-search.txt`；`a_history_session_shows_its_prompts_as_cards` |
 | 9 | Metadata 列出修改过的文件 | 截图；`model.rs` 测试 | 通过：`35fec037` 写 "47 files"，先列项目内的相对路径，共 10 行，然后是 "Show all · 47 files"；`14b987ee` 15 个，`5f6eea99` 8 个 | `detail/12-metadata.png`、`clicks/11-metadata-tab.png`、`missing-folder/crop.png`；`a_row_lists_the_files_it_touched_relative_to_the_project` |
 | 10 | `[` / `]` 在卡片之间跳，到头不动；提示与命中导航按有无搜索切换 | 键盘测试；截图 | 通过：按两次 `]` 后 TURN 3 在顶端。没有搜索时显示 `[ ] jump between turns`，有搜索时换成 `▲ 1 / 7 hits ▼`，清空搜索后提示回来 | `detail/11-next-turn.png`、`detail/5-search-hit.png`、`search/7-cleared.png`；`brackets_jump_between_turns_and_stop_at_the_ends`、`brackets_do_nothing_on_the_metadata_tab` |
