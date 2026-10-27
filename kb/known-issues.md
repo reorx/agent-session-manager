@@ -2,12 +2,6 @@
 
 > 当前 app 已知、待后续处理的问题：缺陷、简化实现、未验收项、待建流程。只反映最新状态——解决了就删掉条目，经过记到 `kb/sessions/`。
 
-## CLI：`asm --db` 帮助文本里的默认索引路径与实际不符
-
-- 记录：2026-09-28（精简 AGENTS.md 时核对代码发现）
-- `crates/core/src/bin/asm.rs` 的 `--db` 说明写的是 `~/Library/Application Support/AgentSessionManager/index.sqlite`，实际默认值来自 `claude/paths.rs` 的 `ProjectDirs::from("dev", "reorx", "AgentSessionManager")`，即 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`。只影响 `--help` 的显示，行为正确。
-- 处理方向：改帮助文本；CLI 测试若断言了 help 输出要一并更新。
-
 ## 打包：已定的 bundle id 与数据目录的限定符不一致
 
 - 记录：2026-09-28（精简 AGENTS.md 时核对代码发现）

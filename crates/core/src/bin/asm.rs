@@ -26,7 +26,7 @@ struct Cli {
     /// Claude data directory (default: $CLAUDE_CONFIG_DIR or ~/.claude)
     #[arg(long, env = "ASM_CLAUDE_DIR", global = true)]
     claude_dir: Option<PathBuf>,
-    /// SQLite index file (default: ~/Library/Application Support/AgentSessionManager/index.sqlite)
+    /// SQLite index file (default: ~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite)
     #[arg(long, env = "ASM_DB", global = true)]
     db: Option<PathBuf>,
     /// Never print ANSI colors (also: NO_COLOR=1)
