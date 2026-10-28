@@ -241,7 +241,7 @@ agent-session-manager/            Cargo workspace
 | **M2 表格 + 过滤 + 排序**（2 天）✅ 2026-09-21 | R1 R2 R3 R5 R12，SessionStore 流式填充 | 冷启动可用、热启动 <300ms、过滤排序一帧内（记录：`../notes/2026-09-21-m2-real-data.md`；热启动 ~200ms 上屏 5488 行、冷索引 3.6–4.0s 流式填充、filter + sort 0–1ms。R1 右键菜单 / 列显隐、R2 多选 / 可搜索 / 自定义区间 / 更多过滤（其中 Kind 多选已于同日补上）、R5 行密度 / 相对时间未做，见笔记"未做"一节） |
 | **M3 搜索**（1.5 天）✅ 2026-09-21 | R4 全部，高亮，Matches 列 | FTS <100ms、正则 <500ms、CJK 两字可搜（记录：`../notes/2026-09-21-m3-search.md`；文本 2–40ms、正则热缓存 240–425ms、两字 CJK 走 LIKE 稳定 16–20ms（2026-09-28 复测，当时记的 83–137ms 是刚唤醒屏幕后量的）。正则用 M1 的 memmap 扫描而非 grep-searcher；详情面板里工具调用内的命中要等 M4） |
 | **M4 详情面板**（2 天）✅ 2026-10-27（M4a、M4b） | R6：按回合卡显示完整对话、操作入口、导出 TXT、History 的 prompt 列表。总 plan：`2026-10-26-m4-detail-panel.md`，拆成 M4a（回合卡与完整对话）与 M4b（操作入口与其余条目），各有一份 spec | 选中行到对话首帧上屏 <200ms，基准为本机最大的记录文件 `5f6eea99`（70MB），以 release 为准（立项时的口径是 30MB）。M4a 实测 release 页缓存热 45–79ms、冷 152–161ms（偶发 356ms），记录：`../sessions/2026-10-27-asm-m4a-accept.md`；M4b（标题行操作按钮、右键菜单、`⌘C` / `⇧⌘C`、导出 TXT、History 的 prompt 卡片、代码块、`[` / `]`、Files）的验收：`../sessions/2026-10-27-asm-m4b-accept.md` |
-| **M5 实时与打磨**（1.5 天） | R7 watcher、R8 history、R9、R10、R11、菜单、cargo-bundle、图标 | 新 session 5s 内出现；`.app` 可双击运行 |
+| **M5 实时与打磨**（1.5 天） | R7 watcher、R8 history、R9、R10、R11、菜单、cargo-bundle、图标（`assets/icon/AppIcon.icns` 已生成，接入与核对见 `../notes/2026-10-28-app-icon.md`） | 新 session 5s 内出现；`.app` 可双击运行 |
 
 开发规范：新功能先写行为测试（core crate 用 fixture JSONL；UI 用 gpui-kit 0.6.1 新增的 `gpui_kit::test` 无头 UI 测试 + `test-support` feature，覆盖 delegate 与交互）；每个里程碑完成后截图归档到 `tmp/<date>-<task>/` 并 commit。
 

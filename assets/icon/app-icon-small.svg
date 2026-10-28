@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- App icon for 16 and 32 px (direction A5): three thicker rows, the hit as a whole amber
+       bar. Every edge sits on a multiple of 32 so it lands on a pixel at 32 px; the body is the
+       large icon's square snapped to that grid (26 px with a 3 px margin at 32 px). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e6e6eb"/>
+    </linearGradient>
+  </defs>
+  <rect x="96" y="96" width="832" height="832" rx="186" fill="url(#bg)"/>
+  <rect x="100" y="100" width="824" height="824" rx="182" fill="none" stroke="#000000" stroke-opacity="0.14" stroke-width="8"/>
+  <!-- Row 1 -->
+  <rect x="224" y="320" width="160" height="64" rx="32" fill="#3a3a3f"/>
+  <rect x="448" y="320" width="352" height="64" rx="32" fill="#c7c7cc"/>
+  <!-- Row 2, selected -->
+  <rect x="160" y="448" width="704" height="128" rx="40" fill="#2563eb"/>
+  <rect x="224" y="480" width="160" height="64" rx="32" fill="#ffffff"/>
+  <rect x="448" y="480" width="288" height="64" rx="32" fill="#ffffff" fill-opacity="0.6"/>
+  <!-- Row 3, the hit -->
+  <rect x="224" y="640" width="160" height="64" rx="32" fill="#3a3a3f"/>
+  <rect x="448" y="640" width="224" height="64" rx="32" fill="#f5b83d"/>
+</svg>

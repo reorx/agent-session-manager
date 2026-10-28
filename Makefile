@@ -80,7 +80,10 @@ parity: ## Diff asm against the Python reference script on the real ~/.claude (o
 	@cargo build --release -p $(CORE) --bin asm -q
 	scripts/compare-with-python.sh "$(TARGET_DIR)/release/asm"
 
+icon: ## Render assets/icon/*.svg into assets/icon/AppIcon.icns (the .iconset stays in tmp/icon/)
+	uv run scripts/make-icon.py
+
 clean: ## Remove this project's build artifacts only (the target dir is shared across projects)
 	cargo clean -p $(APP) -p $(CORE)
 
-.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search screenshot-detail bin asm transcript-reader build-transcript-reader parity clean
+.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search screenshot-detail bin asm transcript-reader build-transcript-reader parity icon clean

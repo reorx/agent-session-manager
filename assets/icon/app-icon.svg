@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- App icon, used for 64 px and up. Direction A1 "session rows": a session table with the
+       selected row in the app's accent and a search hit marked in amber. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e6e6eb"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#000000" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+  <!-- Body on Apple's macOS icon grid: 824 px square, 100 px margin. -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)" filter="url(#shadow)"/>
+  <rect x="102" y="102" width="820" height="820" rx="183" fill="none" stroke="#000000" stroke-opacity="0.08" stroke-width="4"/>
+  <!-- Row 1 -->
+  <rect x="232" y="284" width="150" height="52" rx="26" fill="#3a3a3f"/>
+  <rect x="412" y="284" width="380" height="52" rx="26" fill="#c7c7cc"/>
+  <!-- Row 2, selected -->
+  <rect x="172" y="397" width="680" height="96" rx="30" fill="#2563eb"/>
+  <rect x="232" y="419" width="150" height="52" rx="26" fill="#ffffff"/>
+  <rect x="412" y="419" width="300" height="52" rx="26" fill="#ffffff" fill-opacity="0.6"/>
+  <!-- Row 3, with a search hit -->
+  <rect x="232" y="554" width="150" height="52" rx="26" fill="#3a3a3f"/>
+  <rect x="412" y="554" width="92" height="52" rx="26" fill="#c7c7cc"/>
+  <rect x="520" y="554" width="150" height="52" rx="26" fill="#f5b83d"/>
+  <rect x="686" y="554" width="106" height="52" rx="26" fill="#c7c7cc"/>
+  <!-- Row 4 -->
+  <rect x="232" y="689" width="110" height="52" rx="26" fill="#3a3a3f"/>
+  <rect x="412" y="689" width="260" height="52" rx="26" fill="#c7c7cc"/>
+</svg>

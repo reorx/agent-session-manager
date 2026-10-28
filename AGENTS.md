@@ -31,6 +31,7 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 - 构建产物在 `~/Library/Caches/cargo-target`（全局 cargo 配置），不在 `./target`；`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒
 - 环境变量：`ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（默认 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`）、`ASM_STATE`（仅 app，默认为索引同目录的 `state.json`）、`ASM_FAVORITES_DIR`（覆盖共享配置中的收藏目录）、`ASM_TRASH_DIR`（取消收藏改用此目录，测试必设）。验收时把 `ASM_DB` / `ASM_STATE` 指到 `tmp/`，可反复测冷启动而不动真实索引
 - Rust 由 mise 管理（版本锁在 `mise.toml`）；新机器先 `make setup`（含 Metal Toolchain）
+- `make icon`：把 `assets/icon/` 的两张 SVG 渲染成 `AppIcon.icns`（64 px 及以上用 `app-icon.svg`，16 / 32 px 用 `app-icon-small.svg`）。改了 SVG 要重跑，并提交生成的 `.icns`
 
 ## 验收流程
 
@@ -76,6 +77,7 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 - 数据层：SQLite（rusqlite bundled，WAL，单写线程）+ FTS5 trigram，只索引 user / assistant 文本；正则模式用 memmap2 + memchr + `regex` 扫原始文件，在 JSON 解码后的文本上匹配
 - SDK 与后台 session 不隐藏，用 Kind 列徽章区分
 - bundle id 定为 `com.reorx.agent-session-manager`（M5 打包时用）
+- 应用图标定为「会话行」（候选 A1；16 / 32 px 用简化版 A5），源文件在 `assets/icon/`（2026-10-28 决定）
 - 画稿用 Artifact（HTML 页面），以当前界面的截图和 `style.rs` 的色值为基准；不再使用 Claude Design，2026-09-16 的旧设计稿不再是依据（2026-10-24 决定）
 
 ## 参考
@@ -96,6 +98,7 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 - `kb/docs/gpui-framework-research.md` — 开工前的调研：GPUI 心智模型、组件目录、选型理由；用到还没用过的组件或重新评估依赖时读
 - `kb/notes/2026-09-15-m0-spike.md` — M0：环境准备与构建耗时
 - `kb/notes/2026-09-16-design-refactor.md` — 界面重构记录：设计稿链接、与设计稿的功能差异
+- `kb/notes/2026-10-28-app-icon.md` — 应用图标：候选画布与定稿、小尺寸的像素对齐、macOS 26 套框实测、M5 打包时的核对项；改图标或做打包前读
 - `kb/notes/2026-09-17-m1-core-crate.md` — M1：core 模块划分、关键实现细节、与设计文档的差异、实测数字、Python 比对方法；改 core 前读
 - `kb/notes/2026-09-21-m2-real-data.md` — M2：store 线程与事件流、流式扫描时序、视图状态持久化、相对 PRD 未做的条目；改 `store.rs` / `main.rs` 数据流前读
 - `kb/notes/2026-09-21-m3-search.md` — M3：搜索线程与取代机制、两段式 FTS 的原因与数字、`Matcher`、Matches 列 / 片段 / 详情跳转、实测；改 `search.rs`、`fts.rs`、`regex.rs::scan_sessions` 或搜索界面前读
