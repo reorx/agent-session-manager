@@ -92,6 +92,7 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 ## Documentation
 
 - `kb/docs/release.md` — 发布：tag 触发的 CI、`.app` 的组成、签名与两轮公证、Sparkle 的接入与密钥、Homebrew cask、本地出包、发布后验收、失败处理；发版、改打包或更新逻辑前读
+- `kb/sessions/2026-10-28-release-1.0.md` — 1.0 发布：决定及其由谁定、公开前扫描、本机 feed 与真实 feed 的升级测试证据、Sparkle 在 app 不在前台时延后弹提示的原因
 - `kb/plans/2026-10-26-favorites.md` — 收藏快照、目录迁移、去重优先级与索引根目录守卫；改收藏流程前读
 
 - `kb/plans/2026-09-08-agent-session-manager-prd.md` — 需求 R1–R13、架构、里程碑 M0–M5、风险；开发任务的总入口

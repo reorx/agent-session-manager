@@ -65,6 +65,8 @@ Contents/
 
 `workflow_dispatch` 手动触发只跑 release job 到 artifact 为止（版本 0.0.0），不发 Release、不动 tap，用来验证链路。
 
+耗时（2026-10-28，run #1，缓存为空）：release job 约 15.5 分钟，其中测试 8 分钟（debug 构建）、Release 构建 5.5 分钟、两轮公证约 1 分钟。仓库公开，Actions 分钟不计费。
+
 Homebrew 7 默认只加载 trust 过的第三方 tap，新机器上先 `brew trust --tap reorx/tap`。cask 声明了 `auto_updates true`，`brew outdated` 和普通 `brew upgrade` 会跳过它，日常走应用内更新。要用 Homebrew 主动升级：
 
 ```sh
@@ -80,7 +82,9 @@ brew upgrade --cask --greedy reorx/tap/agent-session-manager
 - appcast 每次只有当前正式版一项，下载地址是版本化的 `releases/download/v<version>/AgentSessionManager-<version>.dmg`
 - Sparkle 的「Install and Relaunch」通过 `NSApp terminate:` 退出，和菜单 Quit 走同一条路（GPUI 的 `applicationWillTerminate:` 回调）
 - 本地测试可以换 feed：`FEED_URL` 改 Info.plist 的 `SUFeedURL`，`DOWNLOAD_URL` 改 appcast 的下载地址
-- 实测（2026-10-28，本机 feed）：首次启动（偏好里没有 `SULastCheckTime`）就会自动检查，不等一天；「Install and Relaunch」后 Sparkle 重启的进程不继承启动时的环境变量，`ASM_DB` / `ASM_STATE` 会丢，重启后的 app 用的是真实索引
+- 首次启动（偏好里没有 `SULastCheckTime`）就会自动检查，不等一天（2026-10-28 实测）
+- **定时检查发现更新时，app 不在前台就不弹提示**，等用户下次切回 app（`NSApplicationDidBecomeActive`）才显示。这是 Sparkle 对普通 app 的设计（`SPUStandardUserDriver.m` 2.10.0 第 270 行附近："For regular applications, we will show the update alert when the user comes back to the app"）；app 在前台且刚启动时会立即显示。所以从后台 shell 启动的测试实例（抢不到焦点）看不到启动时的提示，偏好里却已有 `SULastCheckTime` 和 `NSWindow Frame SUUpdateAlert2`。测试时用菜单「Check for Updates…」，或者让 app 到前台
+- 「Install and Relaunch」后 Sparkle 重启的进程不继承启动时的环境变量，`ASM_DB` / `ASM_STATE` 会丢，重启后的 app 用的是真实索引
 
 ### 不打 tag 测更新流程
 
@@ -88,7 +92,7 @@ brew upgrade --cask --greedy reorx/tap/agent-session-manager
 
 1. `make build-release VERSION=0.9.0 BUILD_NUMBER=1 FEED_URL=http://127.0.0.1:8765/appcast.xml`，把产物 `ditto` 到临时目录作为旧版
 2. `make release-local VERSION=0.9.1 BUILD_NUMBER=2 FEED_URL=… DOWNLOAD_URL=http://127.0.0.1:8765/AgentSessionManager-0.9.1.dmg`，把 dmg 和 `appcast.xml` 拷到 feed 目录，`python3 -m http.server 8765 --bind 127.0.0.1 --directory <feed 目录>`
-3. 先备份 `~/Library/Application Support/dev.reorx.AgentSessionManager/state.json`，再带 `ASM_DB` / `ASM_STATE` 启动旧版。弹出更新提示后点 Install Update → Install and Relaunch（Sparkle 的窗口用 AX 点，不发按键），核对同一路径的 Info.plist 变成 0.9.1 (2)、About 面板显示 0.9.1 (2)、再「Check for Updates…」提示 up to date
+3. 先备份 `~/Library/Application Support/dev.reorx.AgentSessionManager/state.json`，再带 `ASM_DB` / `ASM_STATE` 启动旧版。有更新提示后点 Install Update → Install and Relaunch（Sparkle 的窗口用 AX 点，不发按键：`osascript -e 'tell application "System Events" to click button "Install Update" of window "Software Update" of (first process whose unix id is <pid>)'`），核对同一路径的 Info.plist 变成 0.9.1 (2)、About 面板显示 0.9.1 (2)、再「Check for Updates…」提示 up to date。「Ready to Install」刚出现时立即点 Install and Relaunch 可能不生效（实测一次），没退出就再点一次
 4. 清理：按 PID 结束测试进程，恢复 `state.json`，`defaults delete com.reorx.agent-session-manager`，删 `~/Library/Caches/com.reorx.agent-session-manager` 和 `~/Library/HTTPStorages/com.reorx.agent-session-manager`，停掉 feed 服务
 
 密钥：
@@ -135,6 +139,8 @@ make test-release      # 发布脚本的行为测试，不碰钥匙串、网络�
 确认两个 CI job 都成功后，核对 Release 上有 dmg、`SHA256SUMS`、`appcast.xml`，tap 里 cask 的版本和 sha256 与 Release 一致。
 
 用户安装通道：`brew fetch --cask reorx/tap/agent-session-manager` 验下载，再 `brew install --cask --appdir=<临时目录> reorx/tap/agent-session-manager` 安装；`spctl -a -t execute -vv <app>` 应显示 `source=Notarized Developer ID`，`syspolicy_check distribution <app>` 应通过。清理前先 `pgrep -fl "Agent Session Manager.app"`，有别的实例在跑就不要 `brew uninstall`（cask 的 `uninstall quit` 会按 bundle ID 把它也退出），直接删临时 app 和 `$(brew --prefix)/Caskroom/agent-session-manager`。
+
+v1.0.0（2026-10-28，run #2，构建号 2）按本节全部做过：Release 三个文件齐全，cask 的 sha256 与 `SHA256SUMS` 一致，`brew audit --cask` 无报错，brew 装到临时目录后 Gatekeeper 与 `syspolicy_check` 通过；分发核对全过；本地 0.9.0（构建号 1）从真实 feed 升到 1.0.0 (2)，升级后的 app 带票据，About 显示 1.0.0 (2)。核对脚本与截图在 `tmp/2026-10-28-release/`（`verify-dist.sh`、`real-feed/shots/`）。
 
 Sparkle 的分发核对：下载 Release 上的三个文件，核对 appcast 的版本、构建号、长度、版本化下载地址，用备份密钥跑 `sign_update --verify <dmg> <signature>`，确认 `releases/latest/download/appcast.xml` 与本次 Release 的 appcast 字节一致、安装包的 `SUPublicEDKey` 与 `config.sh` 一致。这些只证明分发链路；真实更新要用同 bundle id、同公钥、同 feed 的低版本（`make build-release VERSION=0.9.0 BUILD_NUMBER=1`）在临时目录运行，从真实 feed 完成发现 → 下载 → 安装 → 重启。每日自动检查要等装着上一正式版的机器自然触发，登记在 `kb/next-up.md`。
 
