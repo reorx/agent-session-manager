@@ -2,7 +2,19 @@
 
 A macOS desktop app (Rust + [GPUI](https://gpui.rs/) via [gpui-kit](https://gpui-kit.com)) that lists every local Claude Code session in a fast, filterable, sortable, searchable table with a detail pane.
 
-Status: M2 done (2026-09-21). The GUI runs on real data: it loads the SQLite index on launch (~200ms to a usable table of 5.5k sessions), then scans incrementally in the background and streams new rows in; a cold index of ~1.3GB takes about 4s with the table filling as it goes. Project / time filters, header sorting, preview modes and the selection persist across launches. The core crate parses, indexes (SQLite + FTS5) and searches sessions, and the `asm` CLI replaces `claude_session_search.py` with byte-identical output. Search in the GUI is next (M3). See `AGENTS.md` and `kb/plans/2026-09-08-agent-session-manager-prd.md`.
+It reads your Claude Code data in `~/.claude` and keeps its own index; it never changes that data.
+
+## Install
+
+Requires macOS 14 or later on Apple Silicon.
+
+```sh
+brew install --cask reorx/tap/agent-session-manager
+```
+
+If Homebrew says it cannot load the cask, run `brew trust --tap reorx/tap` first. Or download `AgentSessionManager-<version>.dmg` from [Releases](https://github.com/reorx/agent-session-manager/releases) and drag the app into Applications.
+
+The app checks for updates once a day and asks before installing; you can also choose **Agent Session Manager → Check for Updates…**. Its index, view state and favorites live in `~/Library/Application Support/dev.reorx.AgentSessionManager/`.
 
 ## `asm` CLI
 

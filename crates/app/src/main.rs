@@ -22,6 +22,7 @@ mod style;
 mod table;
 mod toolbar;
 mod turn_cards;
+mod updater;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,6 +49,7 @@ use crate::search::{SearchMode, SearchOptions, SearchSummary, Searcher};
 use crate::settings::{SortDir, ViewState, default_state_path};
 use crate::store::{Store, StoreEvent, StoreRequest};
 use crate::table::{PREVIEW_MIN_W, ROW_H, SessionTableDelegate};
+use crate::updater::{About, CheckForUpdates};
 
 gpui_kit::actions!(
     app,
@@ -1118,6 +1120,16 @@ fn bind_keys(cx: &mut App) {
     ]);
 }
 
+/// About, Check for Updates… (only when the bundle carries Sparkle), Quit.
+fn app_menu_items(updates: bool) -> Vec<MenuItem> {
+    let mut items = vec![MenuItem::action("About Agent Session Manager", About)];
+    if updates {
+        items.push(MenuItem::action("Check for Updates…", CheckForUpdates));
+    }
+    items.extend([MenuItem::separator(), MenuItem::action("Quit", Quit)]);
+    items
+}
+
 fn main() {
     let app = gpui_kit::application().with_assets(AppAssets);
     app.run(move |cx| {
@@ -1126,8 +1138,9 @@ fn main() {
         cx.activate(true);
         cx.on_action(|_: &Quit, cx| cx.quit());
         bind_keys(cx);
+        let updates = updater::install(cx);
         cx.set_menus([
-            Menu::new("Agent Session Manager").items(vec![MenuItem::action("Quit", Quit)]),
+            Menu::new("Agent Session Manager").items(app_menu_items(updates)),
             Menu::new("View").items(vec![
                 MenuItem::action("Find", FocusSearch),
                 MenuItem::action("Find Next Hit", NextHit),

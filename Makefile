@@ -83,7 +83,44 @@ parity: ## Diff asm against the Python reference script on the real ~/.claude (o
 icon: ## Render assets/icon/*.svg into assets/icon/AppIcon.icns (the .iconset stays in tmp/icon/)
 	uv run scripts/make-icon.py
 
+# —— Release: .app bundle, Developer ID signing, notarization, Sparkle appcast (kb/docs/release.md) ——
+RELEASE_APP := $(TARGET_DIR)/release/Agent Session Manager.app
+# Apple signing / notarization credentials (see that folder's AGENTS.md); CI passes the same names as env
+APPLE_SECRETS := $(HOME)/Sync/apple-developer/secrets.env
+LOAD_SECRETS := if [ -f "$(APPLE_SECRETS)" ]; then set -a; source "$(APPLE_SECRETS)"; set +a; fi
+SPARKLE_KEY_BACKUP := $(HOME)/Sync/apple-developer/sparkle/agent-session-manager_ed25519.key
+# CI passes the tag's version and the run number; local builds are 0.0.0 (0) unless given
+VERSION ?= 0.0.0
+BUILD_NUMBER ?= 0
+
+build-release: ## Release .app (cargo build, bundle, sign, verify); VERSION / BUILD_NUMBER / FEED_URL
+	cargo build --release -p $(APP)
+	scripts/release/bundle-app.sh "$(TARGET_DIR)/release/$(APP)" "$(RELEASE_APP)" $(VERSION) $(BUILD_NUMBER)
+	scripts/release/sign-app.sh "$(RELEASE_APP)"
+	scripts/release/verify-app.sh "$(RELEASE_APP)"
+
+notarize-app: ## Notarize the release .app and staple the ticket into it
+	@$(LOAD_SECRETS); scripts/release/notarize.sh "$(RELEASE_APP)"
+
+dmg: ## Pack the notarized .app into dist/release/AgentSessionManager-<version>.dmg
+	scripts/release/make-dmg.sh "$(RELEASE_APP)" dist/release
+
+notarize: ## Sign, notarize and staple the dmg in dist/release/, then assess it as Gatekeeper would
+	@$(LOAD_SECRETS); for f in dist/release/*.dmg; do scripts/release/notarize.sh "$$f"; done
+
+appcast: ## Sign the final dmg and write dist/release/appcast.xml (key: SPARKLE_PRIVATE_KEY_FILE or the backup)
+	@if [ -z "$$SPARKLE_PRIVATE_KEY_FILE" ] && [ -f "$(SPARKLE_KEY_BACKUP)" ]; then export SPARKLE_PRIVATE_KEY_FILE="$(SPARKLE_KEY_BACKUP)"; fi; \
+		for f in dist/release/*.dmg; do scripts/release/render-appcast.sh "$(RELEASE_APP)" "$$f" dist/release/appcast.xml; done
+
+test-release: ## Behaviour tests for the release scripts (no keychain, network or signing)
+	scripts/release/test-release.sh
+
+release-local: build-release ## The whole release chain locally into dist/release/; uploads nothing
+	rm -rf dist/release
+	$(MAKE) notarize-app dmg notarize appcast
+
 clean: ## Remove this project's build artifacts only (the target dir is shared across projects)
 	cargo clean -p $(APP) -p $(CORE)
 
-.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search screenshot-detail bin asm transcript-reader build-transcript-reader parity icon clean
+.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search screenshot-detail bin asm transcript-reader build-transcript-reader parity icon clean \
+	build-release notarize-app dmg notarize appcast test-release release-local

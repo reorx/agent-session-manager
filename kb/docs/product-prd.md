@@ -56,6 +56,7 @@ tags:
 | 实时更新 | ⬜ | |
 | 快捷键与菜单 | ✅ 部分 | 退出、折叠详情面板、`cmd-f`、`cmd-1..4`、`cmd-shift-r` 重建索引、`cmd-c` / `cmd-shift-c` 复制 ID / resume 命令、`[` / `]` 按回合跳转；View 菜单可显示 / 隐藏没有 prompt 的空 session；表格行有右键菜单。启动后焦点在表格上，不需要先点击就能用快捷键 |
 | 设置与状态持久化 | ✅ 视图状态 / ⬜ 设置页 | 项目与时间过滤（含自定义区间）、排序、Preview 模式、空 session 开关、详情面板开合、选中行存 `state.json`，下次启动恢复 |
+| 安装与自动更新 | ✅ | 2026-10-28 发布 1.0：Homebrew cask（`brew install --cask reorx/tap/agent-session-manager`）或 GitHub Release 的 dmg，Apple Silicon、macOS 14 起，Developer ID 签名并经 Apple 公证；应用内每天检查一次更新（也可菜单 Check for Updates…），用户确认后安装并重启；About 面板显示版本。见 `release.md` |
 | 精简 TXT 导出 | ✅ CLI / ✅ GUI | 2026-10-10 完成 Transcript Reader：通过 Session ID、唯一前缀或文件路径导出用户输入、最终回复与工具计数，去掉思考和工具结果，见 `../notes/2026-10-10-transcript-reader.md`；2026-10-27 GUI 完成：详情标题行的导出按钮或右键菜单弹出系统保存对话框，内容与 CLI 相同；同日起被用户打断留下的 `[Request interrupted by user]` 不再当成用户输入导出 |
 
 ## 3. 产品架构

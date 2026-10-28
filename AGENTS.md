@@ -14,6 +14,8 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 - 费用与 context 已完成（2026-10-23）：表格 Cost / Ctx 列、状态栏费用合计、Updated 的本月 / 上月 / 自定义区间（gpui-component `DatePicker`）、`asm cost [--compare]`。费用由 core 按 `message.usage` × `pricing.rs` 价格表自算（按 `message.id` 去重，subagent 计入父 session），`cost-state` 只作对照。实测与口径见 `kb/plans/2026-10-23-cost-context-columns.md` 和 `kb/docs/claude-session-data-format.md` §2.4。
 - Transcript Reader 已完成（2026-10-10）：独立 `transcript-reader` / `asm transcript` 导出 XML 风格标签分隔的精简 TXT，正文原样输出，无 CDATA，不要求标准 XML；GUI 导出待 M4 接入，复用 `transcript::read_transcript`。当前格式与验证见 `kb/notes/2026-10-10-transcript-reader-xml.md`，压缩规则见 `kb/notes/2026-10-10-transcript-reader.md`。
 
+- 发布与应用内更新（2026-10-28，1.0）：打 `v*` tag 后 GitHub Actions 构建 arm64 `.app`、Developer ID 签名、app 和 dmg 两轮公证，发到本仓库 Release（dmg、`SHA256SUMS`、`appcast.xml`），再把 cask 推到 `reorx/homebrew-tap`。应用内更新用 Sparkle 2，`crates/app/src/updater.rs` 运行时加载 bundle 里的 framework，debug 二进制没有更新器。流程、密钥和验收见 `kb/docs/release.md`
+
 - Session 收藏已实现：快照保存到索引旁 `favorites/claude/`，按 session id 收藏优先；取消收藏移至废纸篓，最后副本需确认。目录迁移与根目录守卫见 `kb/plans/2026-10-26-favorites.md`。
 
 ## 开发命令
@@ -31,6 +33,7 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 - 构建产物在 `~/Library/Caches/cargo-target`（全局 cargo 配置），不在 `./target`；`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒
 - 环境变量：`ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（默认 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`）、`ASM_STATE`（仅 app，默认为索引同目录的 `state.json`）、`ASM_FAVORITES_DIR`（覆盖共享配置中的收藏目录）、`ASM_TRASH_DIR`（取消收藏改用此目录，测试必设）。验收时把 `ASM_DB` / `ASM_STATE` 指到 `tmp/`，可反复测冷启动而不动真实索引
 - Rust 由 mise 管理（版本锁在 `mise.toml`）；新机器先 `make setup`（含 Metal Toolchain）
+- 发布：`make release-local`（本地走完构建、签名、两轮公证、dmg、appcast，产物在 `dist/release/`）、`make test-release`（发布脚本的行为测试）；正式发版只打 tag，见 `kb/docs/release.md`。名字、最低系统、Sparkle 公钥集中在 `scripts/release/config.sh`。Sparkle 私钥（`~/Sync/apple-developer/sparkle/agent-session-manager_ed25519.key`）永远不要重新生成
 - `make icon`：把 `assets/icon/` 的两张 SVG 渲染成 `AppIcon.icns`（64 px 及以上用 `app-icon.svg`，16 / 32 px 用 `app-icon-small.svg`）。改了 SVG 要重跑，并提交生成的 `.icns`
 
 ## 验收流程
@@ -76,7 +79,8 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 - UI 走 gpui-kit 精确锁版（提交 Cargo.lock）：官方 `gpui` 在 crates.io 停更，Zed 的 `ui` / `theme` crate 是 GPL 且未发布，只读源码不依赖。理由见 `kb/docs/gpui-framework-research.md` §1
 - 数据层：SQLite（rusqlite bundled，WAL，单写线程）+ FTS5 trigram，只索引 user / assistant 文本；正则模式用 memmap2 + memchr + `regex` 扫原始文件，在 JSON 解码后的文本上匹配
 - SDK 与后台 session 不隐藏，用 Kind 列徽章区分
-- bundle id 定为 `com.reorx.agent-session-manager`（M5 打包时用）
+- bundle id 定为 `com.reorx.agent-session-manager`；数据目录保持 `dev.reorx.AgentSessionManager`，不迁移（2026-10-28 打包时决定）
+- 发布只出 Apple Silicon（arm64），macOS 14 起；版本号只来自 git tag，构建号是 CI run number；Release 托管在本仓库（已公开），Sparkle feed 用 `releases/latest/download/appcast.xml`（2026-10-28 决定）
 - 应用图标定为「会话行」（候选 A1；16 / 32 px 用简化版 A5），源文件在 `assets/icon/`（2026-10-28 决定）
 - 画稿用 Artifact（HTML 页面），以当前界面的截图和 `style.rs` 的色值为基准；不再使用 Claude Design，2026-09-16 的旧设计稿不再是依据（2026-10-24 决定）
 
@@ -87,6 +91,7 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 
 ## Documentation
 
+- `kb/docs/release.md` — 发布：tag 触发的 CI、`.app` 的组成、签名与两轮公证、Sparkle 的接入与密钥、Homebrew cask、本地出包、发布后验收、失败处理；发版、改打包或更新逻辑前读
 - `kb/plans/2026-10-26-favorites.md` — 收藏快照、目录迁移、去重优先级与索引根目录守卫；改收藏流程前读
 
 - `kb/plans/2026-09-08-agent-session-manager-prd.md` — 需求 R1–R13、架构、里程碑 M0–M5、风险；开发任务的总入口

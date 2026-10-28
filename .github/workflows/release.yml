@@ -1,0 +1,185 @@
+name: release
+
+# push a v* tag: tests → arm64 release .app (Developer ID) → notarize the app, then the dmg → Sparkle appcast
+#   → GitHub Release on this repo → the homebrew job renders the cask from the published dmg and pushes it to $TAP_REPO
+# workflow_dispatch: build, sign, notarize and upload an artifact only (version 0.0.0); no Release, tap untouched
+#
+# secrets (the Apple six share names with ~/Sync/apple-developer/secrets.env; files are base64):
+#   CERT_P12 / CERT_P12_PASSWORD / APPLE_TEAM_ID / ASC_PRIVATE_KEY / ASC_KEY_ID / ASC_ISSUER_ID
+#   TAP_DEPLOY_KEY: write deploy key of $TAP_REPO (can write that one repo only)
+#   SPARKLE_ED_PRIVATE_KEY: Sparkle EdDSA key that signs updates (never rotate it)
+# Flow, setup and troubleshooting: kb/docs/release.md
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DMG_NAME: AgentSessionManager
+  CASK_TOKEN: agent-session-manager
+  TAP_REPO: reorx/homebrew-tap
+  HOMEBREW_NO_AUTO_UPDATE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # tag v1.2.3 → 1.2.3; manual runs use 0.0.0. The build number is the run number, so it only grows
+      - name: Resolve version
+        id: version
+        run: |
+          version=0.0.0
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then version=${GITHUB_REF_NAME#v}; fi
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must be vMAJOR.MINOR.PATCH: $GITHUB_REF_NAME" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # Rust from mise.toml
+      - uses: jdx/mise-action@v5
+
+      - name: Metal Toolchain
+        run: make setup
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        run: make test && make test-release
+
+      - name: Import Developer ID certificate
+        env:
+          CERT_P12: ${{ secrets.CERT_P12 }}
+          CERT_P12_PASSWORD: ${{ secrets.CERT_P12_PASSWORD }}
+        run: |
+          : "${CERT_P12:?missing secret CERT_P12}" "${CERT_P12_PASSWORD:?missing secret CERT_P12_PASSWORD}"
+          keychain="$RUNNER_TEMP/build.keychain-db"
+          password=$(uuidgen)
+          security create-keychain -p "$password" "$keychain"
+          security list-keychains -d user -s "$keychain" "$HOME/Library/Keychains/login.keychain-db"
+          security unlock-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          printf '%s' "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$CERT_P12_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          # lets codesign use the key without a prompt; without it signing hangs or fails in CI
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          security find-identity -v -p codesigning "$keychain"
+
+      # ends with scripts/release/verify-app.sh: identity, runtime, timestamp, get-task-allow, arm64
+      - name: Build Release
+        run: make build-release VERSION=${{ steps.version.outputs.version }} BUILD_NUMBER=${{ github.run_number }}
+
+      - name: Notarize app, package and notarize dmg
+        env:
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          : "${ASC_PRIVATE_KEY:?missing secret ASC_PRIVATE_KEY}"
+          export ASC_PRIVATE_KEY_PATH="$RUNNER_TEMP/notary-key.p8"
+          printf '%s' "$ASC_PRIVATE_KEY" | base64 --decode > "$ASC_PRIVATE_KEY_PATH"
+          make notarize-app dmg notarize
+          # after stapling: staple changes the dmg's bytes
+          (cd dist/release && shasum -a 256 -- *.dmg > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Sign final dmg and render appcast
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          : "${SPARKLE_ED_PRIVATE_KEY:?missing secret SPARKLE_ED_PRIVATE_KEY}"
+          umask 077
+          export SPARKLE_PRIVATE_KEY_FILE="$RUNNER_TEMP/sparkle-ed25519.key"
+          printf '%s' "$SPARKLE_ED_PRIVATE_KEY" > "$SPARKLE_PRIVATE_KEY_FILE"
+          trap 'rm -f "$SPARKLE_PRIVATE_KEY_FILE"' EXIT
+          make appcast
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.DMG_NAME }}-${{ steps.version.outputs.version }}
+          path: dist/release/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/release/release-notes.sh > "$RUNNER_TEMP/release-notes.md"
+          # published bytes are never replaced; a fix after publishing is a new version
+          gh release create "$GITHUB_REF_NAME" dist/release/* --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Agent Session Manager $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md" --generate-notes
+
+      - name: Clean signing credentials
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/notary-key.p8" "$RUNNER_TEMP/sparkle-ed25519.key"
+          if [[ -f "$RUNNER_TEMP/build.keychain-db" ]]; then security delete-keychain "$RUNNER_TEMP/build.keychain-db"; fi
+
+  # Reads only the published Release, rebuilds nothing: when it fails, "Re-run failed jobs" is enough.
+  # Plain text work, so it runs on ubuntu.
+  homebrew:
+    needs: release
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # one tap update at a time across apps and versions
+    concurrency:
+      group: homebrew-tap
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.TAP_REPO }}
+          ssh-key: ${{ secrets.TAP_DEPLOY_KEY }}
+          path: tap
+
+      - name: Render cask from the published dmg
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          dmg="$DMG_NAME-$version.dmg"
+          mkdir -p "$RUNNER_TEMP/release"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern "$dmg" --pattern SHA256SUMS --dir "$RUNNER_TEMP/release"
+          (cd "$RUNNER_TEMP/release" && shasum -a 256 -c SHA256SUMS)
+          sha=$(shasum -a 256 "$RUNNER_TEMP/release/$dmg" | cut -d' ' -f1)
+          scripts/release/render-cask.sh "$version" "$sha" > "$RUNNER_TEMP/cask.rb"
+          ruby -c "$RUNNER_TEMP/cask.rb"
+          cat "$RUNNER_TEMP/cask.rb"
+
+          # re-running an old version's job must not downgrade the tap
+          cask="tap/Casks/$CASK_TOKEN.rb"
+          if [[ -f "$cask" ]]; then
+            current=$(sed -n 's/^  version "\(.*\)"$/\1/p' "$cask")
+            ruby -e 'exit(Gem::Version.new(ARGV[0]) > Gem::Version.new(ARGV[1]) ? 1 : 0)' "$current" "$version" \
+              || { echo "tap already has the newer ${current}; refusing to downgrade to $version" >&2; exit 1; }
+          fi
+          mkdir -p tap/Casks
+          cp "$RUNNER_TEMP/cask.rb" "$cask"
+
+      - name: Commit and push cask
+        working-directory: tap
+        run: |
+          git add "Casks/$CASK_TOKEN.rb"
+          if git diff --cached --quiet; then echo "cask already matches this release"; exit 0; fi
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "$CASK_TOKEN ${GITHUB_REF_NAME#v}"
+          git push origin HEAD

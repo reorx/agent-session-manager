@@ -2,11 +2,11 @@
 
 > 当前 app 已知、待后续处理的问题：缺陷、简化实现、未验收项、待建流程。只反映最新状态——解决了就删掉条目，经过记到 `kb/sessions/`。
 
-## 打包：已定的 bundle id 与数据目录的限定符不一致
+## 打包：从 Finder / Dock 启动的 app 读不到 shell 里的环境变量
 
-- 记录：2026-09-28（精简 AGENTS.md 时核对代码发现）
-- PRD 已定 bundle id 为 `com.reorx.agent-session-manager`，而索引与 `state.json` 所在目录是 `dev.reorx.AgentSessionManager`。目前还没有 `.app` bundle，所以没有实际影响；M5 用 cargo-bundle 打包后，app 的标识与它的数据目录会对不上。
-- 处理方向：M5 打包前决定是否统一。改数据目录名会让现有索引和视图状态落到新路径，索引可重建，`state.json` 需要迁移或接受重置。
+- 记录：2026-10-28（1.0 打包时核对代码发现，未实测）
+- `.app` 由 launchd 启动，只有系统默认的环境，不带 `~/.zshrc` 里设的变量。两处受影响：`CLAUDE_CONFIG_DIR`（`crates/core/src/claude/paths.rs`）设了的用户，app 仍然读 `~/.claude`；`PATH` 里没有 `/opt/homebrew/bin`，`regex.rs` 找不到 `shfmt`，长 shell 命令不再折行（会安静地退回原样显示）。从终端运行二进制、`asm` CLI 不受影响。
+- 处理方向：Claude 目录做成 app 里的设置（和收藏目录一样存进 `config.json`）；`shfmt` 额外查 `/opt/homebrew/bin`、`/usr/local/bin`。
 
 ## 表格与详情：Prompts 列的数字比详情里的回合数多
 
