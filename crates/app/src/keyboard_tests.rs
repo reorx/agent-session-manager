@@ -122,6 +122,29 @@ fn sort_like_header(cx: &mut TestAppContext, h: &Harness, key: &str) {
 }
 
 #[gpui_kit::test]
+fn a_scan_refreshes_catalog_context_in_the_table_and_selected_metadata(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    let id = "11111111-aaaa-4bbb-8ccc-000000000001";
+    h.app.update(cx, |app, cx| {
+        let ix = app.table.read(cx).delegate().ix.iter().position(|&i| app.table.read(cx).delegate().rows[i].id == id).unwrap();
+        app.select_row(ix, cx);
+        assert_eq!(app.selected.as_ref().unwrap().context_fmt, "1%");
+    });
+    let dir = h._dir.path().join("claude/cache/model-catalog");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("test-cc.json"), r#"{"catalog":{"config":{"models":[{"id":"claude-opus-5","runtime":{"max_input_tokens":100000}}]}}}"#).unwrap();
+    h.app.update(cx, |app, _| app.store.request(crate::store::StoreRequest::Scan));
+    wait_until(cx, &h, "catalog context refresh", |app, _| app.catalog.window("claude-opus-5") == Some(100_000));
+    h.app.read_with(cx, |app, cx| {
+        let row = app.table.read(cx).delegate().rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(row.context_fmt, "14%");
+        assert_eq!(app.selected.as_ref().unwrap().id, id);
+        assert_eq!(app.selected.as_ref().unwrap().context_detail, "14k / 100k · peak 40k");
+        assert!((row.context_pct.unwrap() - 0.14305).abs() < 1e-6);
+    });
+}
+
+#[gpui_kit::test]
 fn header_sort_keeps_the_selected_session_in_all_three_directions(cx: &mut TestAppContext) {
     use gpui_kit::component::table::ColumnSort;
     let h = launch(cx);

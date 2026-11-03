@@ -3,7 +3,8 @@
 //! reference machine (all cache writes there are 1-hour ones).
 
 use agent_session_core::model::UsageRow;
-use agent_session_core::pricing::{context_window, cost, normalize, price};
+use agent_session_core::claude::model_catalog::ModelCatalog;
+use agent_session_core::pricing::{builtin_window, context_window, cost, normalize, price};
 
 fn usage(model: &str) -> UsageRow {
     UsageRow {
@@ -89,14 +90,17 @@ fn model_ids_are_normalized_before_lookup() {
 fn unknown_models_have_no_price_and_no_window() {
     assert!(price("<synthetic>").is_none());
     assert!(cost(&usage("gpt-5")).is_none());
-    assert_eq!(context_window("claude-opus-9"), None);
+    assert_eq!(builtin_window("claude-opus-9"), None);
 }
 
 #[test]
 fn context_windows_are_looked_up_per_model() {
-    assert_eq!(context_window("claude-haiku-4-5-20251001"), Some(200_000));
-    assert_eq!(context_window("claude-opus-5"), Some(1_000_000), "1M with or without the [1m] tag");
-    assert_eq!(context_window("claude-opus-5[1m]"), Some(1_000_000));
-    assert_eq!(context_window("claude-fable-5-1"), Some(1_000_000));
-    assert_eq!(context_window("claude-haiku-5-5"), Some(1_000_000));
+    assert_eq!(builtin_window("claude-haiku-4-5-20251001"), Some(200_000));
+    assert_eq!(builtin_window("claude-opus-5"), Some(1_000_000), "1M with or without the [1m] tag");
+    assert_eq!(builtin_window("claude-opus-5[1m]"), Some(1_000_000));
+    assert_eq!(builtin_window("claude-fable-5-1"), Some(1_000_000));
+    assert_eq!(builtin_window("claude-haiku-5-5"), Some(1_000_000));
+    for model in ["claude-haiku-4-5-20251001", "claude-opus-5", "claude-opus-5[1m]", "claude-fable-5-1", "claude-haiku-5-5", "claude-opus-9"] {
+        assert_eq!(context_window(&ModelCatalog::default(), model), builtin_window(model));
+    }
 }

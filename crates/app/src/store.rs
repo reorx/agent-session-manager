@@ -5,6 +5,7 @@
 //! incremental scan, streaming `Progress` and every written `Session` (cold start fills the
 //! table this way) → `ScanDone` → a second `Loaded` when the scan changed anything, so rows that
 //! were streamed before their project's path was known end up exact.
+//! The first load includes the local model catalog; scans also reload when its windows change.
 //!
 //! A second thread, `asm-reader`, reads transcripts for the detail panel straight from the file
 //! (no `Db`), so a conversation shows up while a scan holds the store thread. It also reads the
@@ -20,6 +21,7 @@ use std::time::{Duration, Instant};
 use agent_session_core::claude::conversation::{conversation_from_history, read_conversation};
 use agent_session_core::claude::history::history_prompts;
 use agent_session_core::claude::paths::ClaudeDir;
+use agent_session_core::claude::model_catalog::ModelCatalog;
 use agent_session_core::index::{Db, IndexStats, Indexer, ListFilter, Order, Progress, ScanEvent, ScanReport};
 use agent_session_core::model::{Conversation, SessionSummary};
 use agent_session_core::search::Matcher;
@@ -42,7 +44,7 @@ pub enum StoreRequest {
 #[derive(Debug)]
 pub enum StoreEvent {
     /// Everything in the index, replacing whatever the UI holds.
-    Loaded { sessions: Vec<SessionSummary>, elapsed: Duration },
+    Loaded { sessions: Vec<SessionSummary>, catalog: Arc<ModelCatalog>, elapsed: Duration },
     Progress(Progress),
     /// One session written by the running scan (new or changed).
     Session(SessionSummary),
@@ -214,6 +216,7 @@ fn run(claude: ClaudeDir, db_path: PathBuf, favorites: FavoritesDir, requests: m
 
 struct Worker {
     claude: ClaudeDir,
+    catalog: Arc<ModelCatalog>,
     favorites: FavoritesDir,
     db: Db,
     indexer: Indexer,
@@ -222,7 +225,10 @@ struct Worker {
 
 impl Worker {
     fn open(claude: ClaudeDir, db_path: &std::path::Path, favorites: FavoritesDir, events: Sender<StoreEvent>) -> Result<Worker> {
-        Ok(Worker { db: Db::open(db_path)?, indexer: Indexer::new(claude.clone(), Some(favorites.claude())), claude, favorites, events })
+        let started = Instant::now();
+        let catalog = Arc::new(ModelCatalog::load(&claude));
+        log_catalog(&catalog, started.elapsed());
+        Ok(Worker { db: Db::open(db_path)?, indexer: Indexer::new(claude.clone(), Some(favorites.claude())), claude, catalog, favorites, events })
     }
 
     fn favorite(&mut self, id: String, remove: bool) -> Result<()> {
@@ -251,7 +257,7 @@ impl Worker {
     fn load(&self) -> Result<()> {
         let t = Instant::now();
         let sessions = self.db.list_sessions(&ListFilter { order: Order::UpdatedDesc, ..Default::default() })?;
-        self.events.send_blocking(StoreEvent::Loaded { sessions, elapsed: t.elapsed() })?;
+        self.events.send_blocking(StoreEvent::Loaded { sessions, catalog: self.catalog.clone(), elapsed: t.elapsed() })?;
         Ok(())
     }
 
@@ -277,11 +283,24 @@ impl Worker {
         };
         let changed = report.files_seen != report.files_unchanged || report.files_missing > 0 || report.history_sessions > 0;
         self.events.send_blocking(StoreEvent::ScanDone { report, stats: self.db.stats()? })?;
-        if changed {
+        let started = Instant::now();
+        let catalog = Arc::new(ModelCatalog::load(&self.claude));
+        let catalog_changed = catalog.windows() != self.catalog.windows();
+        if catalog_changed {
+            log_catalog(&catalog, started.elapsed());
+        }
+        self.catalog = catalog;
+        if changed || catalog_changed {
             self.load()?;
         }
         Ok(())
     }
+}
+
+fn log_catalog(catalog: &ModelCatalog, elapsed: Duration) {
+    let skipped = catalog.files().iter().filter(|f| f.error.is_some()).count();
+    println!("model catalog: {} models from {} files ({} skipped) in {:.3} ms",
+        catalog.windows().len(), catalog.files().len(), skipped, elapsed.as_secs_f64() * 1000.0);
 }
 
 #[cfg(test)]
@@ -290,6 +309,51 @@ mod tests {
     use crate::conversation::Card;
 
     const S1: &str = "11111111-aaaa-4bbb-8ccc-000000000001";
+
+    fn write_catalog(claude: &ClaudeDir, window: u64, fetched: i64) {
+        std::fs::create_dir_all(claude.model_catalog_dir()).unwrap();
+        let value = serde_json::json!({"fetchedAt": fetched, "catalog": {"config": {"models": [
+            {"id": "claude-opus-9", "runtime": {"max_input_tokens": window}}
+        ]}}});
+        std::fs::write(claude.model_catalog_dir().join("test-cc.json"), value.to_string()).unwrap();
+    }
+
+    #[test]
+    fn the_first_load_includes_the_catalog_even_with_no_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = ClaudeDir::new(dir.path().join("claude"));
+        write_catalog(&claude, 1_000_000, 1);
+        let (_store, events) = spawn(claude, dir.path().join("index.sqlite"));
+        assert!(matches!(events.recv_blocking().unwrap(), StoreEvent::Loaded { sessions, catalog, .. }
+            if sessions.is_empty() && catalog.window("claude-opus-9") == Some(1_000_000)));
+    }
+
+    #[test]
+    fn scans_reload_only_when_catalog_windows_change_including_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = ClaudeDir::new(dir.path().join("claude"));
+        write_catalog(&claude, 1_000_000, 1);
+        let (tx, events) = async_channel::unbounded();
+        let favorites = FavoritesDir { root: dir.path().join("favorites"), trash: favorites::Trash::Dir(dir.path().join("trash")) };
+        let mut worker = Worker::open(claude.clone(), &dir.path().join("index.sqlite"), favorites, tx).unwrap();
+        worker.scan(false).unwrap();
+        let drain = || std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+        assert!(!drain().iter().any(|e| matches!(e, StoreEvent::Loaded { .. })));
+        for (window, fetched, reload) in [(500_000, 2, true), (500_000, 3, false)] {
+            write_catalog(&claude, window, fetched);
+            worker.scan(false).unwrap();
+            let seen = drain();
+            assert_eq!(seen.iter().filter(|e| matches!(e, StoreEvent::Loaded { .. })).count(), usize::from(reload));
+            let scan = seen.iter().position(|e| matches!(e, StoreEvent::ScanDone { .. })).unwrap();
+            if reload {
+                assert!(matches!(seen.get(scan + 1), Some(StoreEvent::Loaded { sessions, catalog, .. })
+                    if sessions.is_empty() && catalog.window("claude-opus-9") == Some(window)));
+            }
+        }
+        std::fs::remove_dir_all(claude.model_catalog_dir()).unwrap();
+        worker.scan(false).unwrap();
+        assert!(drain().iter().any(|e| matches!(e, StoreEvent::Loaded { catalog, .. } if catalog.windows().is_empty())));
+    }
 
     fn spawn(claude: ClaudeDir, db: PathBuf) -> (Store, Receiver<StoreEvent>) {
         let root = db.with_file_name("favorites"); let trash = favorites::Trash::Dir(db.with_file_name("trash"));

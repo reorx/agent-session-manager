@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use agent_session_core::format::{fmt_datetime, fmt_time, fmt_tokens, fmt_usd};
 use agent_session_core::pricing::context_window;
+use agent_session_core::claude::model_catalog::ModelCatalog;
 use agent_session_core::model::SessionSummary;
 use chrono::{Datelike, Days, Local, Months, NaiveDate};
 use gpui_kit::*;
@@ -167,10 +168,10 @@ fn format_context(pct: Option<f32>) -> SharedString {
     }
 }
 
-fn context_detail(s: &SessionSummary) -> SharedString {
+fn context_detail(s: &SessionSummary, catalog: &ModelCatalog) -> SharedString {
     let Some(tokens) = s.context_tokens else { return NONE.into() };
     let mut text = fmt_tokens(tokens);
-    if let Some(window) = s.context_model.as_deref().and_then(context_window) {
+    if let Some(window) = s.context_model.as_deref().and_then(|model| context_window(catalog, model)) {
         text.push_str(&format!(" / {}", fmt_tokens(window)));
     }
     if let Some(peak) = s.context_peak {
@@ -240,9 +241,9 @@ impl Kind {
 }
 
 impl SessionRow {
-    pub fn from_summary(s: &SessionSummary) -> SessionRow {
+    pub fn from_summary(s: &SessionSummary, catalog: &ModelCatalog) -> SessionRow {
         let short_id = if s.id_known { s.id.chars().take(8).collect() } else { "(unknown)".to_string() };
-        let context_pct = s.context_ratio().map(|r| r as f32);
+        let context_pct = s.context_ratio(catalog).map(|r| r as f32);
         let files = files_touched(s);
         SessionRow {
             favorite: s.favorite,
@@ -273,7 +274,7 @@ impl SessionRow {
             cc_cost_fmt: format_cost(s.total_cost_usd),
             context_pct,
             context_fmt: format_context(context_pct),
-            context_detail: context_detail(s),
+            context_detail: context_detail(s, catalog),
             tokens_fmt: tokens_summary(s),
             unpriced: s.unpriced_models.iter().cloned().collect::<Vec<_>>().join(", ").into(),
             branch: or_none(s.git_branch.as_deref()),
@@ -625,6 +626,10 @@ pub mod tests {
 
     use super::*;
 
+    pub fn builtin_row(s: &SessionSummary) -> SessionRow {
+        SessionRow::from_summary(s, &ModelCatalog::default())
+    }
+
     pub fn summary(id: &str, project_path: &str, updated_at: i64) -> SessionSummary {
         let key = agent_session_core::claude::paths::encode_project_path(project_path);
         let mut s = SessionSummary::transcript(id, &key, Path::new("/tmp/x.jsonl"));
@@ -637,12 +642,12 @@ pub mod tests {
     }
 
     pub fn row(id: &str, project_path: &str, updated_at: i64) -> Arc<SessionRow> {
-        Arc::new(SessionRow::from_summary(&summary(id, project_path, updated_at)))
+        Arc::new(builtin_row(&summary(id, project_path, updated_at)))
     }
 
     #[test]
     fn a_row_shows_the_project_folder_name_and_a_short_id() {
-        let r = SessionRow::from_summary(&summary("11111111-aaaa-4bbb-8ccc-000000000001", "/Users/me/Code/alpha", 5000));
+        let r = builtin_row(&summary("11111111-aaaa-4bbb-8ccc-000000000001", "/Users/me/Code/alpha", 5000));
         assert_eq!(r.project, "alpha");
         assert_eq!(r.project_path, "/Users/me/Code/alpha");
         assert_eq!(r.project_key, "-Users-me-Code-alpha");
@@ -653,9 +658,9 @@ pub mod tests {
     fn a_row_without_any_path_falls_back_to_the_encoded_key() {
         let mut s = summary("s", "/Users/me/Code/alpha", 5000);
         s.project_path = None;
-        assert_eq!(SessionRow::from_summary(&s).project, "-Users-me-Code-alpha");
+        assert_eq!(builtin_row(&s).project, "-Users-me-Code-alpha");
         s.cwd = Some("/Users/me/Code/alpha/".into());
-        assert_eq!(SessionRow::from_summary(&s).project, "alpha", "cwd is as good as the project path");
+        assert_eq!(builtin_row(&s).project, "alpha", "cwd is as good as the project path");
     }
 
     #[test]
@@ -663,7 +668,7 @@ pub mod tests {
         let mut s = summary("s", "/p/a", 5000);
         s.first_prompt = format!("line one\nline two\r\n{}", "x".repeat(400));
         s.last_message = Some("  done  \n".into());
-        let r = SessionRow::from_summary(&s);
+        let r = builtin_row(&s);
         assert!(r.first_prompt.starts_with("line one⏎line two⏎xxx"));
         assert_eq!(r.first_prompt.chars().count(), 241, "240 chars + ellipsis");
         assert!(r.first_prompt.ends_with('…'));
@@ -677,7 +682,7 @@ pub mod tests {
     fn an_explicit_title_wins_over_the_first_prompt() {
         let mut s = summary("s", "/p/a", 5000);
         s.title = Some("Refactor the parser".into());
-        assert_eq!(SessionRow::from_summary(&s).title, "Refactor the parser");
+        assert_eq!(builtin_row(&s).title, "Refactor the parser");
     }
 
     #[test]
@@ -696,7 +701,7 @@ pub mod tests {
     #[test]
     fn missing_numbers_render_as_dashes_and_sort_low() {
         let s = SessionSummary::history("history:-p-a:1", false, "-p-a", "/p/a");
-        let r = SessionRow::from_summary(&s);
+        let r = builtin_row(&s);
         assert_eq!((r.size_fmt.as_ref(), r.size), ("—", 0));
         assert_eq!((r.started_fmt.as_ref(), r.started_at), ("—", i64::MIN));
         assert_eq!((r.cost_fmt.as_ref(), r.cost), ("—", None));
@@ -712,13 +717,13 @@ pub mod tests {
         s.duration_ms = Some(3_900_000);
         s.cost_usd = Some(1.966);
         s.tool_counts = [("Bash".to_string(), 7), ("Read".to_string(), 12), ("Edit".to_string(), 7)].into();
-        let r = SessionRow::from_summary(&s);
+        let r = builtin_row(&s);
         assert_eq!(r.size_fmt, "3.5 MB");
         assert_eq!(r.duration_fmt, "1h 5m");
         assert_eq!(r.cost_fmt, "$1.97");
         assert_eq!(r.top_tools, "Read 12 · Bash 7 · Edit 7");
         s.file_size = Some(2048);
-        assert_eq!(SessionRow::from_summary(&s).size_fmt, "2 KB");
+        assert_eq!(builtin_row(&s).size_fmt, "2 KB");
     }
 
     #[test]
@@ -727,7 +732,7 @@ pub mod tests {
         let b = row("b", "/p/beta", 20_000);
         let mut empty = summary("e", "/p/alpha", 30_000);
         empty.user_msg_count = 0;
-        let empty = SessionRow::from_summary(&empty);
+        let empty = builtin_row(&empty);
 
         let all = Filter::default();
         assert!(all.matches(&a) && all.matches(&b));
@@ -752,7 +757,7 @@ pub mod tests {
             Kind::Background => s.is_background = true,
             Kind::History => s.transcript_missing = true,
         }
-        let row = SessionRow::from_summary(&s);
+        let row = builtin_row(&s);
         assert_eq!(row.kind, kind);
         Arc::new(row)
     }
@@ -784,7 +789,7 @@ pub mod tests {
         assert!(!cli_alpha.matches(&row("old", "/p/alpha", 1_000)), "right kind, too old");
         let mut empty = summary("e", "/p/alpha", 10_000);
         empty.user_msg_count = 0;
-        assert!(!cli_alpha.matches(&SessionRow::from_summary(&empty)), "right kind, no prompt");
+        assert!(!cli_alpha.matches(&builtin_row(&empty)), "right kind, no prompt");
     }
 
     #[test]
@@ -856,7 +861,7 @@ pub mod tests {
     fn a_project_is_named_by_any_row_that_knows_its_path() {
         let mut nameless = summary("n", "/p/alpha", 40_000);
         nameless.project_path = None;
-        let rows = vec![Arc::new(SessionRow::from_summary(&nameless)), row("a", "/p/alpha", 10_000)];
+        let rows = vec![Arc::new(builtin_row(&nameless)), row("a", "/p/alpha", 10_000)];
         assert_eq!(project_entries(rows.iter())[0].name, "alpha");
     }
 
@@ -872,7 +877,7 @@ pub mod tests {
         s.files_touched = ["/Users/me/Code/alpha/src/parse.rs", "README.md", "/Users/me/notes/todo.md", "/Users/me/Code/alphabet/x.rs", "crates/app/src/main.rs", "AGENTS.md"]
             .map(String::from)
             .into();
-        let r = SessionRow::from_summary(&s);
+        let r = builtin_row(&s);
         assert_eq!(r.files_fmt, "6 files");
         assert_eq!(
             r.files_touched,
@@ -881,19 +886,19 @@ pub mod tests {
         );
 
         s.files_touched = ["/Users/me/Code/alpha/a.rs", "a.rs"].map(String::from).into();
-        let r = SessionRow::from_summary(&s);
+        let r = builtin_row(&s);
         assert_eq!((r.files_fmt.as_ref(), r.files_touched.as_slice()), ("1 file", &["a.rs".into()][..]), "recorded both ways, one file");
         s.files_touched.clear();
-        let r = SessionRow::from_summary(&s);
+        let r = builtin_row(&s);
         assert_eq!((r.files_fmt.as_ref(), r.files_touched.len()), ("—", 0), "no file changed: a dash");
     }
 
     #[test]
     fn a_row_knows_its_transcript_unless_it_was_cleaned_up() {
         let mut s = summary("s", "/p/a", 5000);
-        assert_eq!(SessionRow::from_summary(&s).transcript_path.as_deref(), Some(Path::new("/tmp/x.jsonl")));
+        assert_eq!(builtin_row(&s).transcript_path.as_deref(), Some(Path::new("/tmp/x.jsonl")));
         s.transcript_missing = true;
-        assert_eq!(SessionRow::from_summary(&s).transcript_path, None);
+        assert_eq!(builtin_row(&s).transcript_path, None);
     }
 
     #[test]
@@ -901,29 +906,45 @@ pub mod tests {
         let mut s = summary("s", "/p/a", 5000);
         (s.cost_usd, s.total_cost_usd) = (Some(3.4219), Some(3.5));
         (s.tokens_in, s.tokens_out, s.tokens_cache_read, s.tokens_cache_write) = (12, 1050, 89_000, 2900);
-        let r = SessionRow::from_summary(&s);
+        let r = builtin_row(&s);
         assert_eq!((r.cost, r.cost_fmt.as_ref(), r.cc_cost_fmt.as_ref()), (Some(3.4219), "$3.42", "$3.50"));
         assert_eq!(r.tokens_fmt, "in 12 · out 1k · cache read 89k · write 3k");
         assert_eq!(r.unpriced, "");
         s.unpriced_models = ["claude-opus-9".to_string()].into();
-        assert_eq!(SessionRow::from_summary(&s).unpriced, "claude-opus-9");
+        assert_eq!(builtin_row(&s).unpriced, "claude-opus-9");
     }
 
     #[test]
     fn context_is_a_share_of_the_models_window() {
         let mut s = summary("s", "/p/a", 5000);
         (s.context_tokens, s.context_peak, s.context_model) = (Some(412_000), Some(655_000), Some("claude-opus-5".into()));
-        let r = SessionRow::from_summary(&s);
+        let r = builtin_row(&s);
         assert_eq!((r.context_fmt.as_ref(), r.context_detail.as_ref()), ("41%", "412k / 1M · peak 655k"));
         assert!((r.context_pct.unwrap() - 0.412).abs() < 1e-6);
         s.context_tokens = Some(4_000);
-        assert_eq!(SessionRow::from_summary(&s).context_fmt, "<1%");
+        assert_eq!(builtin_row(&s).context_fmt, "<1%");
         (s.context_tokens, s.context_model) = (Some(150_000), Some("claude-haiku-4-5-20251001".into()));
-        assert_eq!(SessionRow::from_summary(&s).context_fmt, "75%", "Haiku 4.5 has a 200K window");
+        assert_eq!(builtin_row(&s).context_fmt, "75%", "Haiku 4.5 has a 200K window");
         s.context_model = Some("claude-opus-9".into());
-        let r = SessionRow::from_summary(&s);
+        let r = builtin_row(&s);
         assert_eq!((r.context_fmt.as_ref(), r.context_pct), ("—", None), "no window, no share");
         assert_eq!(r.context_detail, "150k · peak 655k");
+    }
+
+    #[test]
+    fn catalog_windows_supply_new_models_and_override_builtin_windows() {
+        use agent_session_core::claude::model_catalog::ModelCatalog;
+        let mut s = summary("s", "/p/a", 5000);
+        (s.context_tokens, s.context_peak, s.context_model) = (Some(412_000), Some(655_000), Some("claude-opus-9".into()));
+        let catalog = ModelCatalog::from_windows([("claude-opus-9", 1_000_000), ("claude-opus-5", 500_000)]);
+        let row = SessionRow::from_summary(&s, &catalog);
+        assert_eq!((row.context_fmt.as_ref(), row.context_detail.as_ref()), ("41%", "412k / 1M · peak 655k"));
+        assert!((row.context_pct.unwrap() - 0.412).abs() < 1e-6);
+        s.context_model = Some("claude-opus-5".into());
+        let row = SessionRow::from_summary(&s, &catalog);
+        assert_eq!((row.context_fmt.as_ref(), row.context_detail.as_ref()), ("82%", "412k / 500k · peak 655k"));
+        s.context_tokens = Some(750_000);
+        assert_eq!(SessionRow::from_summary(&s, &catalog).context_fmt, "150%");
     }
 
     fn day(y: i32, m: u32, d: u32) -> NaiveDate {

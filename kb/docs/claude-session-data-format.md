@@ -1,6 +1,6 @@
 ---
 created: 2026-09-08
-updated: 2026-10-27
+updated: 2026-11-03
 tags:
   - claude-code
   - data-format
@@ -26,6 +26,7 @@ tags:
 | `~/.claude/history.jsonl` | 全局提示历史：每条 `display`、`project`、`sessionId`、`timestamp`(ms)、`pastedContents` | **永不清理**，是 transcript 被清理后唯一能恢复 session 存在性的来源 |
 | `~/.claude/sessions/<pid>.json` | 当前存活进程的运行时信息 | 进程退出即删除，可用于判断"session 正在运行" |
 | `~/.claude/file-history/` | 文件修改备份，与 `file-history-*` 记录对应 | — |
+| `~/.claude/cache/model-catalog/` | Claude Code 缓存的模型目录，提供模型声明的输入窗口 | Claude Code 定期重新获取与清理；本应用只读 |
 
 规模（本机，2026-10-23）：156 个项目目录、1,942 份主 transcript（2.9GB）+ 257 份 subagent transcript（196MB）；最大单文件 70MB；history.jsonl 已被 Claude Code 截短到 408 行。2026-09-08 时是 654 份、917MB，增长很快，估算性能时以最新数字为准。Rust 索引器冷启动全量扫描约 3.6s（页缓存热），其中写库约 3.3s。
 
@@ -34,6 +35,17 @@ tags:
 `encode(path) = re.sub(r'[^A-Za-z0-9-]', '-', path)`，例如 `/Users/reorx/Code/scripts` → `-Users-reorx-Code-scripts`。编码不可逆（`/` 和 `_`、`.` 都变成 `-`），所以**真实项目路径必须从记录里的 `cwd` 字段或 history.jsonl 的 `project` 字段取**，目录名只用于匹配。
 
 同一个仓库的 worktree 会形成独立"项目"（如 `-Users-reorx--herdr-worktrees-tenderbuddy-hhsw-e-ui`），UI 上可考虑按 git 仓库聚合。
+
+### 模型目录与 Context 窗口
+
+以下结构在 Claude Code 2.1.311 的本机缓存中核对（2026-11-03），属于内部格式。目录跟随 Claude 数据根目录（`ASM_CLAUDE_DIR` → `CLAUDE_CONFIG_DIR` → `~/.claude`）。
+
+- `*-cc.json` 是按账号下发的 served 目录，模型位于 `catalog.config.models`。`published-*.json` 是公开目录，读取 `document.surfaces.cc.model_selector_config[*].models`；不读取 chat / cowork，不解码 `documentBytes`，不重复验签。`published-floor.json` 是防回滚版本下限，其他 masked / 临时文件不提供窗口。
+- 条目取 `runtime.max_input_tokens`，缺失时取 `context_window`；只接受 100,000–10,000,000 的整数。缺 id、无有效窗口的条目跳过，坏文件不影响其他文件。
+- 合并时 served 优先于 published，同类按 `fetchedAt`（Unix 毫秒）从新到旧，缺时间的最后，同模型取第一个值。`staleAt` 是约一小时后的重新获取时间，连同 `expires_at` 都不作失效判断；过期目录仍可补充内置表。多账号文件全部读取，因为 session 不记录账号。
+- id 去首尾空白、转小写、去 `[1m]` 与日期后缀；同文件归一化冲突时不带后缀的 id 优先，否则保留首条。本机 served 12 个模型，published 的 cc 13 个，后者多了仅在 Bedrock 提供的 Opus 4.1（200K）。当前 8 种 session 模型在目录与内置表中均为 1M。
+
+表格、Metadata、CLI 先取目录窗口，再回退内置表；都未知时仅显示 token 数。启动和扫描后读取，窗口表变了就刷新行，不需要重建索引。目录只是声明值，未还原 Claude Code 的环境变量、内置上限、GrowthBook 等运行时调整，因此不保证等于会话当时的实际窗口。诊断命令是 `asm cost --windows`，完整设计见 [实施计划](../plans/2026-11-03-context-window-from-catalog.md)。
 
 ## 2. Transcript 记录类型
 
@@ -99,7 +111,7 @@ assistant 特有：`requestId`、`effort`、`message.model`、`message.id`、`me
 - **`usage` 的字段**：`input_tokens`（未命中缓存的输入）、`cache_creation_input_tokens` 及其细分 `cache_creation.ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens`、`cache_read_input_tokens`、`output_tokens`（含 thinking）、`server_tool_use.web_search_requests`、`speed`（`standard` / `fast`）、`service_tier`、`inference_geo`。没有细分字段的旧记录，缓存写入全按 5 分钟算。本机 `speed: fast` 有 422 条，`web_search_requests` 全为 0，`service_tier` 全为 standard，`inference_geo` 只有 `global` 和 `not_available`（没有要加价 1.1 倍的 US-only）。
 - **`<synthetic>` 不是 API 调用**：`message.model == "<synthetic>"` 的记录是 Claude Code 自己写的（中断、报错），usage 全 0，不计价，也不算进模型列表。
 - **subagent 的花费不能忽略**：257 份 subagent transcript 有 5,545 次响应，cache read 6.16 亿 token、cache write 3,157 万 token，折合几百美元。它们的记录 `isSidechain = true`；主 transcript 里没有 sidechain 的 assistant 记录。
-- **`[1m]` 标记不可靠**：`message.model` 从不带 `[1m]`，`cost-state.modelUsage` 的键有时带（`claude-opus-5[1m]`）。带不带标记都有 session 超过 200K（最高 827K），所以 context 窗口按模型查表（Haiku 4.5 为 200K，当前其余模型 1M），不看标记。
+- **`[1m]` 标记不可靠**：`message.model` 从不带 `[1m]`，`cost-state.modelUsage` 的键有时带（`claude-opus-5[1m]`）。带不带标记都有 session 超过 200K（最高 827K），所以 context 窗口先查模型目录、再查内置表，不看标记，规则见 §1。
 - **`cost-state` 不适合当费用来源**：1,636 份文件里有，其中 670 份 `totalCostUSD = 0`，更早的 session 没有这条记录；被 resume 过的 session 常常只记了最后一次运行（例：一个 session 的记录只覆盖了 32M cache read 里的 3.1M）。它确实包含 subagent 的费用，而且单次运行内的计算口径与官方价格一致（1 小时缓存写入按 2 倍输入价，两份抽样精确到小数点后 6 位）。按 usage 自算后，在 973 个 `cost-state` 非 0 的 session 上：61% 误差在 1% 以内、96% 在 10% 以内，合计相差 1.07%（自算偏低）。偏低推测来自 transcript 之外的调用（标题生成、auto mode 分类器、compact 等），未验证。
 
 ## 3. 派生字段（每个 session 一行）

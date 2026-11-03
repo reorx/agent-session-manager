@@ -534,7 +534,57 @@ def history_rows():
     ]
 
 
+def model_catalog():
+    out = OUT.parent / 'model-catalog'
+    out.mkdir(exist_ok=True)
+
+    def model(id, window):
+        return {
+            'id': id,
+            'runtime': {'max_input_tokens': window},
+            'thinking': {'enabled': True},
+            'capabilities': ['vision'],
+        }
+
+    files = {
+        '00000000-0000-4000-8000-000000000001-test-cc.json': {
+            'version': 2,
+            'fetchedAt': 1793664000000,
+            'staleAt': 1793667600000,
+            'catalog': {
+                'surface': 'cc',
+                'config': {
+                    'id': 'cc',
+                    'models': [
+                        model('claude-opus-5-5', 1000000),
+                        model('claude-opus-5', 1000000),
+                        model('claude-haiku-4-5-20251001', 200000),
+                        model('claude-opus-6', 1000000),
+                    ],
+                },
+            },
+        },
+        'published-00000000000000000000000000000000.json': {
+            'version': 2,
+            'fetchedAt': 1793577600000,
+            'documentBytes': 'placeholder',
+            'document': {
+                'surfaces': {
+                    'cc': {
+                        'model_selector_config': [{'id': 'cc', 'models': [model('claude-opus-4-1-20250805', 200000)]}]
+                    },
+                    'chat': {'model_selector_config': [{'models': [model('claude-opus-4-5-20251101', 500000)]}]},
+                }
+            },
+        },
+        'published-floor.json': {'version': 1, 'sources': {}},
+    }
+    for name, value in files.items():
+        (out / name).write_text(json.dumps(value, indent=2) + '\n')
+
+
 def main():
+    model_catalog()
     if OUT.exists():
         shutil.rmtree(OUT)
     projects = OUT / 'projects'

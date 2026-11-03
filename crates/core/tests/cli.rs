@@ -235,6 +235,49 @@ fn cost_compare_reports_how_far_the_priced_cost_is_from_claude_codes_own() {
     assert!(text.contains("total: $0.13 priced here vs $1.23 recorded (-89.51%)\n"), "{text}");
 }
 
+fn catalog_for_cost(sb: &Sandbox) {
+    let dir = sb.root().join("cache/model-catalog");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("test-cc.json"), r#"{"fetchedAt":1793664000000,"catalog":{"config":{"models":[{"id":"claude-opus-5","runtime":{"max_input_tokens":100000}}]}}}"#).unwrap();
+    std::fs::write(dir.join("broken-cc.json"), "{").unwrap();
+}
+
+#[test]
+fn cost_uses_the_catalog_window_without_changing_costs() {
+    let sb = sandbox();
+    catalog_for_cost(&sb);
+    let out = asm(&sb).args(["cost", "-p", "alpha", "--since", "2026-09-01", "--until", "2026-09-03"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("    $0.13     $1.23   14%  2026-09-01 15:00  11111111"), "{text}");
+}
+
+#[test]
+fn cost_windows_reports_files_models_and_changed_sessions_in_the_filtered_range() {
+    let sb = sandbox();
+    catalog_for_cost(&sb);
+    let out = asm(&sb).args(["cost", "--windows", "-p", "alpha", "--since", "2026-09-01", "--until", "2026-09-03", "-n", "1"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("model catalog:") && text.contains("test-cc.json") && text.contains("broken-cc.json") && text.contains("skipped"), "{text}");
+    assert!(text.contains("MODEL") && text.contains("CATALOG") && text.contains("BUILT-IN"), "{text}");
+    let row = text.lines().find(|l| l.starts_with("claude-opus-5 ")).unwrap();
+    assert_eq!(row.split_whitespace().collect::<Vec<_>>(), ["claude-opus-5", "100k", "1M", "1", "1"]);
+    assert!(text.contains("sessions with context data: 1 · Ctx changed: 1"), "{text}");
+    assert!(text.contains("11111111") && text.contains("1% → 14%"), "{text}");
+    assert!(!text.contains("22222222"), "outside the date range");
+    let out = asm(&sb).args(["cost", "--windows", "--no-scan", "-n", "0"]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("11111111"), "limit applies to changed session details");
+}
+
+#[test]
+fn cost_windows_and_compare_are_mutually_exclusive() {
+    let sb = sandbox();
+    let out = asm(&sb).args(["cost", "--windows", "--compare"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot be used with"));
+}
+
 #[test]
 fn list_orders_sessions_without_a_prompt_by_last_update_then_by_id_like_the_reference() {
     // The reference script and `asm` share this order, so `make parity` never depends on how a

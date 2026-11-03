@@ -3,11 +3,14 @@
 //! Checked against https://platform.claude.com/docs/en/about-claude/pricing on 2026-10-23.
 //! Stored costs are computed at index time: after changing a price, bump
 //! `index::db::SCHEMA_VERSION` so the index is rebuilt (about 4 seconds).
+//! Context windows prefer Claude Code's cached catalog, then this table. They are resolved
+//! at display time, so catalog changes do not require an index rebuild.
 //!
 //! Not modelled: US-only inference (`inference_geo`, ×1.1; never seen in local transcripts) and
 //! the old 1M-context beta premium of Sonnet 4 / 4.5.
 
 use crate::model::UsageRow;
+use crate::claude::model_catalog::ModelCatalog;
 
 /// Prices in USD per million tokens.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -83,6 +86,10 @@ pub fn cost(u: &UsageRow) -> Option<f64> {
     Some(tokens * mult / 1e6 + u.web_search as f64 * WEB_SEARCH_USD)
 }
 
-pub fn context_window(model: &str) -> Option<u64> {
+pub fn builtin_window(model: &str) -> Option<u64> {
     price(model).map(|p| p.window)
+}
+
+pub fn context_window(catalog: &ModelCatalog, model: &str) -> Option<u64> {
+    catalog.window(model).or_else(|| builtin_window(model))
 }

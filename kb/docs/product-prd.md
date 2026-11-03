@@ -1,6 +1,6 @@
 ---
 created: 2026-09-15
-updated: 2026-10-27
+updated: 2026-11-03
 tags:
   - prd
   - product
@@ -41,7 +41,7 @@ tags:
 |---|---|---|
 | Session 收藏 | ✅ | 2026-10-26 完成：⌘D、Favorites 菜单、行右键和详情星标；快照优先、仅收藏过滤、目录迁移、最后副本确认，见 `../plans/2026-10-26-favorites.md` |
 | Session 表格 | ✅ | 9 列（Project / Preview / Started / Updated / Prompts / Cost / Ctx / Size / Kind）、36px 两行、虚拟滚动、行选中、表头排序；Preview 列随窗口自适应 |
-| 费用与 context | ✅ | 2026-10-23 完成：Cost 按 token 用量和官方价格自算（含 subagent），Ctx 是结束时的 context 占用；状态栏合计当前显示行的费用；`asm cost` 命令行同样可用，见 `../plans/2026-10-23-cost-context-columns.md` |
+| 费用与 context | ✅ | Cost 按 token 用量和官方价格自算（含 subagent），Ctx 是结束时的 context 占用；状态栏合计当前显示行的费用；`asm cost` 命令行同样可用，见 `../plans/2026-10-23-cost-context-columns.md`。2026-11-03 起窗口优先取 Claude Code 本机模型目录，启动或扫描后生效，无需重建索引；`asm cost --windows` 可对比窗口与 Ctx 差异 |
 | Preview 展示模式切换 | ✅ | 工具栏 Preview 下拉或 `cmd-1..4`，四种模式即时切换 |
 | 详情面板 | ✅ Metadata / ✅ Conversation / ✅ 操作入口 | 头部 + 两个 tab；Metadata 为真实数据（含自算费用与 Claude Code 记录的费用、token 用量、context、时长、模型、权限模式、top 工具、修改过的文件）；Conversation 2026-10-27 完成 M4a：直接读记录文件，按回合卡显示全部对话（工具调用、thinking、AUTO、compact、打断与 API 错误），命中在哪都能跳过去，扫描期间照常显示，70MB 的 session 首帧 45–79ms（release，页缓存热；冷的一般 150–160ms）。M4b 同日完成：标题行操作按钮（收藏、复制 resume 命令、复制 ID、在 Finder 中显示、打开项目目录、导出 TXT），表格右键菜单提供同一组操作，`⌘C` / `⇧⌘C`；History session 显示 history.jsonl 里的 prompt 卡片；代码块是等宽框、行内代码等宽浅灰底；`[` / `]` 按回合跳转（`../plans/2026-10-26-m4-detail-panel.md`） |
 | 分栏与折叠 | ✅ | 拖拽调宽，快捷键折叠 |
@@ -89,7 +89,7 @@ tags:
 | Started / Updated | 首条消息时间 / 最后活动时间，`MM-DD HH:mm` | 是，Updated 为默认排序 |
 | Prompts | 用户消息数 | 是 |
 | Cost | session 整个生命周期的费用（含 subagent），如 `$3.42`；算不出来显示 `—` | 是；没有费用的视为最低，降序时排在最后 |
-| Ctx | 结束时 context 占用：最后一次主线调用的输入 token（含缓存）÷ 该模型的窗口，如 `41%`、`<1%` | 是；没有数据的视为最低，降序时排在最后 |
+| Ctx | 结束时 context 占用：最后一次主线调用的输入 token（含缓存）÷ 该模型的窗口，如 `41%`、`<1%`；窗口优先取 Claude Code 本机缓存的模型目录，缺失时退回内置表 | 是；没有数据的视为最低，降序时排在最后 |
 | Size | 记录文件大小 | 是 |
 | Kind | 来源徽章：普通 CLI 不标记；**SDK** / **BG**（后台）/ **HIST**（记录已被清理，仅剩历史 prompt） | 是 |
 

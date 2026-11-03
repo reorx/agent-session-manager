@@ -74,4 +74,11 @@
 
 - 记录：2026-10-23（有意的简化；`crates/core/src/pricing.rs`）
 - 价格表按 2026-10-23 的官方价格页写死。Claude Code 用上表里没有的模型后，这些调用的费用不计入，表格里的 Cost 只显示其余部分，看不出少了；只有详情 Metadata 的 Unpriced 一行列出模型名。`asm cost` 会在末尾列出未计价的模型。
+- Context 窗口自 2026-11-03 起优先读取本机模型目录，不再只依赖写死的表；价格仍然写死，见 `kb/plans/2026-11-03-context-window-from-catalog.md`。
 - 处理方向：表格的 Cost 单元格在有未计价调用时加标记；新模型发布后更新 `pricing.rs` 并提升 `SCHEMA_VERSION`。
+
+## Context：目录声明的窗口可能与会话实际窗口不同
+
+- 记录：2026-11-03（有意的简化；`kb/plans/2026-11-03-context-window-from-catalog.md`）
+- Ctx 使用当前缓存声明的窗口，不还原会话当时的账号、`CLAUDE_CODE_DISABLE_1M_CONTEXT`、Claude Code 内置上限或 GrowthBook 调整。受这些条件影响时，表格、Metadata 和 CLI 虽然一致，百分比仍可能低于或高于实际占用；本机当前 8 种模型的目录与内置窗口一致。
+- 后续判断依据：出现真实的窗口不一致样本时核对运行时口径；当前保持只读本机目录和静默回退。

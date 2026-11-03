@@ -5,5 +5,6 @@ pub mod discover;
 pub mod history;
 pub mod parse;
 pub mod paths;
+pub mod model_catalog;
 
 pub mod conversation;

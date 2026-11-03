@@ -38,6 +38,10 @@ impl ClaudeDir {
     pub fn paste_cache_dir(&self) -> PathBuf {
         self.root.join("paste-cache")
     }
+
+    pub fn model_catalog_dir(&self) -> PathBuf {
+        self.root.join("cache/model-catalog")
+    }
 }
 
 pub fn home_dir() -> PathBuf {

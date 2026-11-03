@@ -255,22 +255,23 @@ mod tests {
     use agent_session_core::model::SessionSummary;
 
     use super::*;
-    use crate::model::tests::summary;
+
+    use crate::model::tests::{builtin_row, summary};
 
     const ID: &str = "11111111-aaaa-4bbb-8ccc-000000000001";
 
     fn transcript_row() -> SessionRow {
-        SessionRow::from_summary(&summary(ID, "/Users/me/Code/alpha", 5000))
+        builtin_row(&summary(ID, "/Users/me/Code/alpha", 5000))
     }
 
     fn favorite_row() -> SessionRow {
         let mut s = summary(ID, "/Users/me/Code/alpha", 5000);
         s.favorite = true;
-        SessionRow::from_summary(&s)
+        builtin_row(&s)
     }
 
     fn history_row(id: &str, id_known: bool) -> SessionRow {
-        SessionRow::from_summary(&SessionSummary::history(id, id_known, "-Users-me-Code-alpha", "/Users/me/Code/alpha"))
+        builtin_row(&SessionSummary::history(id, id_known, "-Users-me-Code-alpha", "/Users/me/Code/alpha"))
     }
 
     /// (favorite, copy_resume, copy_id, reveal, open_folder, export) that can run.
@@ -345,7 +346,7 @@ mod tests {
     #[test]
     fn the_export_name_is_project_and_short_id() {
         assert_eq!(export_name(&transcript_row()), "alpha-11111111.txt");
-        let odd = SessionRow::from_summary(&summary(ID, "/Users/me/a:b\\c", 5000));
+        let odd = builtin_row(&summary(ID, "/Users/me/a:b\\c", 5000));
         assert_eq!(export_name(&odd), "a-b-c-11111111.txt", "no path separators in a file name");
     }
 
@@ -360,16 +361,16 @@ mod tests {
         std::fs::create_dir_all(original.parent().unwrap()).unwrap();
         std::fs::write(&original, "{}\n").unwrap();
 
-        let a = check(&SessionRow::from_summary(&s), &claude);
+        let a = check(&builtin_row(&s), &claude);
         assert_eq!(enabled(&a), [true; 6]);
         assert_eq!(a.resume, resume_command(ID, project.to_str().unwrap(), true));
 
         s.favorite = true;
         std::fs::remove_file(&original).unwrap();
-        assert_eq!(check(&SessionRow::from_summary(&s), &claude).copy_resume, Err(FAVORITE_ONLY));
+        assert_eq!(check(&builtin_row(&s), &claude).copy_resume, Err(FAVORITE_ONLY));
         std::fs::remove_dir(&project).unwrap();
-        assert_eq!(check(&SessionRow::from_summary(&s), &claude).open_folder, Err(NO_FOLDER));
+        assert_eq!(check(&builtin_row(&s), &claude).open_folder, Err(NO_FOLDER));
         s.project_path = Some("alpha".into());
-        assert_eq!(check(&SessionRow::from_summary(&s), &claude).open_folder, Err(NO_FOLDER), "a relative path is no folder");
+        assert_eq!(check(&builtin_row(&s), &claude).open_folder, Err(NO_FOLDER), "a relative path is no folder");
     }
 }

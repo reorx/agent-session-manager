@@ -1,0 +1,50 @@
+{
+  "version": 2,
+  "fetchedAt": 1793577600000,
+  "documentBytes": "placeholder",
+  "document": {
+    "surfaces": {
+      "cc": {
+        "model_selector_config": [
+          {
+            "id": "cc",
+            "models": [
+              {
+                "id": "claude-opus-4-1-20250805",
+                "runtime": {
+                  "max_input_tokens": 200000
+                },
+                "thinking": {
+                  "enabled": true
+                },
+                "capabilities": [
+                  "vision"
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "chat": {
+        "model_selector_config": [
+          {
+            "models": [
+              {
+                "id": "claude-opus-4-5-20251101",
+                "runtime": {
+                  "max_input_tokens": 500000
+                },
+                "thinking": {
+                  "enabled": true
+                },
+                "capabilities": [
+                  "vision"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

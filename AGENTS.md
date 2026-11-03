@@ -11,6 +11,7 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 - 详情的 Conversation 直接读记录文件（M4a）：`store.rs` 的 `asm-reader` 线程调 core `claude/conversation.rs::read_conversation`，在同一线程上用 app `conversation.rs` 转成卡片和行表，按 `seq` 取代旧请求；`detail.rs` 用 GPUI 的 `list` + `ListState` 按行表渲染回合卡（`turn_cards.rs`），一行是卡片的一段。搜索词变了才重读。实测数字与和 spec 的差异见 `kb/sessions/2026-10-27-asm-m4a-accept.md`
 - 会话操作（M4b）：复制 resume 命令 / ID、Finder、项目目录、导出 TXT、收藏都在 app `actions.rs`，可用性由纯函数按行的事实算出；标题行按钮、右键菜单、`⌘C` / `⇧⌘C` 派发同一组 action。History 行读 `history.jsonl` 显示 prompt 卡片，不参与搜索（与 Python 脚本一致）。resume 命令的依据见 `kb/sessions/2026-10-27-asm-m4b-resume.md`
 - 未解决的问题记在 `kb/known-issues.md`
+- Context 窗口优先读当前 Claude 数据目录的 `cache/model-catalog/`，缺失时回退内置表；启动与扫描后重读，窗口变化时刷新整表，无需重建索引。表格、Metadata、`asm cost` 共用来源，`asm cost --windows` 可对比差异，见 `kb/plans/2026-11-03-context-window-from-catalog.md`。
 - 费用与 context 已完成（2026-10-23）：表格 Cost / Ctx 列、状态栏费用合计、Updated 的本月 / 上月 / 自定义区间（gpui-component `DatePicker`）、`asm cost [--compare]`。费用由 core 按 `message.usage` × `pricing.rs` 价格表自算（按 `message.id` 去重，subagent 计入父 session），`cost-state` 只作对照。实测与口径见 `kb/plans/2026-10-23-cost-context-columns.md` 和 `kb/docs/claude-session-data-format.md` §2.4。
 - Transcript Reader 已完成（2026-10-10）：独立 `transcript-reader` / `asm transcript` 导出 XML 风格标签分隔的精简 TXT，正文原样输出，无 CDATA，不要求标准 XML；GUI 导出待 M4 接入，复用 `transcript::read_transcript`。当前格式与验证见 `kb/notes/2026-10-10-transcript-reader-xml.md`，压缩规则见 `kb/notes/2026-10-10-transcript-reader.md`。
 
@@ -25,7 +26,7 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 - `make dev`：编译并启动 app（`run` 会先 pkill 旧实例）。手动起的 app 验证后必须 kill，用 `pgrep -fl agent-session-manager` 检查
 - 测试：`cargo test -p agent-session-core`（1 秒内）、`cargo test -p agent-session-manager`（纯逻辑，加上无界面窗口里的键盘测试）、`make test` 全跑
 - 量搜索耗时：`ASM_BENCH_DB=<索引副本> cargo test -p agent-session-manager real_index_timings -- --ignored --nocapture`（`ASM_BENCH_QUERIES`、`ASM_BENCH_REGEX` 可换查询）。不要用截图脚本日志里的耗时，刚唤醒屏幕后的数字可以偏高 4–8 倍
-- `make asm ARGS="…"`：跑 `asm` CLI（`index` / `list` / `session` / `search [--index]` / `cost [--compare]` / `stats` / `favorite` / `unfavorite [--yes]` / `favorites-dir [PATH|--reset]`，`list --favorites` 仅列收藏；参数看 `--help`）。`cost --compare` 统计自算费用与 `cost-state` 的偏差，改价格表或用量解析后跑一次
+- `make asm ARGS="…"`：跑 `asm` CLI（`index` / `list` / `session` / `search [--index]` / `cost [--compare|--windows]` / `stats` / `favorite` / `unfavorite [--yes]` / `favorites-dir [PATH|--reset]`，`list --favorites` 仅列收藏；参数看 `--help`）。`cost --compare` 统计自算费用与 `cost-state` 的偏差，改价格表或用量解析后跑一次；`cost --windows` 对比目录与内置窗口及 Ctx 变化
 - `make transcript-reader ARGS="SESSION_ID -o session.txt"`：导出用户输入、最终回复及工具计数；也支持唯一 ID 前缀或 JSONL 路径，不依赖索引。
 - `make parity`：在真实 `~/.claude` 上把 `asm` 与 Python 脚本逐字比对；改解析器、清理逻辑、`regex.rs` 或输出格式后必须跑。两边的列表顺序一致：开始时间降序，并列时按更新时间降序、再按 id；改排序要两边一起改（脚本旁有 `test_claude_session_search.py`）。比对期间有 session 正在写入时 search 组偶尔失败，重跑即过
 - `make screenshot`（autoplay，3 张）、`make screenshot-clicks`（cliclick 真点击，22 张：12–15 是自定义区间与日期选择器，16–20 是回合卡（第二次启动、预选 `5f6eea99`），21–22 是普通行和 History 行的右键菜单（第三次启动）；换机器要换一个不再变化的 session 并重量坐标；坐标在 `scripts/screenshot-clicks.sh`，改布局后要校对）、`make screenshot-search`（`ASM_SEARCH_AUTOPLAY=1`，app 自己走完搜索流程，脚本等日志标记后截 7 张）、`make screenshot-detail`（`ASM_DETAIL_AUTOPLAY=1`，12 步：选中、展开步骤、展开一步、全部展开、搜索命中、下一个命中、特殊回合、70MB 文件、History 行（第一个 prompt 不少于 3 条的）、代码块（展开离开头最近的带代码块的回复）、从顶部按两次 `]`、Metadata；`ASM_AUTOPLAY_SESSION` / `ASM_AUTOPLAY_REGEX` / `ASM_AUTOPLAY_SPECIAL` 指定 session 和查询，`ASM_AUTOPLAY_STEP=cut-output|thinking|mcp` 决定展开哪种步骤，跳过的步骤不截）。四个截图脚本都带 `caffeinate`，显示器中途睡着会截不到图。输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改），跑在真实索引上，但用一次性的 `state.json` 保证从默认视图开始
@@ -91,6 +92,7 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 
 ## Documentation
 
+- `kb/plans/2026-11-03-context-window-from-catalog.md` — Context 窗口的目录格式、合并优先级、刷新与验收；改模型目录读取或窗口来源前读
 - `kb/docs/release.md` — 发布：tag 触发的 CI、`.app` 的组成、签名与两轮公证、Sparkle 的接入与密钥、Homebrew cask、本地出包、发布后验收、失败处理；发版、改打包或更新逻辑前读
 - `kb/sessions/2026-10-28-release-1.0.md` — 1.0 发布：决定及其由谁定、公开前扫描、本机 feed 与真实 feed 的升级测试证据、Sparkle 在 app 不在前台时延后弹提示的原因
 - `kb/plans/2026-10-26-favorites.md` — 收藏快照、目录迁移、去重优先级与索引根目录守卫；改收藏流程前读

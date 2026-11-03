@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use agent_session_core::claude::paths::{ClaudeDir, default_db_path, encode_project_path, expand_user};
+use agent_session_core::claude::model_catalog::ModelCatalog;
 use agent_session_core::format::{fmt_datetime, fmt_time, fmt_tokens, fmt_usd, human_size};
 use agent_session_core::index::{Db, Indexer, ListFilter, Progress};
 use agent_session_core::model::{Role, SessionSummary};
@@ -153,6 +154,9 @@ struct CostArgs {
     /// Compare with the cost Claude Code recorded itself (`cost-state`) instead of listing
     #[arg(long)]
     compare: bool,
+    /// Compare catalog and built-in context windows, showing sessions whose CTX changes
+    #[arg(long, conflicts_with = "compare")]
+    windows: bool,
     #[arg(long)]
     no_scan: bool,
 }
@@ -175,8 +179,8 @@ fn sum(values: impl Iterator<Item = f64>) -> f64 {
     values.fold(0.0, |a, b| a + b)
 }
 
-fn context_cell(s: &SessionSummary) -> String {
-    match s.context_ratio() {
+fn context_cell(s: &SessionSummary, catalog: &ModelCatalog) -> String {
+    match s.context_ratio(catalog) {
         Some(r) if r < 0.01 => "<1%".into(),
         Some(r) => format!("{:.0}%", r * 100.0),
         None => "—".into(),
@@ -576,6 +580,7 @@ impl App {
     }
 
     fn cost(&mut self, args: CostArgs) -> Result<()> {
+        let catalog = ModelCatalog::load(&self.claude);
         let db = self.open_db(!args.no_scan)?;
         let project_keys = match &args.project {
             Some(arg) => Some(self.resolve_project_keys(arg, &db)?),
@@ -591,9 +596,12 @@ impl App {
         if args.compare {
             return self.compare_costs(&sessions, args.limit);
         }
+        if args.windows {
+            return self.compare_windows(&sessions, &catalog, args.limit);
+        }
         let key = |s: &SessionSummary| match args.sort {
             CostSort::Cost => s.cost_usd,
-            CostSort::Context => s.context_ratio(),
+            CostSort::Context => s.context_ratio(&catalog),
         };
         sessions.sort_by(|a, b| {
             key(b).unwrap_or(f64::NEG_INFINITY).total_cmp(&key(a).unwrap_or(f64::NEG_INFINITY)).then_with(|| b.updated_at.cmp(&a.updated_at))
@@ -609,7 +617,7 @@ impl App {
                 "{:>9} {dim}{:>9}{reset} {:>5}  {}  {id:<8}  {:<16}  {title}",
                 usd(s.cost_usd),
                 usd(s.total_cost_usd),
-                context_cell(s),
+                context_cell(s, &catalog),
                 fmt_datetime(Some(s.updated_at)),
                 project_name(s),
             )?;
@@ -630,6 +638,52 @@ impl App {
         let unpriced: std::collections::BTreeSet<&str> = sessions.iter().flat_map(|s| s.unpriced_models.iter().map(String::as_str)).collect();
         if !unpriced.is_empty() {
             writeln!(self.out, "{dim}not priced (unknown models): {}{reset}", unpriced.into_iter().collect::<Vec<_>>().join(", "))?;
+        }
+        Ok(())
+    }
+
+    fn compare_windows(&mut self, sessions: &[SessionSummary], catalog: &ModelCatalog, limit: usize) -> Result<()> {
+        use agent_session_core::claude::model_catalog::CatalogKind;
+        use agent_session_core::pricing::{builtin_window, normalize};
+        use std::collections::BTreeMap;
+
+        writeln!(self.out, "model catalog: {}", self.claude.model_catalog_dir().display())?;
+        for file in catalog.files() {
+            let name = file.path.file_name().unwrap_or_default().to_string_lossy();
+            if let Some(error) = &file.error {
+                writeln!(self.out, "  skipped    {name}  {error}")?;
+            } else {
+                let kind = match file.kind { CatalogKind::Served => "served", CatalogKind::Published => "published" };
+                writeln!(self.out, "  {kind:<10} {name}  fetched {}  {} models", fmt_datetime(file.fetched_at), file.models)?;
+            }
+        }
+        let builtin = ModelCatalog::default();
+        let mut counts: BTreeMap<&str, (usize, usize)> = catalog.windows().keys().map(|id| (id.as_str(), (0, 0))).collect();
+        let mut changed = Vec::new();
+        let mut with_context = 0;
+        for s in sessions {
+            if let Some(model) = s.context_model.as_deref() {
+                let count = counts.entry(normalize(model)).or_default();
+                count.0 += 1;
+                if context_cell(s, &builtin) != context_cell(s, catalog) {
+                    count.1 += 1;
+                    changed.push(s);
+                }
+            }
+            if s.context_tokens.is_some() { with_context += 1; }
+        }
+        let mut models: Vec<_> = counts.into_iter().collect();
+        models.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(b.0)));
+        writeln!(self.out, "\n{:<32} {:>9} {:>9} {:>9} {:>9}", "MODEL", "CATALOG", "BUILT-IN", "SESSIONS", "CHANGED")?;
+        let window = |w: Option<u64>| w.map_or_else(|| "—".into(), fmt_tokens);
+        for (model, (count, differences)) in models {
+            writeln!(self.out, "{model:<32} {:>9} {:>9} {count:>9} {differences:>9}", window(catalog.window(model)), window(builtin_window(model)))?;
+        }
+        writeln!(self.out, "\nsessions with context data: {with_context} · Ctx changed: {}", changed.len())?;
+        changed.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| a.id.cmp(&b.id)));
+        for s in changed.into_iter().take(limit) {
+            writeln!(self.out, "  {}  {}  {}  {} → {}", fmt_datetime(Some(s.updated_at)), s.id.chars().take(8).collect::<String>(),
+                s.context_model.as_deref().unwrap_or("—"), context_cell(s, &builtin), context_cell(s, catalog))?;
         }
         Ok(())
     }

@@ -433,7 +433,8 @@ mod tests {
     use core::prelude::v1::test;
 
     use super::*;
-    use crate::model::tests::{row, summary};
+
+    use crate::model::tests::{builtin_row, row, summary};
     use crate::model::{Kind, KindSet};
 
     fn delegate() -> SessionTableDelegate {
@@ -447,7 +448,7 @@ mod tests {
     fn with_prompts(id: &str, project: &str, updated_at: i64, prompts: u32) -> Arc<SessionRow> {
         let mut s = summary(id, project, updated_at);
         s.user_msg_count = prompts;
-        Arc::new(SessionRow::from_summary(&s))
+        Arc::new(builtin_row(&s))
     }
 
     #[test]
@@ -485,7 +486,7 @@ mod tests {
     fn history(id: &str, project: &str, updated_at: i64) -> Arc<SessionRow> {
         let mut s = summary(id, project, updated_at);
         s.transcript_missing = true;
-        Arc::new(SessionRow::from_summary(&s))
+        Arc::new(builtin_row(&s))
     }
 
     #[test]
@@ -604,7 +605,7 @@ mod tests {
         let mut s = summary(id, project, updated_at);
         s.cost_usd = cost;
         (s.context_tokens, s.context_model) = (context, Some("claude-opus-5".into()));
-        Arc::new(SessionRow::from_summary(&s))
+        Arc::new(builtin_row(&s))
     }
 
     #[test]

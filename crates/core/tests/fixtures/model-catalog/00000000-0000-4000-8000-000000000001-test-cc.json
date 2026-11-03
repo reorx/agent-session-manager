@@ -1,0 +1,61 @@
+{
+  "version": 2,
+  "fetchedAt": 1793664000000,
+  "staleAt": 1793667600000,
+  "catalog": {
+    "surface": "cc",
+    "config": {
+      "id": "cc",
+      "models": [
+        {
+          "id": "claude-opus-5-5",
+          "runtime": {
+            "max_input_tokens": 1000000
+          },
+          "thinking": {
+            "enabled": true
+          },
+          "capabilities": [
+            "vision"
+          ]
+        },
+        {
+          "id": "claude-opus-5",
+          "runtime": {
+            "max_input_tokens": 1000000
+          },
+          "thinking": {
+            "enabled": true
+          },
+          "capabilities": [
+            "vision"
+          ]
+        },
+        {
+          "id": "claude-haiku-4-5-20251001",
+          "runtime": {
+            "max_input_tokens": 200000
+          },
+          "thinking": {
+            "enabled": true
+          },
+          "capabilities": [
+            "vision"
+          ]
+        },
+        {
+          "id": "claude-opus-6",
+          "runtime": {
+            "max_input_tokens": 1000000
+          },
+          "thinking": {
+            "enabled": true
+          },
+          "capabilities": [
+            "vision"
+          ]
+        }
+      ]
+    }
+  }
+}

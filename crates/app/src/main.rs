@@ -29,6 +29,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_session_core::claude::paths::{ClaudeDir, default_db_path};
+use agent_session_core::claude::model_catalog::ModelCatalog;
 use agent_session_core::format::{fmt_usd, human_size};
 use agent_session_core::index::ScanReport;
 use agent_session_core::search::Matcher;
@@ -102,6 +103,7 @@ struct DetailTiming {
 
 pub struct AppRoot {
     claude: ClaudeDir,
+    catalog: Arc<ModelCatalog>,
     favorites: agent_session_core::favorites::FavoritesDir,
     table: Entity<TableState<SessionTableDelegate>>,
     search: Entity<InputState>,
@@ -280,6 +282,7 @@ impl AppRoot {
 
         let mut this = Self {
             claude: paths.claude,
+            catalog: Arc::new(ModelCatalog::default()),
             favorites: paths.favorites,
             table,
             search,
@@ -343,8 +346,9 @@ impl AppRoot {
         let mut reloaded = false;
         for ev in batch {
             match ev {
-                StoreEvent::Loaded { sessions, elapsed } => {
-                    let rows: Vec<Arc<SessionRow>> = sessions.iter().map(|s| Arc::new(SessionRow::from_summary(s))).collect();
+                StoreEvent::Loaded { sessions, catalog, elapsed } => {
+                    self.catalog = catalog;
+                    let rows: Vec<Arc<SessionRow>> = sessions.iter().map(|s| Arc::new(SessionRow::from_summary(s, &self.catalog))).collect();
                     streamed.clear();
                     if !rows.is_empty() && self.first_rows_ms.is_none() {
                         self.first_rows_ms = Some(self.launched.elapsed().as_millis());
@@ -354,7 +358,7 @@ impl AppRoot {
                     data_changed = true;
                     reloaded = true;
                 }
-                StoreEvent::Session(s) => streamed.push(Arc::new(SessionRow::from_summary(&s))),
+                StoreEvent::Session(s) => streamed.push(Arc::new(SessionRow::from_summary(&s, &self.catalog))),
                 StoreEvent::Progress(p) if p.done < p.total => self.index_status = IndexStatus::Scanning { done: p.done, total: p.total },
                 StoreEvent::Progress(_) => {}
                 StoreEvent::ScanDone { report, stats } => {

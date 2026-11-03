@@ -193,8 +193,8 @@ impl SessionSummary {
     }
 
     /// How full the context window was at the end: last main-thread prompt / the model's window.
-    pub fn context_ratio(&self) -> Option<f64> {
-        let window = crate::pricing::context_window(self.context_model.as_deref()?)?;
+    pub fn context_ratio(&self, catalog: &crate::claude::model_catalog::ModelCatalog) -> Option<f64> {
+        let window = crate::pricing::context_window(catalog, self.context_model.as_deref()?)?;
         Some(self.context_tokens? as f64 / window as f64)
     }
 
