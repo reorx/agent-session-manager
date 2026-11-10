@@ -7,9 +7,11 @@ use std::process::ExitCode;
 
 use agent_session_core::claude::paths::{ClaudeDir, default_db_path, encode_project_path, expand_user};
 use agent_session_core::claude::model_catalog::ModelCatalog;
-use agent_session_core::format::{fmt_datetime, fmt_time, fmt_tokens, fmt_usd, human_size};
+use agent_session_core::format::{fmt_change, fmt_datetime, fmt_time, fmt_tokens, fmt_usd, human_size};
 use agent_session_core::index::{Db, Indexer, ListFilter, Progress};
-use agent_session_core::model::{Role, SessionSummary};
+use agent_session_core::cost::{Comparison, compare, primary_model};
+use agent_session_core::model::{Role, SessionSummary, Tokens};
+use agent_session_core::pricing::{CostLines, display_name, normalize, resolve};
 use agent_session_core::search::fts::{FtsQuery, FtsRoles, search_sessions};
 use agent_session_core::search::regex::{RegexOptions, RoleSet, Snippet, ToolLineKind, list_transcripts, search};
 use agent_session_core::search::Highlighted;
@@ -157,11 +159,23 @@ struct CostArgs {
     /// Compare catalog and built-in context windows, showing sessions whose CTX changes
     #[arg(long, conflicts_with = "compare")]
     windows: bool,
+    /// Only sessions whose main model (the one that cost the most) is this, e.g. `opus-5-5`
+    #[arg(long)]
+    model: Option<String>,
+    /// Also price each session with this as its main model, e.g. `fable-5-2`; the other models
+    /// keep their price and the token counts stay the same
+    #[arg(long = "as", value_name = "MODEL", conflicts_with_all = ["compare", "windows"])]
+    as_model: Option<String>,
     #[arg(long)]
     no_scan: bool,
 }
 
 const COST_TITLE_LEN: usize = 60;
+
+/// `opus-5-5` → `claude-opus-5-5`, without dropping a date or `[1m]` suffix.
+fn claude_id(name: &str) -> String {
+    if name.starts_with("claude-") { name.to_string() } else { format!("claude-{name}") }
+}
 
 /// Local midnight of `date`, unix ms.
 fn local_midnight(date: chrono::NaiveDate) -> Option<i64> {
@@ -593,12 +607,21 @@ impl App {
             ..Default::default()
         };
         let mut sessions = db.list_sessions(&filter)?;
+        if let Some(model) = &args.model {
+            let want = claude_id(model);
+            let want = normalize(&want);
+            sessions.retain(|s| primary_model(&s.model_usage).is_some_and(|m| normalize(m) == want));
+        }
         if args.compare {
             return self.compare_costs(&sessions, args.limit);
         }
         if args.windows {
             return self.compare_windows(&sessions, &catalog, args.limit);
         }
+        let target = match &args.as_model {
+            Some(name) => Some(resolve(name).ok_or_else(|| anyhow!("no price for model `{name}`"))?),
+            None => None,
+        };
         let key = |s: &SessionSummary| match args.sort {
             CostSort::Cost => s.cost_usd,
             CostSort::Context => s.context_ratio(&catalog),
@@ -606,6 +629,9 @@ impl App {
         sessions.sort_by(|a, b| {
             key(b).unwrap_or(f64::NEG_INFINITY).total_cmp(&key(a).unwrap_or(f64::NEG_INFINITY)).then_with(|| b.updated_at.cmp(&a.updated_at))
         });
+        if let Some(target) = target {
+            return self.cost_as(&sessions, &target, &catalog, args.limit);
+        }
         let (bold, dim, reset) = (self.pal.bold, self.pal.dim, self.pal.reset);
         writeln!(self.out, "{bold}{:>9} {:>9} {:>5}  {:<16}  {:<8}  {:<16}  TITLE{reset}", "COST", "CC", "CTX", "UPDATED", "SESSION", "PROJECT")?;
         let usd = |c: Option<f64>| c.map_or_else(|| "—".to_string(), fmt_usd);
@@ -642,9 +668,76 @@ impl App {
         Ok(())
     }
 
+    /// `cost` with every session's main model priced as `target` as well: per session, then the
+    /// totals by kind of token.
+    fn cost_as(&mut self, sessions: &[SessionSummary], target: &str, catalog: &ModelCatalog, limit: usize) -> Result<()> {
+        let (bold, dim, reset) = (self.pal.bold, self.pal.dim, self.pal.reset);
+        let name = display_name(target);
+        writeln!(
+            self.out,
+            "{bold}{:>9} {:>10} {:>7} {:>5}  {:<10}  {:<16}  {:<8}  {:<16}  TITLE{reset}",
+            "COST", name.to_uppercase(), "CHANGE", "CTX", "MODEL", "UPDATED", "SESSION", "PROJECT"
+        )?;
+        let usd = |c: Option<f64>| c.map_or_else(|| "—".to_string(), fmt_usd);
+        let comparisons: Vec<Option<Comparison>> = sessions.iter().map(|s| compare(&s.model_usage, target)).collect();
+        for (s, c) in sessions.iter().zip(&comparisons).take(limit) {
+            let id: String = if s.id_known { s.id.chars().take(8).collect() } else { "(none)".into() };
+            let title = agent_session_core::claude::clean::one_line(s.display_title(), COST_TITLE_LEN);
+            let (predicted, change, model) = match c {
+                Some(c) => (Some(c.predicted_total()), c.actual_total().map_or_else(|| "—".into(), |a| fmt_change(a, c.predicted_total())), display_name(&c.source)),
+                None => (None, "—".into(), "—".into()),
+            };
+            writeln!(
+                self.out,
+                "{:>9} {:>10} {:>7} {:>5}  {model:<10}  {}  {id:<8}  {:<16}  {title}",
+                usd(s.cost_usd),
+                usd(predicted),
+                change,
+                context_cell(s, catalog),
+                fmt_datetime(Some(s.updated_at)),
+                project_name(s),
+            )?;
+        }
+        // totals over the sessions that can be compared: a main model with a price
+        let compared: Vec<&Comparison> = comparisons.iter().flatten().filter(|c| c.actual.is_some()).collect();
+        let (mut tokens, mut actual, mut predicted, mut others) = (Tokens::default(), CostLines::default(), CostLines::default(), 0.0);
+        for c in &compared {
+            tokens.add(&c.tokens);
+            actual.add(&c.actual.unwrap_or_default());
+            predicted.add(&c.predicted);
+            others += c.others_usd;
+        }
+        let (total, total_as) = (actual.total() + others, predicted.total() + others);
+        let shown = if sessions.len() > limit { format!(" (top {limit} shown)") } else { String::new() };
+        writeln!(self.out, "\n{bold}{} sessions · {} → {name} {} ({}){reset}{shown}", compared.len(), fmt_usd(total), fmt_usd(total_as), fmt_change(total, total_as))?;
+        writeln!(self.out, "{bold}{:<16} {:>8} {:>10} {:>10} {:>7}{reset}", "", "TOKENS", "ACTUAL", name.to_uppercase(), "CHANGE")?;
+        let rows = [
+            ("input", tokens.input, actual.input, predicted.input),
+            ("cache write 5m", tokens.cache_write_5m, actual.cache_write_5m, predicted.cache_write_5m),
+            ("cache write 1h", tokens.cache_write_1h, actual.cache_write_1h, predicted.cache_write_1h),
+            ("cache read", tokens.cache_read, actual.cache_read, predicted.cache_read),
+            ("input total", tokens.input_total(), actual.input_total(), predicted.input_total()),
+            ("output", tokens.output, actual.output, predicted.output),
+        ];
+        for (label, n, a, p) in rows {
+            writeln!(self.out, "{label:<16} {:>8} {:>10} {:>10} {:>7}", fmt_tokens(n), fmt_usd(a), fmt_usd(p), fmt_change(a, p))?;
+        }
+        if tokens.web_search > 0 {
+            writeln!(self.out, "{:<16} {:>8} {:>10} {:>10}", "web search", tokens.web_search, fmt_usd(actual.web_search), fmt_usd(predicted.web_search))?;
+        }
+        writeln!(self.out, "{:<16} {:>8} {:>10} {:>10}", "other models", "", fmt_usd(others), fmt_usd(others))?;
+        writeln!(self.out, "{bold}{:<16} {:>8} {:>10} {:>10} {:>7}{reset}", "total", "", fmt_usd(total), fmt_usd(total_as), fmt_change(total, total_as))?;
+        writeln!(self.out, "{dim}main model of each session as {name}; other models keep their price; same token counts{reset}")?;
+        let left_out = sessions.len() - compared.len();
+        if left_out > 0 {
+            writeln!(self.out, "{dim}{left_out} sessions left out: no API usage, or a main model without a price{reset}")?;
+        }
+        Ok(())
+    }
+
     fn compare_windows(&mut self, sessions: &[SessionSummary], catalog: &ModelCatalog, limit: usize) -> Result<()> {
         use agent_session_core::claude::model_catalog::CatalogKind;
-        use agent_session_core::pricing::{builtin_window, normalize};
+        use agent_session_core::pricing::builtin_window;
         use std::collections::BTreeMap;
 
         writeln!(self.out, "model catalog: {}", self.claude.model_catalog_dir().display())?;

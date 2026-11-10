@@ -32,6 +32,20 @@ const LIST_OVERDRAW: f32 = 400.;
 pub enum DetailTab {
     Metadata,
     Conversation,
+    /// What the session cost, and would with another main model (`cost_tab.rs`).
+    Cost,
+}
+
+impl DetailTab {
+    const ALL: [DetailTab; 3] = [DetailTab::Metadata, DetailTab::Conversation, DetailTab::Cost];
+
+    fn label(self) -> &'static str {
+        match self {
+            DetailTab::Metadata => "Metadata",
+            DetailTab::Conversation => "Conversation",
+            DetailTab::Cost => "Cost",
+        }
+    }
 }
 
 /// Where the conversation of the selected session is (its transcript, or for a history-only
@@ -408,6 +422,7 @@ fn mono_value(value: SharedString, cx: &App) -> Div {
 impl AppRoot {
     pub fn set_detail_tab(&mut self, tab: DetailTab, cx: &mut Context<Self>) {
         self.detail.tab = tab;
+        self.sync_projection(cx);
         cx.notify();
     }
 
@@ -430,6 +445,7 @@ impl AppRoot {
             .child(match self.detail.tab {
                 DetailTab::Metadata => self.render_metadata(&row, cx).into_any_element(),
                 DetailTab::Conversation => self.render_conversation(cx).into_any_element(),
+                DetailTab::Cost => self.render_cost(&row, cx).into_any_element(),
             })
             .into_any_element()
     }
@@ -437,10 +453,7 @@ impl AppRoot {
     fn render_detail_header(&self, row: &Arc<SessionRow>, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let dot = || div().text_color(style::dot_sep()).child("·");
         let summary = format!("{} prompts · {} tools · {}", row.prompts, row.tools, row.size_fmt);
-        let tab_ix = match self.detail.tab {
-            DetailTab::Metadata => 0,
-            DetailTab::Conversation => 1,
-        };
+        let tab_ix = DetailTab::ALL.iter().position(|t| *t == self.detail.tab).unwrap_or(0);
         v_flex()
             .flex_none()
             .pt(px(10.))
@@ -480,10 +493,9 @@ impl AppRoot {
                             .xsmall()
                             .selected_index(tab_ix)
                             .on_click(cx.listener(|this, ix: &usize, _, cx| {
-                                let tab = if *ix == 0 { DetailTab::Metadata } else { DetailTab::Conversation };
-                                this.set_detail_tab(tab, cx);
+                                this.set_detail_tab(DetailTab::ALL[*ix], cx);
                             }))
-                            .children(["Metadata", "Conversation"].map(|l| Tab::new().label(l))),
+                            .children(DetailTab::ALL.map(|t| Tab::new().label(t.label()))),
                     )
                     .child(div().flex_1())
                     .child(div().font_family(mono(cx)).text_size(px(11.)).text_color(style::muted()).child(summary)),

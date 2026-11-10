@@ -112,6 +112,10 @@ pub struct SessionSummary {
     pub context_model: Option<String>,
     /// Models that showed up in the usage but have no price, so `cost_usd` leaves them out.
     pub unpriced_models: BTreeSet<String>,
+    /// The API responses grouped by what decides their price, subagents included; ordered by
+    /// model, then fast, then long prompt. Read along with the row, not a column of it.
+    #[serde(default)]
+    pub model_usage: Vec<ModelUsage>,
 }
 
 impl SessionSummary {
@@ -160,6 +164,7 @@ impl SessionSummary {
             context_peak: None,
             context_model: None,
             unpriced_models: BTreeSet::new(),
+            model_usage: Vec::new(),
         }
     }
 
@@ -208,6 +213,7 @@ impl SessionSummary {
         self.cost_usd = None;
         (self.tokens_in, self.tokens_out, self.tokens_cache_read, self.tokens_cache_write) = (0, 0, 0, 0);
         self.unpriced_models.clear();
+        let mut groups: BTreeMap<(&str, bool, bool), ModelUsage> = BTreeMap::new();
         for u in by_id.values() {
             self.tokens_in += u.input;
             self.tokens_out += u.output;
@@ -217,8 +223,69 @@ impl SessionSummary {
                 Some(c) => *self.cost_usd.get_or_insert(0.0) += c,
                 None => drop(self.unpriced_models.insert(u.model.clone())),
             }
+            let long_prompt = u.prompt_tokens() > crate::pricing::LONG_PROMPT;
+            let group = groups.entry((&u.model, u.fast, long_prompt)).or_insert_with(|| ModelUsage {
+                model: u.model.clone(),
+                fast: u.fast,
+                long_prompt,
+                ..ModelUsage::default()
+            });
+            group.responses += 1;
+            group.tokens.add(&u.tokens());
+            if let Some(c) = u.cost_usd {
+                *group.cost_usd.get_or_insert(0.0) += c;
+            }
         }
+        self.model_usage = groups.into_values().collect();
     }
+
+    /// Every input token the session's calls sent: uncached, written to the cache, read from it.
+    pub fn input_tokens_total(&self) -> u64 {
+        self.tokens_in + self.tokens_cache_write + self.tokens_cache_read
+    }
+}
+
+/// Token counts of one or more API responses, by how they are billed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tokens {
+    /// Uncached input.
+    pub input: u64,
+    pub cache_write_5m: u64,
+    pub cache_write_1h: u64,
+    pub cache_read: u64,
+    pub output: u64,
+    /// Web searches (billed per search, not per token).
+    pub web_search: u64,
+}
+
+impl Tokens {
+    /// Every input token: uncached, written to the cache, read from it.
+    pub fn input_total(&self) -> u64 {
+        self.input + self.cache_write_5m + self.cache_write_1h + self.cache_read
+    }
+
+    pub fn add(&mut self, other: &Tokens) {
+        self.input += other.input;
+        self.cache_write_5m += other.cache_write_5m;
+        self.cache_write_1h += other.cache_write_1h;
+        self.cache_read += other.cache_read;
+        self.output += other.output;
+        self.web_search += other.web_search;
+    }
+}
+
+/// A session's API responses that share what decides their price: the model, fast mode, and
+/// whether the prompt was over `pricing::LONG_PROMPT` tokens. Grouping on the prompt size lets
+/// the calls be re-priced exactly as a model with a long-prompt tier (`cost::compare`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelUsage {
+    pub model: String,
+    pub fast: bool,
+    pub long_prompt: bool,
+    pub responses: u64,
+    pub tokens: Tokens,
+    /// Sum of the responses' stored cost; `None` when the model has no price.
+    pub cost_usd: Option<f64>,
 }
 
 /// One API response's token usage. Claude Code writes a response as one record per content
@@ -247,6 +314,17 @@ impl UsageRow {
     /// Every input token the request sent, cached or not: how full the context was.
     pub fn prompt_tokens(&self) -> u64 {
         self.input + self.cache_write_5m + self.cache_write_1h + self.cache_read
+    }
+
+    pub fn tokens(&self) -> Tokens {
+        Tokens {
+            input: self.input,
+            cache_write_5m: self.cache_write_5m,
+            cache_write_1h: self.cache_write_1h,
+            cache_read: self.cache_read,
+            output: self.output,
+            web_search: self.web_search,
+        }
     }
 }
 

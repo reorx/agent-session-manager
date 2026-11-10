@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use agent_session_core::format::{fmt_datetime, fmt_time, fmt_tokens, fmt_usd};
-use agent_session_core::pricing::context_window;
 use agent_session_core::claude::model_catalog::ModelCatalog;
-use agent_session_core::model::SessionSummary;
+use agent_session_core::cost::primary_model;
+use agent_session_core::model::{ModelUsage, SessionSummary};
+use agent_session_core::pricing::{context_window, display_name};
 use chrono::{Datelike, Days, Local, Months, NaiveDate};
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
@@ -92,6 +93,15 @@ pub struct SessionRow {
     /// `412k / 1M · peak 655k`.
     pub context_detail: SharedString,
     pub tokens_fmt: SharedString,
+    /// Every input token the calls sent (uncached + cache writes + cache reads): the In column.
+    pub input_tokens: u64,
+    pub input_fmt: SharedString,
+    pub output_tokens: u64,
+    pub output_fmt: SharedString,
+    /// The model that cost the most (`cost::primary_model`); `None` without any API call.
+    pub primary_model: Option<SharedString>,
+    /// API calls grouped by what decides their price, for the Cost tab and the projected total.
+    pub model_usage: Vec<ModelUsage>,
     /// Models whose calls are left out of `cost` (no known price); empty when there are none.
     pub unpriced: SharedString,
     pub branch: SharedString,
@@ -178,6 +188,11 @@ fn context_detail(s: &SessionSummary, catalog: &ModelCatalog) -> SharedString {
         text.push_str(&format!(" · peak {}", fmt_tokens(peak)));
     }
     text.into()
+}
+
+/// A token count of the In / Out columns: a dash for a session that sent nothing.
+fn format_tokens(n: u64, s: &SessionSummary) -> SharedString {
+    if s.input_tokens_total() == 0 { NONE.into() } else { fmt_tokens(n).into() }
 }
 
 fn tokens_summary(s: &SessionSummary) -> SharedString {
@@ -276,6 +291,12 @@ impl SessionRow {
             context_fmt: format_context(context_pct),
             context_detail: context_detail(s, catalog),
             tokens_fmt: tokens_summary(s),
+            input_tokens: s.input_tokens_total(),
+            input_fmt: format_tokens(s.input_tokens_total(), s),
+            output_tokens: s.tokens_out,
+            output_fmt: format_tokens(s.tokens_out, s),
+            primary_model: primary_model(&s.model_usage).map(|m| SharedString::from(m.to_string())),
+            model_usage: s.model_usage.clone(),
             unpriced: s.unpriced_models.iter().cloned().collect::<Vec<_>>().join(", ").into(),
             branch: or_none(s.git_branch.as_deref()),
             tools: s.tool_use_count,
@@ -550,6 +571,8 @@ pub struct Filter {
     /// Sessions that never got a human prompt are hidden unless this is set.
     pub show_empty: bool,
     pub kinds: KindSet,
+    /// Only sessions whose main model is this one.
+    pub model: Option<SharedString>,
     /// `project_key`s whose sessions never show (noise such as a probe tool's directory).
     pub hidden_projects: BTreeSet<SharedString>,
 }
@@ -560,7 +583,8 @@ impl Filter {
         let since_ok = self.since_ms.is_none_or(|since| row.updated_at >= since)
             && self.until_ms.is_none_or(|until| row.updated_at < until);
         let shown = (self.show_empty || row.prompts > 0) && !self.hidden_projects.contains(&row.project_key);
-        (!self.favorites_only || row.favorite) && project_ok && since_ok && shown && self.kinds.contains(row.kind)
+        let model_ok = self.model.is_none() || row.primary_model == self.model;
+        (!self.favorites_only || row.favorite) && project_ok && since_ok && shown && model_ok && self.kinds.contains(row.kind)
     }
 
     /// Hide a project; when it is the picked one the filter goes back to all projects.
@@ -607,6 +631,27 @@ pub fn project_entries<'a>(rows: impl Iterator<Item = &'a Arc<SessionRow>>) -> V
     out
 }
 
+/// One entry of the Model dropdown: a main model and how many sessions it is the main model of.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ModelEntry {
+    pub model: SharedString,
+    /// `Opus 5.5`.
+    pub name: SharedString,
+    pub count: usize,
+}
+
+/// Distinct main models of `rows`, most sessions first.
+pub fn model_entries<'a>(rows: impl Iterator<Item = &'a Arc<SessionRow>>) -> Vec<ModelEntry> {
+    let mut counts: HashMap<SharedString, usize> = HashMap::new();
+    for model in rows.filter_map(|r| r.primary_model.clone()) {
+        *counts.entry(model).or_default() += 1;
+    }
+    let mut out: Vec<ModelEntry> =
+        counts.into_iter().map(|(model, count)| ModelEntry { name: display_name(&model).into(), model, count }).collect();
+    out.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.model.cmp(&b.model)));
+    out
+}
+
 /// Split the project list into the projects the dropdown offers and the hidden ones. A hidden
 /// key without any session left is still listed (by its key), so it can be shown again.
 pub fn split_hidden(entries: Vec<ProjectEntry>, hidden: &BTreeSet<SharedString>) -> (Vec<ProjectEntry>, Vec<ProjectEntry>) {
@@ -625,6 +670,7 @@ pub mod tests {
     use core::prelude::v1::test;
 
     use super::*;
+    use agent_session_core::model::Tokens;
 
     pub fn builtin_row(s: &SessionSummary) -> SessionRow {
         SessionRow::from_summary(s, &ModelCatalog::default())
@@ -992,6 +1038,59 @@ pub mod tests {
         assert!(filter.matches(&row("b", "/p/a", 19_999)));
         assert!(!filter.matches(&row("c", "/p/a", 20_000)), "the upper bound is the next day's midnight: out");
         assert!(!filter.matches(&row("d", "/p/a", 9_999)));
+    }
+
+    fn usage(model: &str, input: u64, cache_read: u64, output: u64) -> ModelUsage {
+        let tokens = Tokens { input, cache_read, output, ..Tokens::default() };
+        ModelUsage { model: model.into(), fast: false, long_prompt: false, responses: 1, tokens, cost_usd: None }
+    }
+
+    fn on(id: &str, groups: Vec<ModelUsage>) -> Arc<SessionRow> {
+        let mut s = summary(id, "/p/a", 5000);
+        s.model_usage = groups;
+        Arc::new(builtin_row(&s))
+    }
+
+    #[test]
+    fn in_counts_every_input_token_and_out_the_output() {
+        let mut s = summary("s", "/p/a", 5000);
+        (s.tokens_in, s.tokens_out, s.tokens_cache_read, s.tokens_cache_write) = (12, 120_000, 13_000_000, 140_000);
+        let r = builtin_row(&s);
+        assert_eq!((r.input_tokens, r.input_fmt.as_ref()), (13_140_012, "13.1M"));
+        assert_eq!((r.output_tokens, r.output_fmt.as_ref()), (120_000, "120k"));
+        let empty = builtin_row(&summary("e", "/p/a", 5000));
+        assert_eq!((empty.input_fmt.as_ref(), empty.output_fmt.as_ref()), ("—", "—"), "a session without calls shows dashes");
+    }
+
+    #[test]
+    fn a_row_knows_its_main_model() {
+        let r = on("s", vec![usage("claude-haiku-4-5", 0, 0, 1_000_000), usage("claude-opus-5-5", 0, 0, 500_000)]);
+        assert_eq!(r.primary_model.as_deref(), Some("claude-opus-5-5"), "$10 of Opus beats $5 of Haiku");
+        assert_eq!(r.model_usage.len(), 2);
+        assert_eq!(on("e", vec![]).primary_model, None);
+    }
+
+    #[test]
+    fn the_model_filter_keeps_sessions_whose_main_model_it_is() {
+        let filter = Filter { model: Some("claude-opus-5-5".into()), ..Default::default() };
+        assert!(filter.matches(&on("a", vec![usage("claude-opus-5-5", 0, 0, 1)])));
+        assert!(!filter.matches(&on("b", vec![usage("claude-fable-5-1", 0, 0, 1)])));
+        assert!(!filter.matches(&on("c", vec![usage("claude-opus-5-5", 0, 0, 1), usage("claude-fable-5-1", 0, 0, 1)])), "Fable costs more there");
+        assert!(!filter.matches(&on("d", vec![])), "no calls, no model");
+        assert!(Filter::default().matches(&on("d", vec![])));
+    }
+
+    #[test]
+    fn the_model_menu_lists_main_models_by_session_count() {
+        let rows = [
+            on("a", vec![usage("claude-opus-5-5", 0, 0, 1)]),
+            on("b", vec![usage("claude-fable-5-1", 0, 0, 1)]),
+            on("c", vec![usage("claude-opus-5-5", 0, 0, 1)]),
+            on("d", vec![]),
+        ];
+        let entries = model_entries(rows.iter());
+        let got: Vec<(&str, &str, usize)> = entries.iter().map(|e| (e.model.as_ref(), e.name.as_ref(), e.count)).collect();
+        assert_eq!(got, [("claude-opus-5-5", "Opus 5.5", 2), ("claude-fable-5-1", "Fable 5.1", 1)]);
     }
 
     #[test]

@@ -15,6 +15,7 @@ use gpui_kit::*;
 use crate::actions::{self, CopyResume, CopySessionId, ExportTranscript, HideProject, OpenProjectFolder, RevealTranscript};
 use crate::favorites::FavoriteSession;
 use crate::model::{DisplayMode, Filter, SessionRow};
+use agent_session_core::cost::compare;
 use crate::search::{RowHit, SearchTarget};
 use crate::style::{self, FluentBuilder};
 
@@ -25,12 +26,14 @@ pub const UPDATED_W: f32 = 88.;
 pub const PROMPTS_W: f32 = 58.;
 pub const COST_W: f32 = 62.;
 pub const CTX_W: f32 = 44.;
+pub const IN_W: f32 = 52.;
+pub const OUT_W: f32 = 48.;
 pub const SIZE_W: f32 = 60.;
 pub const KIND_W: f32 = 46.;
 /// Only there while a search is active.
 pub const MATCHES_W: f32 = 64.;
-const FIXED_COLS_W: f32 = PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + COST_W + CTX_W + SIZE_W + KIND_W;
-pub const PREVIEW_MIN_W: f32 = 200.;
+const FIXED_COLS_W: f32 = PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + COST_W + CTX_W + IN_W + OUT_W + SIZE_W + KIND_W;
+pub const PREVIEW_MIN_W: f32 = 160.;
 pub const ROW_H: f32 = 36.;
 /// The row context menu (mockup 6), wide enough for the start of a resume command.
 const MENU_W: f32 = 330.;
@@ -57,6 +60,10 @@ pub struct SessionTableDelegate {
     sort: Option<(SharedString, ColumnSort)>,
     /// Cost of the rows in `ix` (the status bar shows it).
     pub shown_cost: f64,
+    /// Model the Cost tab prices sessions as, while it is open: the status bar then also shows
+    /// what the rows in `ix` would cost with it as their main model.
+    compare_model: Option<SharedString>,
+    projection: Option<Projection>,
     pub last_filter_ms: u128,
     /// The context menu checks whether a favorite's original transcript is still there.
     claude: ClaudeDir,
@@ -76,6 +83,8 @@ impl SessionTableDelegate {
             col("prompts", "Prompts", PROMPTS_W).text_right().sortable(),
             col("cost", "Cost", COST_W).text_right().sortable(),
             col("context", "Ctx", CTX_W).text_right().sortable(),
+            col("input", "In", IN_W).text_right().sortable(),
+            col("output", "Out", OUT_W).text_right().sortable(),
             col("size", "Size", SIZE_W).text_right().sortable(),
             col("kind", "Kind", KIND_W).sortable(),
         ];
@@ -89,6 +98,8 @@ impl SessionTableDelegate {
             search: None,
             sort: None,
             shown_cost: 0.0,
+            compare_model: None,
+            projection: None,
             last_filter_ms: 0,
             claude,
         }
@@ -199,11 +210,38 @@ impl SessionTableDelegate {
         let t = Instant::now();
         self.ix = (0..self.rows.len()).filter(|i| self.shows(&self.rows[*i])).collect();
         self.shown_cost = self.ix.iter().filter_map(|i| self.rows[*i].cost).fold(0.0, |a, b| a + b);
+        self.project();
         match self.sort.clone() {
             Some((key, sort)) => self.sort(&key, sort),
             None => self.sort_by_updated_desc(),
         }
         self.last_filter_ms = t.elapsed().as_millis();
+    }
+
+    /// Price the shown rows as `model` too (the Cost tab is open), or stop (`None`).
+    pub fn set_compare_model(&mut self, model: Option<SharedString>) {
+        if self.compare_model != model {
+            self.compare_model = model;
+            self.project();
+        }
+    }
+
+    pub fn projection(&self) -> Option<&Projection> {
+        self.projection.as_ref()
+    }
+
+    /// Sums over the shown rows whose main model has a price, so both sides cover the same calls.
+    fn project(&mut self) {
+        self.projection = self.compare_model.as_ref().map(|target| {
+            let mut p = Projection { target: target.clone(), actual: 0.0, predicted: 0.0 };
+            for c in self.ix.iter().filter_map(|i| compare(&self.rows[*i].model_usage, target)) {
+                if let Some(actual) = c.actual_total() {
+                    p.actual += actual;
+                    p.predicted += c.predicted_total();
+                }
+            }
+            p
+        });
     }
 
     pub fn preview_width(&self) -> Pixels {
@@ -246,6 +284,8 @@ impl SessionTableDelegate {
             "prompts" => a.prompts.cmp(&b.prompts),
             "cost" => cmp_missing_low(a.cost, b.cost, f64::total_cmp),
             "context" => cmp_missing_low(a.context_pct, b.context_pct, f32::total_cmp),
+            "input" => a.input_tokens.cmp(&b.input_tokens),
+            "output" => a.output_tokens.cmp(&b.output_tokens),
             "size" => a.size.cmp(&b.size),
             "kind" => (a.kind as u8).cmp(&(b.kind as u8)),
             _ => Ordering::Equal,
@@ -305,6 +345,14 @@ impl SessionTableDelegate {
             .child(text)
             .into_any_element()
     }
+}
+
+/// What the shown rows cost, and would cost with `target` as their main model.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Projection {
+    pub target: SharedString,
+    pub actual: f64,
+    pub predicted: f64,
 }
 
 /// A context menu label with its shortcut on the right.
@@ -417,6 +465,8 @@ impl TableDelegate for SessionTableDelegate {
             "prompts" => self.mono_cell(row.prompts_fmt.clone(), style::text(), right, cx),
             "cost" => self.mono_cell(row.cost_fmt.clone(), style::text(), right, cx),
             "context" => self.mono_cell(row.context_fmt.clone(), style::text_secondary(), right, cx),
+            "input" => self.mono_cell(row.input_fmt.clone(), style::text_secondary(), right, cx),
+            "output" => self.mono_cell(row.output_fmt.clone(), style::text_secondary(), right, cx),
             "size" => self.mono_cell(row.size_fmt.clone(), style::text_secondary(), right, cx),
             "kind" => match style::kind_badge(row.kind, cx) {
                 Some(badge) => div().child(badge).into_any_element(),
@@ -609,10 +659,48 @@ mod tests {
     }
 
     #[test]
-    fn cost_and_context_columns_sit_after_prompts() {
+    fn cost_context_and_token_columns_sit_after_prompts() {
         let d = delegate();
-        assert_eq!(keys(&d), ["project", "preview", "started", "updated", "prompts", "cost", "context", "size", "kind"]);
-        assert_eq!(FIXED_COLS_W, PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + COST_W + CTX_W + SIZE_W + KIND_W);
+        assert_eq!(keys(&d), ["project", "preview", "started", "updated", "prompts", "cost", "context", "input", "output", "size", "kind"]);
+        assert_eq!(FIXED_COLS_W, PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + COST_W + CTX_W + IN_W + OUT_W + SIZE_W + KIND_W);
+    }
+
+    fn tokens(id: &str, updated_at: i64, input: u64, output: u64) -> Arc<SessionRow> {
+        let mut s = summary(id, "/p/x", updated_at);
+        (s.tokens_cache_read, s.tokens_out) = (input, output);
+        Arc::new(builtin_row(&s))
+    }
+
+    #[test]
+    fn in_and_out_sort_by_token_counts() {
+        let mut d = delegate();
+        d.set_rows(vec![tokens("a", 100, 5_000_000, 10), tokens("b", 200, 0, 0), tokens("c", 300, 9_000_000, 5)]);
+        d.set_sort("input", ColumnSort::Descending);
+        assert_eq!(ids(&d), ["c", "a", "b"]);
+        d.set_sort("output", ColumnSort::Descending);
+        assert_eq!(ids(&d), ["a", "c", "b"]);
+    }
+
+    fn on_model(id: &str, project: &str, model: &str, output: u64) -> Arc<SessionRow> {
+        use agent_session_core::model::{ModelUsage, Tokens};
+        let mut s = summary(id, project, 100);
+        let tokens = Tokens { output, ..Tokens::default() };
+        s.model_usage = vec![ModelUsage { model: model.into(), fast: false, long_prompt: false, responses: 1, tokens, cost_usd: None }];
+        Arc::new(builtin_row(&s))
+    }
+
+    #[test]
+    fn the_projection_prices_the_shown_rows_as_the_compared_model() {
+        let mut d = delegate();
+        d.set_rows(vec![on_model("a", "/p/x", "claude-opus-5-5", 1_000_000), on_model("b", "/p/y", "claude-opus-5-5", 2_000_000), on_model("c", "/p/x", "claude-opus-9", 1)]);
+        assert_eq!(d.projection(), None, "only while the Cost tab is open");
+        d.set_compare_model(Some("claude-fable-5-2".into()));
+        let p = d.projection().unwrap();
+        assert_eq!((p.target.as_ref(), p.actual, p.predicted), ("claude-fable-5-2", 60.0, 120.0), "an unpriced main model is left out of both");
+        d.set_filter(Filter { project: Some("-p-x".into()), ..Default::default() });
+        assert_eq!(d.projection().map(|p| (p.actual, p.predicted)), Some((20.0, 40.0)), "the filter narrows it");
+        d.set_compare_model(None);
+        assert_eq!(d.projection(), None);
     }
 
     #[test]

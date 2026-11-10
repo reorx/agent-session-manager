@@ -48,6 +48,10 @@ pub struct ViewState {
     pub custom_range: Option<(NaiveDate, NaiveDate)>,
     pub show_empty: bool,
     pub kinds: KindSet,
+    /// Main model the table is limited to (`claude-opus-5-5`).
+    pub model: Option<String>,
+    /// What the Cost tab prices the selected session as.
+    pub compare_model: Option<String>,
     pub favorites_only: bool,
     /// `project_key`s hidden from the table.
     pub hidden_projects: Vec<String>,
@@ -67,6 +71,8 @@ impl Default for ViewState {
             custom_range: None,
             show_empty: false,
             kinds: KindSet::default(),
+            model: None,
+            compare_model: None,
             favorites_only: false,
             hidden_projects: Vec::new(),
             detail_visible: true,
@@ -118,6 +124,8 @@ mod tests {
             custom_range: Some((NaiveDate::from_ymd_opt(2026, 9, 10).unwrap(), NaiveDate::from_ymd_opt(2026, 9, 20).unwrap())),
             show_empty: true,
             kinds,
+            model: Some("claude-opus-5-5".into()),
+            compare_model: Some("claude-sonnet-5-5".into()),
             favorites_only: true,
             hidden_projects: vec!["-Users-me-Code-probe".into()],
             detail_visible: false,

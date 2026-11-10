@@ -120,6 +120,25 @@ CREATE TABLE api_usage (
   PRIMARY KEY (session_id, agent, msg_id)
 ) WITHOUT ROWID;
 
+-- api_usage of a session grouped by what decides the price (model, fast mode, prompt over
+-- pricing::LONG_PROMPT), rewritten with the session's totals by refresh_session_usage. Read with
+-- every session list, so the start-up does not group api_usage again.
+CREATE TABLE session_model_usage (
+  session_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  fast INTEGER NOT NULL,
+  long_prompt INTEGER NOT NULL,
+  responses INTEGER NOT NULL,
+  input INTEGER NOT NULL,
+  cache_write_5m INTEGER NOT NULL,
+  cache_write_1h INTEGER NOT NULL,
+  cache_read INTEGER NOT NULL,
+  output INTEGER NOT NULL,
+  web_search INTEGER NOT NULL,
+  cost_usd REAL,
+  PRIMARY KEY (session_id, model, fast, long_prompt)
+) WITHOUT ROWID;
+
 CREATE TABLE index_state (
   path TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,             -- for a subagent file: the session it belongs to

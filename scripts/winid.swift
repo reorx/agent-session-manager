@@ -1,12 +1,15 @@
 // Print the CGWindowID of the first on-screen window owned by <process name>.
 // With --bounds, print "id x y width height" (screen points) instead, for click automation.
+// With --pid N, only a window of that process counts (another instance may share the name).
 import CoreGraphics
 import Foundation
 let name = CommandLine.arguments[1]
 let wantBounds = CommandLine.arguments.contains("--bounds")
+let pid = CommandLine.arguments.firstIndex(of: "--pid").flatMap { Int(CommandLine.arguments[$0 + 1]) }
 let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as! [[String: Any]]
 for w in list {
     if let owner = w[kCGWindowOwnerName as String] as? String, owner == name,
+       pid == nil || (w[kCGWindowOwnerPID as String] as? Int) == pid,
        let id = w[kCGWindowNumber as String] as? Int,
        let bounds = w[kCGWindowBounds as String] as? [String: Any],
        (bounds["Height"] as? Double ?? 0) > 100 {

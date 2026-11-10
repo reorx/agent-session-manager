@@ -60,6 +60,9 @@ screenshot-search: build ## Run the scripted search session (text, next hit, CJK
 screenshot-detail: build ## Tour the Conversation tab (turn cards, steps, search hits, special cards, the 70MB session, history prompts, a code block, ] twice, Metadata) and capture up to 12 screenshots; types and clicks nothing
 	scripts/screenshot-detail.sh "$(BIN)" "$(SHOT_DIR)"
 
+screenshot-cost: build ## Tour the Cost tab (Opus 5.5 by context as Fable 5.2 and Sonnet 5.5, a session with other models as Haiku 5.5, sorted by In) and capture 4 screenshots; types and clicks nothing
+	scripts/screenshot-cost.sh "$(BIN)" "$(SHOT_DIR)"
+
 bin: ## Print the path of the debug binary
 	@echo "$(BIN)"
 
@@ -122,5 +125,5 @@ release-local: build-release ## The whole release chain locally into dist/releas
 clean: ## Remove this project's build artifacts only (the target dir is shared across projects)
 	cargo clean -p $(APP) -p $(CORE)
 
-.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search screenshot-detail bin asm transcript-reader build-transcript-reader parity icon clean \
+.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search screenshot-detail screenshot-cost bin asm transcript-reader build-transcript-reader parity icon clean \
 	build-release notarize-app dmg notarize appcast test-release release-local

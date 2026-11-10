@@ -5,11 +5,13 @@
 //! through `store` (index load, then a streaming incremental scan). Set `ASM_SPIKE_AUTOPLAY=1`
 //! to scroll / select / filter / sort automatically after launch (used by `make screenshot`),
 //! `ASM_SEARCH_AUTOPLAY=1` to run a scripted search session (`make screenshot-search`),
-//! `ASM_DETAIL_AUTOPLAY=1` to tour the Conversation tab (`make screenshot-detail`);
+//! `ASM_DETAIL_AUTOPLAY=1` to tour the Conversation tab (`make screenshot-detail`),
+//! `ASM_COST_AUTOPLAY=1` to tour the Cost tab (`make screenshot-cost`);
 //! `ASM_CLAUDE_DIR`, `ASM_DB` and `ASM_STATE` point the app at other data.
 
 mod actions;
 mod conversation;
+mod cost_tab;
 mod detail;
 mod favorites;
 #[cfg(test)]
@@ -30,7 +32,8 @@ use std::time::{Duration, Instant};
 
 use agent_session_core::claude::paths::{ClaudeDir, default_db_path};
 use agent_session_core::claude::model_catalog::ModelCatalog;
-use agent_session_core::format::{fmt_usd, human_size};
+use agent_session_core::format::{fmt_change, fmt_usd, human_size};
+use agent_session_core::pricing::display_name;
 use agent_session_core::index::ScanReport;
 use agent_session_core::search::Matcher;
 
@@ -45,7 +48,7 @@ use gpui_kit::*;
 use crate::actions::{CopyResume, CopySessionId, ExportTranscript, HideProject, OpenProjectFolder, RevealTranscript};
 use crate::conversation::{Card, ConversationView};
 use crate::detail::{DETAIL_W, DetailState, DetailTab, Load};
-use crate::model::{DisplayMode, Filter, Kind, ProjectEntry, RangePreset, SessionRow, kind_counts, project_entries, split_hidden};
+use crate::model::{DisplayMode, Filter, Kind, ModelEntry, ProjectEntry, RangePreset, SessionRow, kind_counts, model_entries, project_entries, split_hidden};
 use crate::search::{SearchMode, SearchOptions, SearchSummary, Searcher};
 use crate::settings::{SortDir, ViewState, default_state_path};
 use crate::store::{Store, StoreEvent, StoreRequest};
@@ -114,6 +117,10 @@ pub struct AppRoot {
     hidden_projects: Vec<ProjectEntry>,
     /// Sessions per kind (`Kind as usize`), shown in the Kind dropdown.
     kind_counts: [usize; Kind::ALL.len()],
+    /// Main models of the listed sessions, for the Model dropdown.
+    models: Vec<ModelEntry>,
+    /// What the Cost tab prices the selected session as (a model with a price).
+    compare_model: SharedString,
     searcher: Searcher,
     search_opts: SearchOptions,
     /// The query being searched for (trimmed); empty when no search is on.
@@ -203,6 +210,7 @@ impl AppRoot {
             until_ms,
             show_empty: saved.show_empty,
             kinds: saved.kinds,
+            model: saved.model.clone().map(Into::into),
             favorites_only: saved.favorites_only,
             hidden_projects: saved.hidden_projects.iter().cloned().map(Into::into).collect(),
         });
@@ -291,6 +299,13 @@ impl AppRoot {
             projects: Vec::new(),
             hidden_projects: Vec::new(),
             kind_counts: [0; Kind::ALL.len()],
+            models: Vec::new(),
+            compare_model: saved
+                .compare_model
+                .clone()
+                .filter(|m| agent_session_core::pricing::price(m).is_some())
+                .unwrap_or_else(|| crate::cost_tab::DEFAULT_COMPARE_MODEL.to_string())
+                .into(),
             searcher,
             search_opts: saved.search.clone(),
             query: "".into(),
@@ -335,6 +350,8 @@ impl AppRoot {
             this._autoplay = Some(this.search_autoplay(window, cx));
         } else if std::env::var_os("ASM_DETAIL_AUTOPLAY").is_some() {
             this._autoplay = Some(this.detail_autoplay(window, cx));
+        } else if std::env::var_os("ASM_COST_AUTOPLAY").is_some() {
+            this._autoplay = Some(this.cost_autoplay(window, cx));
         }
         this
     }
@@ -414,6 +431,7 @@ impl AppRoot {
         let listed = || delegate.rows.iter().filter(|r| show_empty || r.prompts > 0);
         (self.projects, self.hidden_projects) = split_hidden(project_entries(listed()), hidden);
         self.kind_counts = kind_counts(listed().filter(|r| !hidden.contains(&r.project_key)));
+        self.models = model_entries(listed().filter(|r| !hidden.contains(&r.project_key)));
         let wanted = self.wanted_id.clone().or_else(|| self.selected.as_ref().map(|r| r.id.clone()));
         let position = wanted.as_ref().and_then(|id| delegate.position_of(id));
         let has_rows = !delegate.ix.is_empty();
@@ -518,6 +536,8 @@ impl AppRoot {
             custom_range: self.custom_range,
             show_empty: delegate.filter().show_empty,
             kinds: delegate.filter().kinds,
+            model: delegate.filter().model.as_ref().map(|m| m.to_string()),
+            compare_model: Some(self.compare_model.to_string()),
             favorites_only: delegate.filter().favorites_only,
             hidden_projects: delegate.filter().hidden_projects.iter().map(|p| p.to_string()).collect(),
             detail_visible: self.detail_visible,
@@ -561,6 +581,7 @@ impl AppRoot {
             TableEvent::SelectRow(ix) if self.table.read(cx).selected_row() == Some(*ix) => self.select_row(*ix, cx),
             TableEvent::DoubleClickedRow(ix) => {
                 self.detail_visible = true;
+                self.sync_projection(cx);
                 self.select_row(*ix, cx);
             }
             _ => {}
@@ -972,6 +993,7 @@ impl AppRoot {
     fn render_status_bar(&self, cx: &mut Context<Self>) -> StatusBar {
         let delegate = self.table.read(cx).delegate();
         let (shown, total, cost) = (delegate.ix.len(), delegate.rows.len(), delegate.shown_cost);
+        let projection = delegate.projection().map(|p| format!(" · {} {} ({})", display_name(&p.target), fmt_usd(p.predicted), fmt_change(p.actual, p.predicted))).unwrap_or_default();
         let index = match &self.index_status {
             IndexStatus::Loading => "loading index…".into(),
             IndexStatus::Scanning { done, total } => format!("indexing {done} / {total} files").into(),
@@ -990,7 +1012,7 @@ impl AppRoot {
             .font_family(style::mono(cx))
             .text_size(px(11.))
             .text_color(style::head_fg())
-            .left(format!("{shown} / {total} sessions · {}", fmt_usd(cost)))
+            .left(format!("{shown} / {total} sessions · {}{projection}", fmt_usd(cost)))
             .child(center)
             .right(format!("{took}{}{first_rows}", self.db_info))
     }
@@ -1007,6 +1029,7 @@ impl Render for AppRoot {
             .line_height(px(16.))
             .on_action(cx.listener(|this, _: &ToggleDetail, _, cx| {
                 this.detail_visible = !this.detail_visible;
+                this.sync_projection(cx);
                 this.persist(cx);
                 cx.notify();
             }))

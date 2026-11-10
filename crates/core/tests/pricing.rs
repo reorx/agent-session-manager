@@ -4,7 +4,7 @@
 
 use agent_session_core::model::UsageRow;
 use agent_session_core::claude::model_catalog::ModelCatalog;
-use agent_session_core::pricing::{builtin_window, context_window, cost, normalize, price};
+use agent_session_core::pricing::{CURRENT_MODELS, EARLIER_MODELS, builtin_window, context_window, cost, display_name, normalize, price, price_tokens, resolve};
 
 fn usage(model: &str) -> UsageRow {
     UsageRow {
@@ -102,5 +102,65 @@ fn context_windows_are_looked_up_per_model() {
     assert_eq!(builtin_window("claude-haiku-5-5"), Some(1_000_000));
     for model in ["claude-haiku-4-5-20251001", "claude-opus-5", "claude-opus-5[1m]", "claude-fable-5-1", "claude-haiku-5-5", "claude-opus-9"] {
         assert_eq!(context_window(&ModelCatalog::default(), model), builtin_window(model));
+    }
+}
+
+#[test]
+fn fable_5_2_costs_twice_opus_5_5_except_for_cache_reads() {
+    let fable = price("claude-fable-5-2").unwrap();
+    assert_eq!((fable.input, fable.output, fable.cache_read), (8.0, 40.0, 0.20));
+    assert_eq!(price("claude-mythos-5-2"), Some(fable), "Mythos 5.2 is priced like Fable 5.2");
+    let mut u = usage("claude-fable-5-2");
+    u.cache_write_5m = 1_000_000;
+    assert!(close(cost(&u).unwrap(), 10.0), "5-minute writes: $8 × 1.25");
+    u.cache_write_5m = 0;
+    u.cache_write_1h = 1_000_000;
+    assert!(close(cost(&u).unwrap(), 16.0), "1-hour writes: $8 × 2");
+    u.fast = true;
+    assert!(close(cost(&u).unwrap(), 32.0), "fast mode doubles it: $16 / $80 per MTok");
+}
+
+#[test]
+fn a_price_splits_into_one_line_per_kind_of_token_that_add_up_to_the_cost() {
+    let mut u = usage("claude-opus-5-5");
+    (u.input, u.cache_write_5m, u.cache_write_1h, u.cache_read, u.output, u.web_search) = (1_000_000, 1_000_000, 1_000_000, 1_000_000, 1_000_000, 3);
+    let lines = price_tokens(&price("claude-opus-5-5").unwrap(), &u.tokens(), false, false);
+    assert!(close(lines.input, 4.0));
+    assert!(close(lines.cache_write_5m, 5.0));
+    assert!(close(lines.cache_write_1h, 8.0));
+    assert!(close(lines.cache_read, 0.20));
+    assert!(close(lines.output, 20.0));
+    assert!(close(lines.web_search, 0.03));
+    assert!(close(lines.input_total(), 4.0 + 5.0 + 8.0 + 0.20), "everything sent to the model");
+    assert!(close(lines.total(), cost(&u).unwrap()));
+    let long = price_tokens(&price("claude-haiku-5-5").unwrap(), &u.tokens(), false, true);
+    let short = price_tokens(&price("claude-haiku-5-5").unwrap(), &u.tokens(), false, false);
+    assert!(close(long.output, short.output * 5.0), "Haiku 5.5 prices long prompts ×5");
+    assert!(close(long.web_search, short.web_search), "searches cost the same either way");
+}
+
+#[test]
+fn model_ids_read_as_family_and_version() {
+    assert_eq!(display_name("claude-opus-5-5"), "Opus 5.5");
+    assert_eq!(display_name("claude-fable-5-2"), "Fable 5.2");
+    assert_eq!(display_name("claude-fable-5"), "Fable 5");
+    assert_eq!(display_name("claude-haiku-4-5-20251001"), "Haiku 4.5");
+    assert_eq!(display_name("claude-opus-5[1m]"), "Opus 5");
+    assert_eq!(display_name("claude-3-5-haiku"), "Haiku 3.5");
+    assert_eq!(display_name("gpt-5"), "gpt-5", "anything else stays as it is");
+}
+
+#[test]
+fn a_model_can_be_named_without_its_claude_prefix() {
+    assert_eq!(resolve("fable-5-2"), Some("claude-fable-5-2".to_string()));
+    assert_eq!(resolve("claude-opus-5-5"), Some("claude-opus-5-5".to_string()));
+    assert_eq!(resolve("opus-9"), None, "only models with a price");
+}
+
+#[test]
+fn every_comparison_model_has_a_price() {
+    assert_eq!(CURRENT_MODELS, ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
+    for model in CURRENT_MODELS.iter().chain(EARLIER_MODELS) {
+        assert!(price(model).is_some(), "{model}");
     }
 }

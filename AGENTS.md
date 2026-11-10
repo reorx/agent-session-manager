@@ -15,6 +15,8 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 - 费用与 context 已完成（2026-10-23）：表格 Cost / Ctx 列、状态栏费用合计、Updated 的本月 / 上月 / 自定义区间（gpui-component `DatePicker`）、`asm cost [--compare]`。费用由 core 按 `message.usage` × `pricing.rs` 价格表自算（按 `message.id` 去重，subagent 计入父 session），`cost-state` 只作对照。实测与口径见 `kb/plans/2026-10-23-cost-context-columns.md` 和 `kb/docs/claude-session-data-format.md` §2.4。
 - Transcript Reader 已完成（2026-10-10）：独立 `transcript-reader` / `asm transcript` 导出 XML 风格标签分隔的精简 TXT，正文原样输出，无 CDATA，不要求标准 XML；GUI 导出待 M4 接入，复用 `transcript::read_transcript`。当前格式与验证见 `kb/notes/2026-10-10-transcript-reader-xml.md`，压缩规则见 `kb/notes/2026-10-10-transcript-reader.md`。
 
+- 成本分析（2026-11-10）：表格 In / Out 列、工具栏 Model 过滤（按主模型 = 花费最高的模型）、详情第三个 tab「Cost」：主模型单价和按 token 种类的费用，换成另一个模型（默认 Fable 5.2）按同样 token 重新计价，其他模型原价；Cost tab 打开时状态栏给出当前行换模型后的合计。计价在 core `pricing.rs::price_tokens` / `cost.rs::compare`，app 用 `SessionRow.model_usage` 现算，不走后台请求；`asm cost --model … --as …` 同口径。见 `kb/plans/2026-11-10-cost-analysis.md`
+
 - 发布与应用内更新（2026-10-28，1.0）：打 `v*` tag 后 GitHub Actions 构建 arm64 `.app`、Developer ID 签名、app 和 dmg 两轮公证，发到本仓库 Release（dmg、`SHA256SUMS`、`appcast.xml`），再把 cask 推到 `reorx/homebrew-tap`。应用内更新用 Sparkle 2，`crates/app/src/updater.rs` 运行时加载 bundle 里的 framework，debug 二进制没有更新器。流程、密钥和验收见 `kb/docs/release.md`
 
 - Session 收藏已实现：快照保存到索引旁 `favorites/claude/`，按 session id 收藏优先；取消收藏移至废纸篓，最后副本需确认。目录迁移与根目录守卫见 `kb/plans/2026-10-26-favorites.md`。
@@ -26,10 +28,10 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 - `make dev`：编译并启动 app（`run` 会先 pkill 旧实例）。手动起的 app 验证后必须 kill，用 `pgrep -fl agent-session-manager` 检查
 - 测试：`cargo test -p agent-session-core`（1 秒内）、`cargo test -p agent-session-manager`（纯逻辑，加上无界面窗口里的键盘测试）、`make test` 全跑
 - 量搜索耗时：`ASM_BENCH_DB=<索引副本> cargo test -p agent-session-manager real_index_timings -- --ignored --nocapture`（`ASM_BENCH_QUERIES`、`ASM_BENCH_REGEX` 可换查询）。不要用截图脚本日志里的耗时，刚唤醒屏幕后的数字可以偏高 4–8 倍
-- `make asm ARGS="…"`：跑 `asm` CLI（`index` / `list` / `session` / `search [--index]` / `cost [--compare|--windows]` / `stats` / `favorite` / `unfavorite [--yes]` / `favorites-dir [PATH|--reset]`，`list --favorites` 仅列收藏；参数看 `--help`）。`cost --compare` 统计自算费用与 `cost-state` 的偏差，改价格表或用量解析后跑一次；`cost --windows` 对比目录与内置窗口及 Ctx 变化
+- `make asm ARGS="…"`：跑 `asm` CLI（`index` / `list` / `session` / `search [--index]` / `cost [--compare|--windows|--model M|--as M]` / `stats` / `favorite` / `unfavorite [--yes]` / `favorites-dir [PATH|--reset]`，`list --favorites` 仅列收藏；参数看 `--help`）。`cost --compare` 统计自算费用与 `cost-state` 的偏差，改价格表或用量解析后跑一次；`cost --windows` 对比目录与内置窗口及 Ctx 变化；`cost --model opus-5-5 --as fable-5-2` 把主模型换成另一个模型重新计价并按 token 种类给出合计
 - `make transcript-reader ARGS="SESSION_ID -o session.txt"`：导出用户输入、最终回复及工具计数；也支持唯一 ID 前缀或 JSONL 路径，不依赖索引。
 - `make parity`：在真实 `~/.claude` 上把 `asm` 与 Python 脚本逐字比对；改解析器、清理逻辑、`regex.rs` 或输出格式后必须跑。两边的列表顺序一致：开始时间降序，并列时按更新时间降序、再按 id；改排序要两边一起改（脚本旁有 `test_claude_session_search.py`）。比对期间有 session 正在写入时 search 组偶尔失败，重跑即过
-- `make screenshot`（autoplay，3 张）、`make screenshot-clicks`（cliclick 真点击，22 张：12–15 是自定义区间与日期选择器，16–20 是回合卡（第二次启动、预选 `5f6eea99`），21–22 是普通行和 History 行的右键菜单（第三次启动）；换机器要换一个不再变化的 session 并重量坐标；坐标在 `scripts/screenshot-clicks.sh`，改布局后要校对）、`make screenshot-search`（`ASM_SEARCH_AUTOPLAY=1`，app 自己走完搜索流程，脚本等日志标记后截 7 张）、`make screenshot-detail`（`ASM_DETAIL_AUTOPLAY=1`，12 步：选中、展开步骤、展开一步、全部展开、搜索命中、下一个命中、特殊回合、70MB 文件、History 行（第一个 prompt 不少于 3 条的）、代码块（展开离开头最近的带代码块的回复）、从顶部按两次 `]`、Metadata；`ASM_AUTOPLAY_SESSION` / `ASM_AUTOPLAY_REGEX` / `ASM_AUTOPLAY_SPECIAL` 指定 session 和查询，`ASM_AUTOPLAY_STEP=cut-output|thinking|mcp` 决定展开哪种步骤，跳过的步骤不截）。四个截图脚本都带 `caffeinate`，显示器中途睡着会截不到图。输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改），跑在真实索引上，但用一次性的 `state.json` 保证从默认视图开始
+- `make screenshot`（autoplay，3 张）、`make screenshot-clicks`（cliclick 真点击，22 张：12–15 是自定义区间与日期选择器，16–20 是回合卡（第二次启动、预选 `5f6eea99`），21–22 是普通行和 History 行的右键菜单（第三次启动）；换机器要换一个不再变化的 session 并重量坐标；坐标在 `scripts/screenshot-clicks.sh`，改布局后要校对）、`make screenshot-search`（`ASM_SEARCH_AUTOPLAY=1`，app 自己走完搜索流程，脚本等日志标记后截 7 张）、`make screenshot-cost`（`ASM_COST_AUTOPLAY=1`，4 张：Opus 5.5 按 Ctx 降序比 Fable 5.2、换 Sonnet 5.5、有其他模型的 session 比 Haiku 5.5、按 In 排序；脚本用 `winid --pid` 只截自己起的窗口，你开着的同名 app 不受影响）、`make screenshot-detail`（`ASM_DETAIL_AUTOPLAY=1`，12 步：选中、展开步骤、展开一步、全部展开、搜索命中、下一个命中、特殊回合、70MB 文件、History 行（第一个 prompt 不少于 3 条的）、代码块（展开离开头最近的带代码块的回复）、从顶部按两次 `]`、Metadata；`ASM_AUTOPLAY_SESSION` / `ASM_AUTOPLAY_REGEX` / `ASM_AUTOPLAY_SPECIAL` 指定 session 和查询，`ASM_AUTOPLAY_STEP=cut-output|thinking|mcp` 决定展开哪种步骤，跳过的步骤不截）。四个截图脚本都带 `caffeinate`，显示器中途睡着会截不到图。输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改），跑在真实索引上，但用一次性的 `state.json` 保证从默认视图开始
 - 详情打开速度看日志里的 `detail:` 行（read / build / first frame，起点是选中，终点是带内容的首帧）。量的时候要停在 Conversation tab：停在 Metadata 上，首帧要等切回来才打点
 - 构建产物在 `~/Library/Caches/cargo-target`（全局 cargo 配置），不在 `./target`；`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒
 - 环境变量：`ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（默认 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`）、`ASM_STATE`（仅 app，默认为索引同目录的 `state.json`）、`ASM_FAVORITES_DIR`（覆盖共享配置中的收藏目录）、`ASM_TRASH_DIR`（取消收藏改用此目录，测试必设）。验收时把 `ASM_DB` / `ASM_STATE` 指到 `tmp/`，可反复测冷启动而不动真实索引
@@ -53,6 +55,7 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 - 改 `parse.rs::classify`（字节预过滤）前，按 M1 笔记的方法在真实数据上全量验证
 - `&RawValue` 不能放在 `#[serde(tag)]` / `untagged` / `flatten` 之下；记录和 block 都用"大结构体 + Option 字段 + match type"
 - 改 `schema.sql` 必须同步 `db.rs` 的 `SCHEMA_VERSION`、`SESSION_COLUMNS` 和 `row_to_session` 的列序；版本不符会整库重建，无迁移。改 `pricing.rs` 的价格也要提升 `SCHEMA_VERSION`：费用在索引时算好存进 `api_usage`，不重建就不会变
+- `session_model_usage`（session 的用量按模型 × fast × prompt 是否超过 `LONG_PROMPT` 分组）也只由 `refresh_session_usage` 重写，`SessionSummary::set_usage` 在内存里按同样规则分组（有测试断言两者一致）。启动时直接读这张表，不要改回读 session 时对 `api_usage` 现做 GROUP BY（冷缓存多 350ms）
 - 用量按 API 响应一行存在 `api_usage`（主键 `session_id, agent, msg_id`，subagent 文件的 `agent` 为文件名 stem），`sessions` 上的费用 / token 列只由 `refresh_session_usage` 从这张表汇总写入，`upsert_session` 不写它们。同一次响应会被增量扫描切成两半，所以去重只能靠这张表，不能在 `SessionDelta` 里累加
 - 一个 `Db` 只在一个线程用；rayon 只用于解析，写库在调用线程的单个事务里
 - `SessionDelta::apply` 必须保持"全量解析 == 多次增量解析"（有测试断言）；新字段要归类为 first（只设一次）、last（覆盖）、count（累加）或 max（取较大值，如 `context_peak`）
@@ -92,6 +95,7 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 
 ## Documentation
 
+- `kb/plans/2026-11-10-cost-analysis.md` — 成本分析：主模型定义、换模型计价口径（只换主模型、fast 与长 prompt 的处理）、分组用量存表的原因、本机 Opus 5.5 → Fable 5.2 / Sonnet 5.5 / Haiku 5.5 实测；改 Cost tab、Model 过滤或 `asm cost --as` 前读
 - `kb/plans/2026-11-03-context-window-from-catalog.md` — Context 窗口的目录格式、合并优先级、刷新与验收；改模型目录读取或窗口来源前读
 - `kb/docs/release.md` — 发布：tag 触发的 CI、`.app` 的组成、签名与两轮公证、Sparkle 的接入与密钥、Homebrew cask、本地出包、发布后验收、失败处理；发版、改打包或更新逻辑前读
 - `kb/sessions/2026-10-28-release-1.0.md` — 1.0 发布：决定及其由谁定、公开前扫描、本机 feed 与真实 feed 的升级测试证据、Sparkle 在 app 不在前台时延后弹提示的原因

@@ -491,3 +491,39 @@ fn a_cleaned_up_session_keeps_what_its_subagents_cost() {
     assert!(streamed[0].transcript_missing);
     assert_close(streamed[0].cost_usd, S1_MAIN + SUBAGENT, "Claude Code removed both files; the money was still spent");
 }
+
+#[test]
+fn sessions_carry_their_usage_grouped_by_what_decides_the_price() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    let s1 = db.session(S1).unwrap().unwrap();
+    let groups: Vec<(&str, bool, bool)> = s1.model_usage.iter().map(|g| (g.model.as_str(), g.fast, g.long_prompt)).collect();
+    assert_eq!(groups, [("claude-opus-5", false, false), ("claude-opus-5", true, false), ("claude-sonnet-5", false, false)]);
+    assert_eq!(s1.model_usage.iter().map(|g| g.responses).sum::<u64>(), 5 + 1, "five main calls (one fast), one subagent call");
+    let sum = |f: fn(&agent_session_core::model::ModelUsage) -> u64| s1.model_usage.iter().map(f).sum::<u64>();
+    assert_eq!(sum(|g| g.tokens.input), s1.tokens_in);
+    assert_eq!(sum(|g| g.tokens.output), s1.tokens_out);
+    assert_eq!(sum(|g| g.tokens.cache_read), s1.tokens_cache_read);
+    assert_eq!(sum(|g| g.tokens.cache_write_5m + g.tokens.cache_write_1h), s1.tokens_cache_write);
+    assert_eq!(s1.input_tokens_total(), s1.tokens_in + s1.tokens_cache_read + s1.tokens_cache_write);
+    assert_close(Some(s1.model_usage.iter().filter_map(|g| g.cost_usd).sum()), s1.cost_usd.unwrap(), "groups add up to the session's cost");
+    let listed = db.list_sessions(&Default::default()).unwrap();
+    assert_eq!(listed.iter().find(|s| s.id == S1).unwrap().model_usage, s1.model_usage, "the list carries the same groups");
+    assert!(listed.iter().find(|s| s.id == S5).unwrap().model_usage.is_empty(), "no calls, no groups");
+    let full = parse_transcript(&sb.transcript(ALPHA, S2)).unwrap().summary;
+    assert_eq!(full.model_usage, db.session(S2).unwrap().unwrap().model_usage, "a parse in memory groups like the index");
+}
+
+#[test]
+fn calls_with_a_prompt_over_100k_are_grouped_apart() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    append(&subagent_path(&sb), &reply("msg-sub-long", "claude-sonnet-5", 100_001, 0, true));
+    scan(&sb, &mut db);
+    let s1 = db.session(S1).unwrap().unwrap();
+    let long: Vec<_> = s1.model_usage.iter().filter(|g| g.long_prompt).collect();
+    assert_eq!(long.len(), 1);
+    assert_eq!((long[0].model.as_str(), long[0].responses, long[0].tokens.input), ("claude-sonnet-5", 1, 100_001));
+}

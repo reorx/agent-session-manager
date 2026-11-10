@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::model::{MessageRow, Role, SessionSummary, Source, UsageRow};
+use crate::model::{MessageRow, ModelUsage, Role, SessionSummary, Source, Tokens, UsageRow};
 
 /// Also bump this when a price in `pricing.rs` changes: stored costs are computed at index time.
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 const SCHEMA: &str = include_str!("schema.sql");
 
 pub struct Db {
@@ -178,6 +178,7 @@ impl Db {
         self.conn.execute_batch(
             "DELETE FROM messages; DELETE FROM session_files; DELETE FROM session_tool_counts;
              DELETE FROM sessions; DELETE FROM projects; DELETE FROM index_state; DELETE FROM api_usage; DELETE FROM meta;
+             DELETE FROM session_model_usage;
              INSERT INTO messages_fts(messages_fts) VALUES ('rebuild');",
         )?;
         Ok(())
@@ -338,6 +339,10 @@ impl Db {
         for row in files.query_map([id], |r| r.get::<_, String>(0))? {
             s.files_touched.insert(row?);
         }
+        let mut usage = self.conn.prepare_cached(&model_usage_sql("WHERE session_id = ?1"))?;
+        for row in usage.query_map([id], row_to_model_usage)? {
+            s.model_usage.push(row?.1);
+        }
         Ok(Some(s))
     }
 
@@ -399,6 +404,7 @@ impl Db {
     pub fn delete_session(&self, id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM sessions WHERE id = ?1", [id])?;
         self.delete_usage(id, None)?;
+        self.conn.execute("DELETE FROM session_model_usage WHERE session_id = ?1", [id])?;
         Ok(())
     }
 
@@ -429,10 +435,19 @@ impl Db {
                 files.entry(ix).or_default().insert(path);
             }
         }
+        let mut usage: HashMap<usize, Vec<ModelUsage>> = HashMap::new();
+        let mut stmt = self.conn.prepare_cached(&model_usage_sql(""))?;
+        for row in stmt.query_map([], row_to_model_usage)? {
+            let (sid, group) = row?;
+            if let Some(&ix) = by_id.get(sid.as_str()) {
+                usage.entry(ix).or_default().push(group);
+            }
+        }
         by_id.clear();
         for (ix, s) in sessions.iter_mut().enumerate() {
             s.tool_counts = tools.remove(&ix).unwrap_or_default();
             s.files_touched = files.remove(&ix).unwrap_or_default();
+            s.model_usage = usage.remove(&ix).unwrap_or_default();
         }
         Ok(())
     }
@@ -538,8 +553,18 @@ impl Db {
         Ok(())
     }
 
-    /// Recompute a session's cost and token totals from its stored API responses.
+    /// Recompute a session's cost and token totals, and its usage by model, from its stored API
+    /// responses. The groups match `SessionSummary::set_usage`.
     pub fn refresh_session_usage(&self, session_id: &str) -> Result<()> {
+        self.conn.prepare_cached("DELETE FROM session_model_usage WHERE session_id = ?1")?.execute([session_id])?;
+        let groups = format!(
+            "INSERT INTO session_model_usage
+             SELECT session_id, model, fast, input + cache_write_5m + cache_write_1h + cache_read > {} AS long_prompt,
+                count(*), sum(input), sum(cache_write_5m), sum(cache_write_1h), sum(cache_read), sum(output), sum(web_search), sum(cost_usd)
+             FROM api_usage WHERE session_id = ?1 GROUP BY model, fast, long_prompt",
+            crate::pricing::LONG_PROMPT
+        );
+        self.conn.prepare_cached(&groups)?.execute([session_id])?;
         let mut stmt = self.conn.prepare_cached(
             "UPDATE sessions SET (cost_usd, tokens_in, tokens_out, tokens_cache_read, tokens_cache_write) = (
                 SELECT sum(cost_usd), coalesce(sum(input), 0), coalesce(sum(output), 0), coalesce(sum(cache_read), 0),
@@ -703,7 +728,24 @@ fn row_to_session(r: &Row) -> rusqlite::Result<SessionSummary> {
         context_peak: tokens(38)?,
         context_model: r.get(39)?,
         favorite: r.get(40)?,
+        model_usage: Vec::new(),
     })
+}
+
+/// Rows of `session_model_usage`, in key order; `filter` is a WHERE clause or empty.
+fn model_usage_sql(filter: &str) -> String {
+    format!(
+        "SELECT session_id, model, fast, long_prompt, responses, input, cache_write_5m, cache_write_1h, cache_read, output,
+            web_search, cost_usd
+         FROM session_model_usage {filter} ORDER BY session_id, model, fast, long_prompt"
+    )
+}
+
+fn row_to_model_usage(r: &Row) -> rusqlite::Result<(String, ModelUsage)> {
+    let n = |ix: usize| -> rusqlite::Result<u64> { Ok(r.get::<_, i64>(ix)? as u64) };
+    let tokens = Tokens { input: n(5)?, cache_write_5m: n(6)?, cache_write_1h: n(7)?, cache_read: n(8)?, output: n(9)?, web_search: n(10)? };
+    let group = ModelUsage { model: r.get(1)?, fast: r.get(2)?, long_prompt: r.get(3)?, responses: n(4)?, tokens, cost_usd: r.get(11)? };
+    Ok((r.get(0)?, group))
 }
 
 fn remove_db_files(path: &Path) {

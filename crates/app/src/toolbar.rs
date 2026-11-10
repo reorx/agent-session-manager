@@ -11,7 +11,8 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex};
 use gpui_kit::*;
 
-use crate::model::{DisplayMode, Filter, Kind, RangePreset, ScopeSet};
+use crate::model::{DisplayMode, Filter, Kind, ModelEntry, RangePreset, ScopeSet};
+use agent_session_core::pricing::display_name;
 use crate::search::{LABELS, MAX_RESULT_SESSIONS, SearchEvent, SearchMode};
 use crate::style::{self, FluentBuilder};
 use crate::AppRoot;
@@ -24,7 +25,7 @@ const DATE_PICKER_W: f32 = 190.;
 pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// `Label value ▾` trigger button styled like the mockup.
-fn trigger(id: &'static str, label: &'static str, value: SharedString, cx: &App) -> Button {
+pub(crate) fn trigger(id: &'static str, label: &'static str, value: SharedString, cx: &App) -> Button {
     let variant = ButtonCustomVariant::new(cx)
         .color(style::white())
         .foreground(style::text())
@@ -87,7 +88,7 @@ fn menu_row(name: SharedString, hint: SharedString, hint_mono: bool, cx: &App) -
         })
 }
 
-fn menu_item(
+pub(crate) fn menu_item(
     name: SharedString,
     hint: SharedString,
     hint_mono: bool,
@@ -142,6 +143,13 @@ impl AppRoot {
     pub fn toggle_kind(&mut self, kind: Kind, cx: &mut Context<Self>) {
         let mut filter = self.current_filter(cx);
         filter.kinds.toggle(kind);
+        self.apply_filter(filter, cx);
+    }
+
+    /// Only sessions whose main model is `model` (a model id), or all of them.
+    pub fn set_model_filter(&mut self, model: Option<SharedString>, cx: &mut Context<Self>) {
+        let mut filter = self.current_filter(cx);
+        filter.model = model;
         self.apply_filter(filter, cx);
     }
 
@@ -447,6 +455,33 @@ impl AppRoot {
         }
     }
 
+    fn model_menu(&self, cx: &Context<Self>) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let this = cx.entity().downgrade();
+        let current = self.current_filter(cx).model;
+        let mut entries = self.models.clone();
+        // a saved pick whose sessions are gone (or not loaded yet) stays listed, so it can be undone
+        if let Some(model) = current.as_ref().filter(|m| !entries.iter().any(|e| e.model == **m)) {
+            entries.push(ModelEntry { model: model.clone(), name: display_name(model).into(), count: 0 });
+        }
+        move |menu, _, _| {
+            let all = this.clone();
+            let mut menu = menu.min_w(px(180.)).max_h(px(420.)).scrollable(true).item(menu_item("All".into(), "".into(), false, current.is_none(), move |cx| {
+                all.update(cx, |app, cx| app.set_model_filter(None, cx)).ok();
+            }));
+            if !entries.is_empty() {
+                menu = menu.separator();
+            }
+            for entry in &entries {
+                let (this, model) = (this.clone(), entry.model.clone());
+                let checked = current.as_ref() == Some(&entry.model);
+                menu = menu.item(menu_item(entry.name.clone(), entry.count.to_string().into(), true, checked, move |cx| {
+                    this.update(cx, |app, cx| app.set_model_filter(Some(model.clone()), cx)).ok();
+                }));
+            }
+            menu
+        }
+    }
+
     fn preview_menu(&self, cx: &Context<Self>) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
         let this = cx.entity().downgrade();
         let current = self.table.read(cx).delegate().mode;
@@ -495,6 +530,7 @@ impl AppRoot {
                 )
             })
             .child(trigger("kind", "Kind", format!("{}{}", filter.kinds.label(), if filter.favorites_only { " · ★" } else { "" }).into(), cx).dropdown_menu(self.kind_menu(cx)))
+            .child(trigger("model", "Model", filter.model.as_ref().map_or_else(|| "All".into(), |m| display_name(m).into()), cx).dropdown_menu(self.model_menu(cx)))
             .child(
                 div().ml(px(4.)).w(px(220.)).child(
                     Input::new(&self.search)

@@ -12,4 +12,5 @@ pub mod search;
 pub mod transcript;
 
 pub mod config;
+pub mod cost;
 pub mod favorites;

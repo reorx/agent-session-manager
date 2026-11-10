@@ -315,3 +315,32 @@ fn favorites_directory_migrates_and_roots_are_guarded() {
     asm(&sb).args(["session", "1111"]).assert().success().stdout(predicates::str::contains(new.to_string_lossy().as_ref()));
     asm(&sb).arg("index").env("ASM_FAVORITES_DIR", sb.tmp.path().join("other")).assert().failure().stderr(predicates::str::contains("index --rebuild"));
 }
+
+#[test]
+fn cost_as_reprices_each_sessions_main_model_and_totals_the_change() {
+    let sb = sandbox();
+    let out = asm(&sb).args(["cost", "-p", "alpha", "--as", "fable-5-2"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let header = lines.next().unwrap();
+    assert!(header.contains("COST") && header.contains("FABLE 5.2") && header.contains("CHANGE") && header.contains("MODEL"), "{text}");
+    let s1 = text.lines().find(|l| l.contains("11111111")).unwrap();
+    assert!(s1.contains("Opus 5 "), "S1 runs on Opus 5: {s1}");
+    assert!(text.contains("main model of each session as Fable 5.2"), "{text}");
+    for line in ["input", "cache write 5m", "cache write 1h", "cache read", "output", "other models", "total"] {
+        assert!(text.lines().any(|l| l.trim_start().starts_with(line)), "a `{line}` line: {text}");
+    }
+}
+
+#[test]
+fn cost_model_keeps_the_sessions_whose_main_model_it_is() {
+    let sb = sandbox();
+    let out = asm(&sb).args(["cost", "--model", "haiku-4-5"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("22222222") && !text.contains("11111111"), "S2 runs on Haiku 4.5, S1 on Opus 5: {text}");
+    let out = asm(&sb).args(["cost", "--as", "opus-9"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no price for model `opus-9`"));
+}

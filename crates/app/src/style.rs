@@ -286,3 +286,11 @@ pub fn install_theme(cx: &mut App) {
 pub use gpui_kit::prelude::FluentBuilder;
 
 pub fn favorite() -> gpui_kit::Hsla { gpui_kit::rgb(0xb58116).into() }
+
+/// Cost tab: a model that would cost more / less than the one the session ran on.
+pub fn cost_up() -> Hsla {
+    hex(0xc2410c)
+}
+pub fn cost_down() -> Hsla {
+    hex(0x15803d)
+}
