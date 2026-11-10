@@ -137,12 +137,12 @@ impl Db {
         Ok(())
     }
 
+    /// Keep the index only if both its version and its schema are this build's. The version covers
+    /// what the schema can't show (prices, parsing); comparing the schema catches a development
+    /// build that stamped the current version on an older one.
     fn ensure_schema(&mut self) -> Result<()> {
         let version: i32 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        let has_tables: i64 = self
-            .conn
-            .query_row("SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'sessions'", [], |r| r.get(0))?;
-        if version == SCHEMA_VERSION && has_tables == 1 {
+        if version == SCHEMA_VERSION && schema_of(&self.conn)? == expected_schema()? {
             return Ok(());
         }
         self.reset_schema()
@@ -661,6 +661,23 @@ impl Db {
             db_bytes,
         })
     }
+}
+
+type SchemaEntry = (String, String, Option<String>);
+
+/// Every table, index and trigger with the statement SQLite kept for it.
+fn schema_of(conn: &Connection) -> Result<Vec<SchemaEntry>> {
+    Ok(conn
+        .prepare("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<std::result::Result<_, _>>()?)
+}
+
+/// The schema this build creates, read back from a scratch database so it is normalized the same way.
+fn expected_schema() -> Result<Vec<SchemaEntry>> {
+    let conn = Connection::open_in_memory()?;
+    conn.execute_batch(SCHEMA)?;
+    schema_of(&conn)
 }
 
 fn row_to_state(r: &Row) -> rusqlite::Result<IndexState> {

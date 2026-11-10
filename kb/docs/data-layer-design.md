@@ -148,7 +148,7 @@ searcher.search_path(&matcher, path, UTF8(|_, line| {
 - `size < indexed_offset` 或 inode 变化 → 文件被重写（compact、`--resume` fork、`/rewind`）→ `DELETE FROM messages WHERE session_id = ?`（trigger 清 FTS）后从 0 重解析。
 - 文件消失 → `sessions.transcript_missing = 1`，行保留；`history.jsonl` 里同 `sessionId` 的行成为 prompt 的回退来源。`history.jsonl` 也是 append-only，同样按偏移增量导入，键 `(sessionId, timestamp)`。
 - subagent 文件（`<session>/subagents/agent-*.jsonl`）带 `agentId`、`isSidechain: true`、有时 `sessionKind: "bg"`：作为 `messages` 索引，`parent_session_id` = 外层目录 uuid，`is_sidechain = 1`，**默认不进 FTS**（Task agent 的内部对话），提供开关。
-- 全量重建触发：`PRAGMA user_version != SCHEMA_VERSION`、tokenizer 变更、菜单 "Rebuild index" → DROP 全部、重建、重扫。
+- 全量重建触发：`PRAGMA user_version != SCHEMA_VERSION`、磁盘上 `sqlite_master` 的建表语句与本版本建出的不一致（实现时加的）、tokenizer 变更、菜单 "Rebuild index" → DROP 全部、重建、重扫。
 
 实时更新：`notify 8.2` + `notify-debouncer-full 0.7`（FSEvents 后端），`new_debouncer(Duration::from_millis(500), None, cb)`，监听 `~/.claude/projects`（递归）与 `~/.claude/history.jsonl`。FSEvents 会把追加合并成 `Modify(Data)`；**不要信任事件类型**（Create/Modify/Remove 顺序不可靠），每批事件只对触碰到的路径重新 `stat` 走上面的状态机。另加 30s 轮询兜底（FSEvents 高负载下会丢事件）。
 

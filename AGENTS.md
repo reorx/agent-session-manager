@@ -54,7 +54,7 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 - 解析器先写行为测试：fixture 在 `crates/core/tests/fixtures/claude/`，由同目录 `gen_fixtures.py` 生成（`uv run` 重跑并提交结果）；新记录类型先加进生成脚本再改 `parse.rs`
 - 改 `parse.rs::classify`（字节预过滤）前，按 M1 笔记的方法在真实数据上全量验证
 - `&RawValue` 不能放在 `#[serde(tag)]` / `untagged` / `flatten` 之下；记录和 block 都用"大结构体 + Option 字段 + match type"
-- 改 `schema.sql` 必须同步 `db.rs` 的 `SCHEMA_VERSION`、`SESSION_COLUMNS` 和 `row_to_session` 的列序；版本不符会整库重建，无迁移。改 `pricing.rs` 的价格也要提升 `SCHEMA_VERSION`：费用在索引时算好存进 `api_usage`，不重建就不会变
+- 改 `schema.sql` 必须同步 `db.rs` 的 `SESSION_COLUMNS` 和 `row_to_session` 的列序。打开索引时版本号不符、或磁盘上的 schema 与本版本建出的不一致，都会整库重建，无迁移；schema 的变化会被自动发现（防开发中途的构建把当前版本号盖在旧 schema 上，截图脚本跑在真实索引上），版本号管 schema 看不出的变化：改 `pricing.rs` 的价格或改解析结果要提升 `SCHEMA_VERSION`，费用在索引时算好存进 `api_usage`，不重建就不会变
 - `session_model_usage`（session 的用量按模型 × fast × prompt 是否超过 `LONG_PROMPT` 分组）也只由 `refresh_session_usage` 重写，`SessionSummary::set_usage` 在内存里按同样规则分组（有测试断言两者一致）。启动时直接读这张表，不要改回读 session 时对 `api_usage` 现做 GROUP BY（冷缓存多 350ms）
 - 用量按 API 响应一行存在 `api_usage`（主键 `session_id, agent, msg_id`，subagent 文件的 `agent` 为文件名 stem），`sessions` 上的费用 / token 列只由 `refresh_session_usage` 从这张表汇总写入，`upsert_session` 不写它们。同一次响应会被增量扫描切成两半，所以去重只能靠这张表，不能在 `SessionDelta` 里累加
 - 一个 `Db` 只在一个线程用；rayon 只用于解析，写库在调用线程的单个事务里

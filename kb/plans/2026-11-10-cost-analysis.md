@@ -112,6 +112,7 @@ core 在索引时按「模型 × fast × 是否长 prompt」把 `api_usage` 分�
 - [x] 5. app：Cost tab、比较模型、状态栏合计
 - [x] 6. autoplay 截图验收
 - [x] 7. 文档（AGENTS.md、product-prd 状态表、本 plan）、commit
+- [x] 8. 提交后发现：开发中途先把版本升到 4、后加 `session_model_usage`，中间的构建跑过真实索引（截图脚本用真实索引），留下「版本 4、缺这张表」的索引，提交的代码打开它即报 `no such table: session_model_usage`。`db.rs::ensure_schema` 改为同时比对 `sqlite_master` 与本版本在内存库建出的 schema，不一致就重建（测试 `an_index_whose_schema_differs_from_this_build_is_rebuilt_even_if_the_version_matches`）；本机真实索引的副本打开后重建约 14 秒，正确的 v4 索引原样保留，比对每次打开约多 1ms
 
 ### 测试与验证
 

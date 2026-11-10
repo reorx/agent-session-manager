@@ -249,6 +249,27 @@ fn schema_version_mismatch_and_corrupt_files_trigger_a_rebuild() {
 }
 
 #[test]
+fn an_index_whose_schema_differs_from_this_build_is_rebuilt_even_if_the_version_matches() {
+    // a development build can stamp the current version on an older schema: here the version was
+    // bumped first and a table added later, and the screenshot scripts ran the in-between build on
+    // the real index
+    let sb = sandbox();
+    {
+        let mut db = Db::open(&sb.db_path()).unwrap();
+        scan(&sb, &mut db);
+    }
+    {
+        let db = Db::open(&sb.db_path()).unwrap();
+        assert_eq!(db.list_sessions(&ListFilter::default()).unwrap().len(), 8, "a matching index is kept");
+        db.conn().execute_batch("DROP TABLE session_model_usage").unwrap();
+    }
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    assert!(db.list_sessions(&ListFilter::default()).unwrap().is_empty(), "the stale schema is dropped");
+    scan(&sb, &mut db);
+    assert!(!db.session(S1).unwrap().unwrap().model_usage.is_empty(), "and the missing table is back");
+}
+
+#[test]
 fn rebuild_drops_everything_and_rescans() {
     let sb = sandbox();
     let mut db = Db::open(&sb.db_path()).unwrap();
