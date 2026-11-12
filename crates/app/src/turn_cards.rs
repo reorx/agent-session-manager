@@ -541,6 +541,15 @@ impl AppRoot {
                         )
                     }),
             )
+            .children(t.cache_notes.iter().map(|note| {
+                div()
+                    .mt(px(3.))
+                    .font_family(style::mono(cx))
+                    .text_size(px(10.5))
+                    .line_height(px(14.))
+                    .text_color(style::cache_note())
+                    .child(note.clone())
+            }))
             .when(!t.steps.is_empty(), |el| el.child(self.render_ticks(c, t, cx)).child(self.render_stats(c, t, cx)))
     }
 

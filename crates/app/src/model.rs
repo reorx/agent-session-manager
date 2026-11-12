@@ -214,7 +214,14 @@ fn format_tokens(n: u64, s: &SessionSummary) -> SharedString {
 
 fn tokens_summary(s: &SessionSummary) -> SharedString {
     let t = fmt_tokens;
-    format!("in {} · out {} · cache read {} · write {}", t(s.tokens_in), t(s.tokens_out), t(s.tokens_cache_read), t(s.tokens_cache_write)).into()
+    let mut text = format!("in {} · out {} · cache read {} · write {}", t(s.tokens_in), t(s.tokens_out), t(s.tokens_cache_read), t(s.tokens_cache_write));
+    let total = s.input_tokens_total();
+    if total > 0 {
+        // per mille, rounded down like the Hit% column
+        let pm = s.tokens_cache_read * 1000 / total;
+        text.push_str(&format!(" · hit {}.{}%", pm / 10, pm % 10));
+    }
+    text.into()
 }
 
 fn project_name(s: &SessionSummary) -> String {
@@ -975,7 +982,8 @@ pub mod tests {
         (s.tokens_in, s.tokens_out, s.tokens_cache_read, s.tokens_cache_write) = (12, 1050, 89_000, 2900);
         let r = builtin_row(&s);
         assert_eq!((r.cost, r.cost_fmt.as_ref(), r.cc_cost_fmt.as_ref()), (Some(3.4219), "$3.42", "$3.50"));
-        assert_eq!(r.tokens_fmt, "in 12 · out 1k · cache read 89k · write 3k");
+        assert_eq!(r.tokens_fmt, "in 12 · out 1k · cache read 89k · write 3k · hit 96.8%", "89,000 of 91,912, rounded down");
+        assert_eq!(builtin_row(&summary("e", "/p/a", 5000)).tokens_fmt, "in 0 · out 0 · cache read 0 · write 0", "no input, no hit rate");
         assert_eq!(r.unpriced, "");
         s.unpriced_models = ["claude-opus-9".to_string()].into();
         assert_eq!(builtin_row(&s).unpriced, "claude-opus-9");

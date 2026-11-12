@@ -287,6 +287,9 @@ pub use gpui_kit::prelude::FluentBuilder;
 
 pub fn favorite() -> gpui_kit::Hsla { gpui_kit::rgb(0xb58116).into() }
 
+/// A turn card's note that the prompt cache was lost and written again.
+pub fn cache_note() -> gpui_kit::Hsla { gpui_kit::rgb(0xa16207).into() }
+
 /// Cost tab: a model that would cost more / less than the one the session ran on.
 pub fn cost_up() -> Hsla {
     hex(0xc2410c)

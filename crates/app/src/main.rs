@@ -52,7 +52,7 @@ use crate::model::{DisplayMode, Filter, Kind, ModelEntry, ProjectEntry, RangePre
 use crate::search::{SearchMode, SearchOptions, SearchSummary, Searcher};
 use crate::settings::{SortDir, ViewState, default_state_path};
 use crate::store::{Store, StoreEvent, StoreRequest};
-use crate::table::{PREVIEW_MIN_W, ROW_H, SessionTableDelegate};
+use crate::table::{PREVIEW_MIN_W, ROW_H, SessionTableDelegate, ShowAllColumns, ToggleColumn};
 use crate::updater::{About, CheckForUpdates};
 
 gpui_kit::actions!(
@@ -214,6 +214,8 @@ impl AppRoot {
             favorites_only: saved.favorites_only,
             hidden_projects: saved.hidden_projects.iter().cloned().map(Into::into).collect(),
         });
+        // before the sort: a hidden column is not sorted by
+        delegate.set_hidden_columns(saved.hidden_columns.iter().cloned());
         if let Some((key, dir)) = &saved.sort {
             delegate.set_sort(key, dir.to_column());
         }
@@ -540,6 +542,7 @@ impl AppRoot {
             compare_model: Some(self.compare_model.to_string()),
             favorites_only: delegate.filter().favorites_only,
             hidden_projects: delegate.filter().hidden_projects.iter().map(|p| p.to_string()).collect(),
+            hidden_columns: delegate.hidden_columns(),
             detail_visible: self.detail_visible,
             selected_id: self.selected.as_ref().map(|r| r.id.to_string()).or_else(|| self.wanted_id.as_ref().map(|id| id.to_string())),
             search: self.search_opts.clone(),
@@ -970,6 +973,17 @@ impl AppRoot {
         self.focus_table(window, cx);
     }
 
+    /// Show or hide table columns (the header menu); the next render gives Preview the
+    /// difference.
+    pub(crate) fn update_columns(&mut self, change: impl FnOnce(&mut SessionTableDelegate), cx: &mut Context<Self>) {
+        self.table.update(cx, |table, cx| {
+            change(table.delegate_mut());
+            table.refresh(cx);
+        });
+        self.persist(cx);
+        cx.notify();
+    }
+
     /// Keep the Preview column filling whatever width the table panel has.
     fn sync_preview_width(&mut self, window: &Window, cx: &mut Context<Self>) {
         let viewport_w = window.viewport_size().width;
@@ -1042,6 +1056,8 @@ impl Render for AppRoot {
             .on_action(cx.listener(|this, _: &RebuildIndex, _, cx| this.rescan(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleEmptySessions, _, cx| this.toggle_empty_sessions(cx)))
             .on_action(cx.listener(|this, action: &HideProject, _, cx| this.hide_project_of(action.id.as_deref(), cx)))
+            .on_action(cx.listener(|this, action: &ToggleColumn, _, cx| this.update_columns(|d| d.toggle_column(&action.key), cx)))
+            .on_action(cx.listener(|this, _: &ShowAllColumns, _, cx| this.update_columns(|d| d.set_hidden_columns([]), cx)))
             .on_action(cx.listener(|this, action: &CopySessionId, window, cx| this.copy_session_id(action.id.as_deref(), window, cx)))
             .on_action(cx.listener(|this, action: &CopyResume, window, cx| this.copy_resume(action.id.as_deref(), window, cx)))
             .on_action(cx.listener(|this, action: &RevealTranscript, window, cx| this.reveal_transcript(action.id.as_deref(), window, cx)))

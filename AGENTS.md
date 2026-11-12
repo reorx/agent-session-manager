@@ -19,6 +19,8 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 
 - 发布与应用内更新（2026-10-28，1.0）：打 `v*` tag 后 GitHub Actions 构建 arm64 `.app`、Developer ID 签名、app 和 dmg 两轮公证，发到本仓库 Release（dmg、`SHA256SUMS`、`appcast.xml`），再把 cask 推到 `reorx/homebrew-tap`。应用内更新用 Sparkle 2，`crates/app/src/updater.rs` 运行时加载 bundle 里的 framework，debug 二进制没有更新器。流程、密钥和验收见 `kb/docs/release.md`
 
+- 列开关与缓存失效（2026-11-12）：表头右键菜单隐藏 / 显示列（`ViewState.hidden_columns`，Preview 不可隐藏，隐藏正在排序的列会回到默认排序）；Metadata 的 Tokens 行带一位小数的命中率；Conversation 读取时 core `conversation.rs::cache_check` 逐次比较主线调用，比上一次少读缓存 ≥ 10k token 记为一次失效（原因：compact / 换模型 / 空闲超过缓存时长 / 不明），回合卡状态行下一行琥珀色说明，摘要带次数。阈值与本机分布见 `kb/plans/2026-11-12-columns-and-cache-breaks.md`
+
 - Session 收藏已实现：快照保存到索引旁 `favorites/claude/`，按 session id 收藏优先；取消收藏移至废纸篓，最后副本需确认。目录迁移与根目录守卫见 `kb/plans/2026-10-26-favorites.md`。
 
 ## 开发命令
@@ -31,7 +33,7 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 - `make asm ARGS="…"`：跑 `asm` CLI（`index` / `list` / `session` / `search [--index]` / `cost [--compare|--windows|--model M|--as M]` / `stats` / `favorite` / `unfavorite [--yes]` / `favorites-dir [PATH|--reset]`，`list --favorites` 仅列收藏；参数看 `--help`）。`cost --compare` 统计自算费用与 `cost-state` 的偏差，改价格表或用量解析后跑一次；`cost --windows` 对比目录与内置窗口及 Ctx 变化；`cost --model opus-5-5 --as fable-5-2` 把主模型换成另一个模型重新计价并按 token 种类给出合计
 - `make transcript-reader ARGS="SESSION_ID -o session.txt"`：导出用户输入、最终回复及工具计数；也支持唯一 ID 前缀或 JSONL 路径，不依赖索引。
 - `make parity`：在真实 `~/.claude` 上把 `asm` 与 Python 脚本逐字比对；改解析器、清理逻辑、`regex.rs` 或输出格式后必须跑。两边的列表顺序一致：开始时间降序，并列时按更新时间降序、再按 id；改排序要两边一起改（脚本旁有 `test_claude_session_search.py`）。比对期间有 session 正在写入时 search 组偶尔失败，重跑即过
-- `make screenshot`（autoplay，3 张）、`make screenshot-clicks`（cliclick 真点击，22 张：12–15 是自定义区间与日期选择器，16–20 是回合卡（第二次启动、预选 `5f6eea99`），21–22 是普通行和 History 行的右键菜单（第三次启动）；换机器要换一个不再变化的 session 并重量坐标；坐标在 `scripts/screenshot-clicks.sh`，改布局后要校对）、`make screenshot-search`（`ASM_SEARCH_AUTOPLAY=1`，app 自己走完搜索流程，脚本等日志标记后截 7 张）、`make screenshot-cost`（`ASM_COST_AUTOPLAY=1`，5 张：Opus 5.5 按 Ctx 降序比 Fable 5.2、换 Sonnet 5.5、有其他模型的 session 比 Haiku 5.5、按 In 排序、按 Hit% 升序；脚本用 `winid --pid` 只截自己起的窗口，你开着的同名 app 不受影响）、`make screenshot-detail`（`ASM_DETAIL_AUTOPLAY=1`，12 步：选中、展开步骤、展开一步、全部展开、搜索命中、下一个命中、特殊回合、70MB 文件、History 行（第一个 prompt 不少于 3 条的）、代码块（展开离开头最近的带代码块的回复）、从顶部按两次 `]`、Metadata；`ASM_AUTOPLAY_SESSION` / `ASM_AUTOPLAY_REGEX` / `ASM_AUTOPLAY_SPECIAL` 指定 session 和查询，`ASM_AUTOPLAY_STEP=cut-output|thinking|mcp` 决定展开哪种步骤，跳过的步骤不截）。四个截图脚本都带 `caffeinate`，显示器中途睡着会截不到图。输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改），跑在真实索引上，但用一次性的 `state.json` 保证从默认视图开始
+- `make screenshot`（autoplay，3 张）、`make screenshot-clicks`（cliclick 真点击，22 张：12–15 是自定义区间与日期选择器，16–20 是回合卡（第二次启动、预选 `5f6eea99`），21–22 是普通行和 History 行的右键菜单（第三次启动）；换机器要换一个不再变化的 session 并重量坐标；坐标在 `scripts/screenshot-clicks.sh`，改布局后要校对）、`make screenshot-search`（`ASM_SEARCH_AUTOPLAY=1`，app 自己走完搜索流程，脚本等日志标记后截 7 张）、`make screenshot-cost`（`ASM_COST_AUTOPLAY=1`，最多 9 张：Opus 5.5 按 Ctx 降序比 Fable 5.2、换 Sonnet 5.5、有其他模型的 session 比 Haiku 5.5、按 In 排序、按 Hit% 升序，`ASM_AUTOPLAY_CACHE_SESSION` 指定的 session 的 Conversation 顶部与第一处缓存失效、它的 Metadata（没给就跳过这 3 张），最后隐藏 Started / Size / Kind；脚本用 `winid --pid` 只截自己起的窗口，你开着的同名 app 不受影响）、`make screenshot-detail`（`ASM_DETAIL_AUTOPLAY=1`，12 步：选中、展开步骤、展开一步、全部展开、搜索命中、下一个命中、特殊回合、70MB 文件、History 行（第一个 prompt 不少于 3 条的）、代码块（展开离开头最近的带代码块的回复）、从顶部按两次 `]`、Metadata；`ASM_AUTOPLAY_SESSION` / `ASM_AUTOPLAY_REGEX` / `ASM_AUTOPLAY_SPECIAL` 指定 session 和查询，`ASM_AUTOPLAY_STEP=cut-output|thinking|mcp` 决定展开哪种步骤，跳过的步骤不截）。四个截图脚本都带 `caffeinate`，显示器中途睡着会截不到图。输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改），跑在真实索引上，但用一次性的 `state.json` 保证从默认视图开始
 - 详情打开速度看日志里的 `detail:` 行（read / build / first frame，起点是选中，终点是带内容的首帧）。量的时候要停在 Conversation tab：停在 Metadata 上，首帧要等切回来才打点
 - 构建产物在 `~/Library/Caches/cargo-target`（全局 cargo 配置），不在 `./target`；`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒
 - 环境变量：`ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（默认 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`）、`ASM_STATE`（仅 app，默认为索引同目录的 `state.json`）、`ASM_FAVORITES_DIR`（覆盖共享配置中的收藏目录）、`ASM_TRASH_DIR`（取消收藏改用此目录，测试必设）。验收时把 `ASM_DB` / `ASM_STATE` 指到 `tmp/`，可反复测冷启动而不动真实索引
@@ -95,6 +97,7 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 
 ## Documentation
 
+- `kb/plans/2026-11-12-columns-and-cache-breaks.md` — 列开关、Metadata 命中率、回合卡缓存失效：失效的判定与原因、本机 30 天的分布、表头菜单的实现与验收；改表格列、`conversation.rs::cache_check` 或回合卡说明行前读
 - `kb/plans/2026-11-10-cost-analysis.md` — 成本分析：主模型定义、换模型计价口径（只换主模型、fast 与长 prompt 的处理）、分组用量存表的原因、本机 Opus 5.5 → Fable 5.2 / Sonnet 5.5 / Haiku 5.5 实测；改 Cost tab、Model 过滤或 `asm cost --as` 前读
 - `kb/plans/2026-11-03-context-window-from-catalog.md` — Context 窗口的目录格式、合并优先级、刷新与验收；改模型目录读取或窗口来源前读
 - `kb/docs/release.md` — 发布：tag 触发的 CI、`.app` 的组成、签名与两轮公证、Sparkle 的接入与密钥、Homebrew cask、本地出包、发布后验收、失败处理；发版、改打包或更新逻辑前读

@@ -269,6 +269,11 @@ impl DetailState {
         }
     }
 
+    /// The first card with a note that the prompt cache was lost.
+    pub fn first_cache_note(&self) -> Option<usize> {
+        self.view.as_ref()?.cards.iter().position(|card| matches!(card, Card::Turn(t) if !t.cache_notes.is_empty()))
+    }
+
     /// Scroll a card's first row to the top.
     pub fn scroll_to_card(&mut self, card: usize) {
         if let Some(ix) = self.rows.iter().position(|row| row.card() == card) {

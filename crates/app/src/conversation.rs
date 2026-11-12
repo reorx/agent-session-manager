@@ -11,7 +11,9 @@ use std::ops::Range;
 
 use agent_session_core::claude::conversation::INPUT_FIELD_CHARS;
 use agent_session_core::claude::paths::home_dir;
-use agent_session_core::model::{Compaction, ConvItem, Conversation, HitPlace, Marked, Part, Step, StepKind, ToolCall, ToolResult, Turn, TurnEnd};
+use agent_session_core::format::{fmt_tokens, fmt_usd};
+use agent_session_core::model::{CacheBreak, CacheBreakCause, Compaction, ConvItem, Conversation, HitPlace, Marked, Part, Step, StepKind, ToolCall, ToolResult, Turn, TurnEnd};
+use agent_session_core::pricing::display_name;
 use agent_session_core::search::regex::{ToolLine, ToolLineKind};
 use chrono::{DateTime, Local, NaiveDate, TimeZone};
 use gpui_kit::SharedString;
@@ -99,6 +101,9 @@ pub struct TurnCard {
     /// A prompt kept in `history.jsonl`: the card is its head (title and prompt), with no
     /// status line, ticks or tail.
     pub prompt_only: bool,
+    /// `cache rebuilt · 135k written · $1.08 · idle 2h 10m, cache lasts 1h`, one per call of the
+    /// turn that lost the prompt cache.
+    pub cache_notes: Vec<SharedString>,
 }
 
 #[derive(Debug)]
@@ -566,17 +571,21 @@ fn summary(conv: &Conversation) -> String {
     if conv.history_only {
         return format!("{} from history.jsonl", count(conv.items.len(), "prompt", "prompts"));
     }
-    let (mut turns, mut autos, mut tools) = (0, 0, 0);
+    let (mut turns, mut autos, mut tools, mut rebuilds) = (0, 0, 0, 0);
     for item in &conv.items {
         let ConvItem::Turn(t) = item else { continue };
         if t.number.is_some() { turns += 1 } else { autos += 1 }
         tools += t.steps.iter().filter(|s| matches!(s.kind, StepKind::Tool(_))).count();
+        rebuilds += t.cache_breaks.len();
     }
     let mut parts = vec![count(turns, "turn", "turns")];
     if autos > 0 {
         parts.push(format!("{autos} auto"));
     }
     parts.push(count(tools, "tool call", "tool calls"));
+    if rebuilds > 0 {
+        parts.push(count(rebuilds, "cache rebuild", "cache rebuilds"));
+    }
     parts.join(" · ")
 }
 
@@ -619,6 +628,7 @@ fn turn_card(t: &Turn, time: SharedString, day: NaiveDate, hits: usize, paths: &
         hits,
         hits_fmt: hits_fmt(hits),
         prompt_only: false,
+        cache_notes: t.cache_breaks.iter().map(cache_note).collect(),
     }
 }
 
@@ -642,6 +652,31 @@ fn prompt_card(t: &Turn, time: SharedString, hits: usize) -> TurnCard {
         hits,
         hits_fmt: hits_fmt(hits),
         prompt_only: true,
+        cache_notes: Vec::new(),
+    }
+}
+
+fn cache_note(b: &CacheBreak) -> SharedString {
+    let mut parts = vec!["cache rebuilt".to_string(), format!("{} written", fmt_tokens(b.written))];
+    parts.extend(b.cost_usd.map(fmt_usd));
+    parts.push(match &b.cause {
+        CacheBreakCause::Idle { gap_ms, ttl_ms } => format!("idle {}, cache lasts {}", idle_label(*gap_ms), idle_label(*ttl_ms)),
+        CacheBreakCause::Compaction => "after compaction".into(),
+        CacheBreakCause::ModelSwitch { from } => format!("model changed from {}", display_name(from)),
+        CacheBreakCause::Unknown => "cause unknown".into(),
+    });
+    parts.join(" · ").into()
+}
+
+/// `5m`, `1h`, `2h 10m`, `3d 4h`: how long a session sat idle, to the minute.
+fn idle_label(ms: i64) -> String {
+    let m = ms / 60_000;
+    match (m / 1440, m / 60 % 24, m % 60) {
+        (0, 0, m) => format!("{m}m"),
+        (0, h, 0) => format!("{h}h"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, 0, _) => format!("{d}d"),
+        (d, h, _) => format!("{d}d {h}h"),
     }
 }
 
@@ -1004,6 +1039,7 @@ pub mod tests {
             steps,
             reply: Some(Reply { ts, text: text("done") }),
             end: TurnEnd::Completed,
+            cache_breaks: Vec::new(),
             duration_ms: None,
             last_ts: ts,
         }
@@ -1139,6 +1175,39 @@ pub mod tests {
         let fixture = build(&read_conversation(path.as_ref(), None).unwrap(), PROJECT, today());
         assert_eq!(fixture.summary, "2 turns · 2 auto · 3 tool calls");
         assert!(fixture.bytes > 0);
+    }
+
+    #[test]
+    fn a_turn_that_lost_the_cache_says_how_much_was_written_again_and_why() {
+        use agent_session_core::model::{CacheBreak, CacheBreakCause};
+        let lost = |written, cost_usd, cause| CacheBreak { ts: None, dropped: written, written, cost_usd, cause };
+        let hour = 3_600_000;
+        let t = Turn {
+            cache_breaks: vec![
+                lost(135_000, Some(1.08), CacheBreakCause::Idle { gap_ms: 7_800_000, ttl_ms: hour }),
+                lost(22_000, Some(0.11), CacheBreakCause::Compaction),
+                lost(80_000, None, CacheBreakCause::ModelSwitch { from: "claude-opus-4-7".into() }),
+                lost(103_000, Some(0.82), CacheBreakCause::Unknown),
+                lost(31_000, Some(0.16), CacheBreakCause::Idle { gap_ms: 610_000, ttl_ms: 300_000 }),
+                lost(40_000, Some(0.32), CacheBreakCause::Idle { gap_ms: 76 * hour, ttl_ms: hour }),
+            ],
+            ..turn(Some(1), None, "go", vec![])
+        };
+        let view = view_of(vec![ConvItem::Turn(t), ConvItem::Turn(turn(Some(2), None, "more", vec![]))]);
+        let notes: Vec<&str> = turn_card(&view, 0).cache_notes.iter().map(|n| n.as_ref()).collect();
+        assert_eq!(
+            notes,
+            [
+                "cache rebuilt · 135k written · $1.08 · idle 2h 10m, cache lasts 1h",
+                "cache rebuilt · 22k written · $0.11 · after compaction",
+                "cache rebuilt · 80k written · model changed from Opus 4.7",
+                "cache rebuilt · 103k written · $0.82 · cause unknown",
+                "cache rebuilt · 31k written · $0.16 · idle 10m, cache lasts 5m",
+                "cache rebuilt · 40k written · $0.32 · idle 3d 4h, cache lasts 1h",
+            ]
+        );
+        assert!(turn_card(&view, 1).cache_notes.is_empty());
+        assert_eq!(view.summary, "2 turns · 0 tool calls · 6 cache rebuilds");
     }
 
     #[test]

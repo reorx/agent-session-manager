@@ -55,6 +55,8 @@ pub struct ViewState {
     pub favorites_only: bool,
     /// `project_key`s hidden from the table.
     pub hidden_projects: Vec<String>,
+    /// Keys of the table columns hidden from the header menu.
+    pub hidden_columns: Vec<String>,
     pub detail_visible: bool,
     pub selected_id: Option<String>,
     /// Scope, mode, case and labels of the search box; the query itself starts empty.
@@ -75,6 +77,7 @@ impl Default for ViewState {
             compare_model: None,
             favorites_only: false,
             hidden_projects: Vec::new(),
+            hidden_columns: Vec::new(),
             detail_visible: true,
             selected_id: None,
             search: SearchOptions::default(),
@@ -128,6 +131,7 @@ mod tests {
             compare_model: Some("claude-sonnet-5-5".into()),
             favorites_only: true,
             hidden_projects: vec!["-Users-me-Code-probe".into()],
+            hidden_columns: vec!["kind".into(), "started".into()],
             detail_visible: false,
             selected_id: Some("11111111-aaaa-4bbb-8ccc-000000000001".into()),
             search: SearchOptions {

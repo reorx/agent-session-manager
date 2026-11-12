@@ -237,7 +237,8 @@ impl AppRoot {
     /// Scripted tour of the Cost tab for screenshots (`make screenshot-cost`): Opus 5.5 sessions
     /// by context, compared with Fable 5.2 then Sonnet 5.5; a session whose subagents ran on
     /// another model, compared with Haiku 5.5; the same filter sorted by In, then by Hit% from the
-    /// lowest. Once the start-up
+    /// lowest; `ASM_AUTOPLAY_CACHE_SESSION`'s conversation at its first lost cache (skipped
+    /// without it), its Metadata, then Started / Size / Kind hidden. Once the start-up
     /// scan is over, every step prints `autoplay-cost: <step>` (or `… skipped`) and holds the
     /// view for a capture.
     pub(crate) fn cost_autoplay(&self, window: &Window, cx: &mut Context<Self>) -> Task<()> {
@@ -269,6 +270,25 @@ impl AppRoot {
             })),
             ("by-hit", Box::new(|this, cx| {
                 this.autoplay_sort_and_select("cache_hit", ColumnSort::Ascending, cx);
+                true
+            })),
+            ("cache-breaks", Box::new(|this, cx| {
+                let Some(prefix) = std::env::var("ASM_AUTOPLAY_CACHE_SESSION").ok().filter(|v| !v.is_empty()) else { return false };
+                this.set_model_filter(None, cx);
+                this.set_detail_tab(DetailTab::Conversation, cx);
+                this.autoplay_select(Some(&prefix), cx)
+            })),
+            ("cache-note", Box::new(|this, _| {
+                let Some(card) = this.detail.first_cache_note() else { return false };
+                this.detail.scroll_to_card(card);
+                true
+            })),
+            ("metadata-hit", Box::new(|this, cx| {
+                this.set_detail_tab(DetailTab::Metadata, cx);
+                true
+            })),
+            ("hidden-columns", Box::new(|this, cx| {
+                this.update_columns(|d| d.set_hidden_columns(["started", "size", "kind"].map(String::from)), cx);
                 true
             })),
         ];

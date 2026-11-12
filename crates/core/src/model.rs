@@ -393,6 +393,32 @@ pub struct Turn {
     pub end: TurnEnd,
     pub duration_ms: Option<i64>,
     pub last_ts: Option<i64>,
+    /// Calls of this turn that did not reuse the prompt cache, in file order.
+    pub cache_breaks: Vec<CacheBreak>,
+}
+/// A main-thread API call that read less from the cache than the call before it sent: the cached
+/// prefix was lost and had to be written again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CacheBreak {
+    pub ts: Option<i64>,
+    /// Tokens of the previous call's prompt that this call did not read from the cache.
+    pub dropped: u64,
+    /// Tokens this call wrote to the cache.
+    pub written: u64,
+    /// What those writes cost; `None` for a model without a price.
+    pub cost_usd: Option<f64>,
+    pub cause: CacheBreakCause,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CacheBreakCause {
+    /// The context was compacted since the call before.
+    Compaction,
+    /// The call before ran on another model, which has a cache of its own.
+    ModelSwitch { from: String },
+    /// Longer since the call before than the cache lives: 5 minutes, or an hour for 1-hour writes.
+    Idle { gap_ms: i64, ttl_ms: i64 },
+    /// Nothing in the transcript explains it.
+    Unknown,
 }
 #[derive(Debug)]
 pub struct Attachment { pub kind: String, pub bytes: u64 }

@@ -81,6 +81,8 @@ Root
 
 表格横向也做了虚拟化：面板比列总宽窄时出现横向滚动，右边的列被裁掉。`Column` 没有弹性宽度，所以 Preview 列的宽度由应用自己算：每次 render 读左侧面板的当前宽度，减去其余列的固定宽度，变化超过 0.5px 才写回并刷新表格。首帧面板尺寸还是空的，用窗口宽度减详情面板宽度兜底。
 
+列可以从表头右键菜单隐藏（2026-11-12）：delegate 留着全部列定义（`all_columns`）和隐藏集合，显示的 `columns` 由二者重建，搜索时的 Matches 插在 Preview 后面。所以 Preview / Matches 的位置要按 key 查，不能写死下标；其余列的宽度对显示的列求和，不再是常量。Preview 的宽度同时写进两份定义，重建时才不会丢。
+
 ### 排序状态
 
 表头箭头的状态存在列定义里，而表格每次 `refresh` 都会向 delegate 重新要列定义。Preview 列宽同步会在窗口尺寸变化时触发 `refresh`，所以列定义必须始终反映当前排序，否则一拖窗口箭头就跳回默认列。
@@ -118,6 +120,7 @@ Root
 - **菜单右侧的快捷键提示是按 action 相等去查绑定的**（`popup_menu.rs::render_key_binding`）。本项目的 action 带 `id: Option<String>`：菜单项派发 `Some(id)`，快捷键绑定的是 `None`，两者不相等，所以普通的 `menu(..)` 项不会显示 `⌘C`。要显示就自己画：`PopupMenuItem::element(|_, _| 左标签 + 右提示).action(Box::new(..)).disabled(..)`。核实过（M4b spec 风险第 3 条）：element 项支持 `disabled`，点击时照常派发 action 并关闭菜单，不需要退回 `menu_with_disabled`
 - **element 项的外层 `h_flex` 没有 `min_w_0`**，内容里有一段很长的不换行文字（resume 命令预览）时，它会按整段文字撑宽，`truncate()` 不起作用，右侧提示被推到菜单外。给自绘内容一个固定宽度：菜单宽度减去菜单边距 4px 和项内边距 8px（两侧共 24px），见 `table.rs` 的 `MENU_ITEM_W`
 - 普通项置灰用 `menu_with_disabled(label, action, disabled)`。菜单项没有悬停提示，置灰的原因只能写在项里（本项目把它写在 Copy Resume Command 的预览行）
+- **表头的右键菜单**（显示哪些列）组件不提供，在 `render_th` 返回的元素上自己挂 `ContextMenuExt::context_menu`，元素要有稳定的 id（按列 key）。表格的行菜单挂在整个表格上，右键表头时也会构造，它读 `right_clicked_row`：为 `None` 时菜单为空，空菜单不弹出；但上一次右键过的行可能还留着，所以表头格子在右键按下时先 `set_right_clicked_row(None)`。右键不会触发表头的排序（`on_click` 只认左键）。实测见 `kb/plans/2026-11-12-columns-and-cache-breaks.md`
 
 ### 按钮的图标与置灰
 

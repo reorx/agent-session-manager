@@ -8,9 +8,11 @@ use memchr::memchr_iter;
 use serde_json::{Map, Value};
 
 use super::clean::clean_prompt;
-use super::parse::{Content, RawBlock, map_file, parse_content, user_text};
+use super::parse::{Content, RawBlock, SYNTHETIC_MODEL, map_file, parse_content, tokens_of, user_text};
 use crate::format::parse_ts;
 use crate::model::*;
+use crate::pricing::{LONG_PROMPT, price, price_tokens};
+use crate::transcript::Message;
 use crate::search::{Highlighted, Matcher, regex::{ToolLine, ToolLineKind, stringify}};
 use crate::transcript::{Record, is_human_input, is_interruption};
 
@@ -18,6 +20,10 @@ pub const ENTRY_CHARS: usize = 20_000;
 pub const RESULT_CHARS: usize = 3_000;
 pub const INPUT_FIELD_CHARS: usize = 2_000;
 pub const HIT_LEAD_CHARS: usize = 200;
+/// A call that reads this many tokens less than the call before it sent lost the cache. Real
+/// transcripts split cleanly: nearly every call drops under 1k, the breaks drop over 10k.
+pub const CACHE_BREAK_MIN: u64 = 10_000;
+const MINUTE_MS: i64 = 60_000;
 
 /// History contains prompts only; preserve every row, including commands and empty prompts.
 pub fn conversation_from_history(prompts: &[HistoryPrompt], matcher: Option<&Matcher>) -> Conversation {
@@ -25,7 +31,7 @@ pub fn conversation_from_history(prompts: &[HistoryPrompt], matcher: Option<&Mat
         number: Some(i as u32 + 1), origin: None, ts: Some(p.ts),
         prompt: Marked::new(&p.text, ENTRY_CHARS, matcher),
         attachments: Vec::new(), steps: Vec::new(), reply: None,
-        end: TurnEnd::NoReply, duration_ms: None, last_ts: Some(p.ts),
+        end: TurnEnd::NoReply, duration_ms: None, last_ts: Some(p.ts), cache_breaks: Vec::new(),
     })).collect();
     Conversation { history_only: true, items, bytes: 0, skipped_lines: 0 }
 }
@@ -125,6 +131,19 @@ struct Reader<'a> {
     tool_messages: HashSet<String>,
     calls: HashMap<String, (usize, usize)>,
     matcher: Option<&'a Matcher>,
+    cache: CacheTrack,
+}
+
+/// What the next API call is compared with to tell whether it reused the cache.
+#[derive(Default)]
+struct CacheTrack {
+    /// Responses already seen: one response can be written as several records.
+    responses: HashSet<String>,
+    /// (prompt tokens, model, time) of the last call.
+    last: Option<(u64, String, Option<i64>)>,
+    /// The last call that wrote to the cache wrote 1-hour entries.
+    hour: bool,
+    compacted: bool,
 }
 
 impl Reader<'_> {
@@ -138,7 +157,7 @@ impl Reader<'_> {
         self.current = Some(self.conv.items.len());
         self.conv.items.push(ConvItem::Turn(Turn {
             number, origin, ts, prompt, attachments, steps: Vec::new(), reply: None,
-            end: TurnEnd::NoReply, duration_ms: None, last_ts: ts,
+            end: TurnEnd::NoReply, duration_ms: None, last_ts: ts, cache_breaks: Vec::new(),
         }));
     }
 
@@ -168,6 +187,7 @@ impl Reader<'_> {
         if r.kind.as_deref() == Some("system") {
             match r.subtype.as_deref() {
                 Some("compact_boundary") => {
+                    self.cache.compacted = true;
                     self.finish(); self.conv.items.push(ConvItem::Compact(Compaction { ts, summary: None }));
                 }
                 Some("turn_duration") if self.current.is_some() => {
@@ -191,6 +211,7 @@ impl Reader<'_> {
     fn user(&mut self, r: &Record, content: &Content, ts: Option<i64>) {
         let text = user_text(content).unwrap_or_default();
         if r.is_compact_summary {
+            self.cache.compacted = true;
             let summary = Some(Marked::new(&text, ENTRY_CHARS, self.matcher));
             if let Some(ConvItem::Compact(c)) = self.conv.items.iter_mut().rev().find(|i| matches!(i, ConvItem::Compact(_))) {
                 c.summary = summary;
@@ -235,6 +256,7 @@ impl Reader<'_> {
 
     fn assistant(&mut self, r: &Record, content: &Content, ts: Option<i64>) {
         let message = r.message.as_ref().unwrap();
+        self.cache_check(message, ts);
         if r.is_api_error || r.is_aborted {
             self.ensure_turn(ts); self.candidate = None;
             self.turn().end = if r.is_api_error {
@@ -268,6 +290,42 @@ impl Reader<'_> {
             },
             Content::Other => {}
         }
+    }
+
+    /// Compare an API call with the one before it; a lost cache is recorded on the current turn.
+    fn cache_check(&mut self, message: &Message, ts: Option<i64>) {
+        let (Some(id), Some(model), Some(usage)) = (&message.id, message.model.as_deref(), &message.usage) else { return };
+        if model == SYNTHETIC_MODEL || !self.cache.responses.insert(id.clone()) { return; }
+        let tokens = tokens_of(usage);
+        if let Some((prompt, last_model, last_ts)) = self.cache.last.take() {
+            let dropped = prompt.saturating_sub(tokens.cache_read);
+            if dropped >= CACHE_BREAK_MIN {
+                let gap_ms = ts.zip(last_ts).map_or(0, |(t, last)| t - last);
+                let ttl_ms = if self.cache.hour { 60 * MINUTE_MS } else { 5 * MINUTE_MS };
+                let cause = if self.cache.compacted {
+                    CacheBreakCause::Compaction
+                } else if last_model != model {
+                    CacheBreakCause::ModelSwitch { from: last_model }
+                } else if gap_ms > ttl_ms {
+                    CacheBreakCause::Idle { gap_ms, ttl_ms }
+                } else {
+                    CacheBreakCause::Unknown
+                };
+                let writes = Tokens { cache_write_5m: tokens.cache_write_5m, cache_write_1h: tokens.cache_write_1h, ..Tokens::default() };
+                let fast = usage.speed.as_deref() == Some("fast");
+                let cost_usd = price(model).map(|p| price_tokens(&p, &writes, fast, tokens.input_total() > LONG_PROMPT).total());
+                let written = tokens.cache_write_5m + tokens.cache_write_1h;
+                self.ensure_turn(ts);
+                self.turn().cache_breaks.push(CacheBreak { ts, dropped, written, cost_usd, cause });
+            }
+        }
+        if tokens.cache_write_1h > 0 {
+            self.cache.hour = true;
+        } else if tokens.cache_write_5m > 0 {
+            self.cache.hour = false;
+        }
+        self.cache.last = Some((tokens.input_total(), model.to_owned(), ts));
+        self.cache.compacted = false;
     }
 
     fn text(&mut self, text: &str, id: &MessageKey, pure: bool, ts: Option<i64>) {
@@ -315,6 +373,7 @@ pub fn read_conversation(path: &Path, matcher: Option<&Matcher>) -> Result<Conve
     let mut reader = Reader {
         conv: Conversation { history_only: false, items: Vec::new(), bytes: bytes.len() as u64, skipped_lines: 0 },
         current: None, number: 0, record_no: 0, candidate: None, tool_messages: HashSet::new(), calls: HashMap::new(), matcher,
+        cache: CacheTrack::default(),
     };
     let subagent = path.parent().and_then(Path::file_name).is_some_and(|n| n == "subagents");
     let mut seen = HashSet::new();

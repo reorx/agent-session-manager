@@ -587,3 +587,27 @@ fn a_history_session_shows_its_prompts_as_cards(cx: &mut TestAppContext) {
     press(cx, &h, "]");
     assert_eq!(h.app.read_with(cx, top_row), Some(Row::Head(1)), "] steps from prompt to prompt");
 }
+
+#[gpui_kit::test]
+fn hiding_the_sorted_column_from_the_header_menu_keeps_the_selection_and_is_remembered(cx: &mut TestAppContext) {
+    use crate::table::{ShowAllColumns, ToggleColumn};
+    let h = launch(cx);
+    sort_like_header(cx, &h, "prompts");
+    select(cx, &h, S1);
+    // what a click on a menu item does: the action goes to the focused table and up to AppRoot
+    in_window(cx, &h, |window, cx| window.dispatch_action(Box::new(ToggleColumn { key: "prompts".into() }), cx));
+    cx.run_until_parked();
+    let state = || crate::settings::ViewState::load(&h._dir.path().join("state.json"));
+    h.app.read_with(cx, |app, cx| {
+        let table = app.table.read(cx);
+        assert_eq!(table.delegate().hidden_columns(), ["prompts"]);
+        assert_eq!(table.delegate().sort_state(), None, "the order went back to the default");
+        let selected = table.selected_row().map(|ix| table.delegate().row(ix).id.to_string());
+        assert_eq!(selected.as_deref(), Some(S1), "the same session stays selected where it moved");
+    });
+    assert_eq!(state().hidden_columns, ["prompts"]);
+    assert_eq!(state().sort, None);
+    in_window(cx, &h, |window, cx| window.dispatch_action(Box::new(ShowAllColumns), cx));
+    cx.run_until_parked();
+    assert!(state().hidden_columns.is_empty());
+}

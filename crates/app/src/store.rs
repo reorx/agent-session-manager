@@ -481,7 +481,7 @@ mod tests {
         let (_, session_id, view) = conversation_of(seen.last().unwrap());
         let view = view.as_ref().unwrap();
         assert_eq!(session_id, S1);
-        assert_eq!((view.summary.as_ref(), view.cards.len()), ("4 turns · 3 tool calls", 4), "read from the transcript, built into cards");
+        assert_eq!((view.summary.as_ref(), view.cards.len()), ("4 turns · 3 tool calls · 1 cache rebuild", 4), "read from the transcript, built into cards; the fixture's last call came back a day later");
         assert!(view.pattern.is_none() && view.hits.is_empty());
 
         let matcher = Matcher::words("parser").unwrap();

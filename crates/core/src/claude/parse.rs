@@ -19,12 +19,12 @@ use super::clean::clean_prompt;
 use crate::format::parse_ts;
 use crate::model::{
     MessageRow, Role, SessionSummary, TITLE_RANK_AGENT_NAME, TITLE_RANK_AI, TITLE_RANK_CUSTOM,
-    TITLE_RANK_SUMMARY, UsageRow,
+    TITLE_RANK_SUMMARY, Tokens, UsageRow,
 };
 use crate::pricing;
 
 /// Model name Claude Code puts on records it writes itself (interrupts, API errors).
-const SYNTHETIC_MODEL: &str = "<synthetic>";
+pub(crate) const SYNTHETIC_MODEL: &str = "<synthetic>";
 
 /// Result of feeding bytes: the messages and API responses found, and how many bytes were
 /// consumed (up to and including the last newline; a partial last line waits for the next feed).
@@ -395,27 +395,40 @@ fn usage_row(rec: &RawRecord) -> Option<UsageRow> {
         .into_iter()
         .flatten()
         .find(|id| !id.is_empty())?;
+    let t = tokens_of(u);
+    let mut row = UsageRow {
+        msg_id: msg_id.to_string(),
+        model: model.to_string(),
+        ts: rec.timestamp.as_deref().and_then(parse_ts).unwrap_or(0),
+        input: t.input,
+        cache_write_5m: t.cache_write_5m,
+        cache_write_1h: t.cache_write_1h,
+        cache_read: t.cache_read,
+        output: t.output,
+        web_search: t.web_search,
+        fast: u.speed.as_deref() == Some("fast"),
+        cost_usd: None,
+    };
+    row.cost_usd = pricing::cost(&row);
+    Some(row)
+}
+
+/// The token counts of one API response's `usage`.
+pub(crate) fn tokens_of(u: &RawUsage) -> Tokens {
     let cache_write = u.cache_creation_input_tokens.unwrap_or(0);
     // records written before the 5m / 1h split are all 5-minute writes
     let (cache_write_5m, cache_write_1h) = match &u.cache_creation {
         Some(c) => (c.ephemeral_5m_input_tokens.unwrap_or(0), c.ephemeral_1h_input_tokens.unwrap_or(0)),
         None => (cache_write, 0),
     };
-    let mut row = UsageRow {
-        msg_id: msg_id.to_string(),
-        model: model.to_string(),
-        ts: rec.timestamp.as_deref().and_then(parse_ts).unwrap_or(0),
+    Tokens {
         input: u.input_tokens.unwrap_or(0).max(0) as u64,
         cache_write_5m,
         cache_write_1h,
         cache_read: u.cache_read_input_tokens.unwrap_or(0),
         output: u.output_tokens.unwrap_or(0).max(0) as u64,
         web_search: u.server_tool_use.as_ref().and_then(|s| s.web_search_requests).unwrap_or(0),
-        fast: u.speed.as_deref() == Some("fast"),
-        cost_usd: None,
-    };
-    row.cost_usd = pricing::cost(&row);
-    Some(row)
+    }
 }
 
 /// Parse a whole transcript file. The session id is the file stem, the project key its directory.

@@ -79,6 +79,9 @@ pub(crate) struct Message<'a> {
     pub(crate) stop_reason: Option<String>,
     #[serde(borrow)]
     pub(crate) content: Option<&'a RawValue>,
+    pub(crate) model: Option<String>,
+    #[serde(borrow)]
+    pub(crate) usage: Option<crate::claude::parse::RawUsage<'a>>,
 }
 
 #[derive(Default)]

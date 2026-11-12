@@ -279,3 +279,97 @@ fn a_history_conversation_is_one_prompt_only_turn_per_prompt_with_hits_marked() 
     assert!(empty.history_only && empty.items.is_empty());
     assert!(conversation_from_history(&prompts, None).hit_places().is_empty());
 }
+
+// Cache breaks: a main-thread call that reads less than the call before it sent.
+
+const OPUS: &str = "claude-opus-5-5";
+
+/// `secs` after 10:00:00.
+fn at(secs: u32) -> String {
+    let s = 10 * 3600 + secs;
+    format!("2026-11-12T{:02}:{:02}:{:02}Z", s / 3600, s / 60 % 60, s % 60)
+}
+fn prompt_at(text: &str, secs: u32) -> Value { json!({"type":"user","timestamp":at(secs),"message":{"content":text}}) }
+/// One API response with 3 uncached input tokens: `read` from the cache, `write` to it (1-hour
+/// writes when `hour`).
+fn call(id: &str, secs: u32, model: &str, read: u64, write: u64, hour: bool) -> Value {
+    let (w5, w1) = if hour { (0, write) } else { (write, 0) };
+    json!({"type":"assistant","timestamp":at(secs),"message":{"id":id,"model":model,"content":[{"type":"text","text":"ok"}],
+        "usage":{"input_tokens":3,"cache_creation_input_tokens":write,"cache_read_input_tokens":read,"output_tokens":10,
+            "cache_creation":{"ephemeral_5m_input_tokens":w5,"ephemeral_1h_input_tokens":w1}}}})
+}
+/// (item index, break) of every break in the conversation.
+fn breaks(c: &Conversation) -> Vec<(usize, &CacheBreak)> {
+    c.items.iter().enumerate().flat_map(|(i, item)| match item {
+        ConvItem::Turn(t) => t.cache_breaks.iter().map(|b| (i, b)).collect(),
+        ConvItem::Compact(_) => Vec::new(),
+    }).collect()
+}
+
+#[test]
+fn calls_that_reuse_the_cache_mark_nothing_and_the_first_call_never_does() {
+    let c = read(vec![
+        prompt_at("go", 0), call("m1", 1, OPUS, 0, 50_000, true), call("m2", 2, OPUS, 50_003, 2_000, true),
+        prompt_at("more", 600), call("m3", 601, OPUS, 52_006, 1_000, true),
+    ]);
+    assert!(breaks(&c).is_empty());
+}
+
+#[test]
+fn a_call_after_the_cache_expired_is_a_break_on_its_turn_with_the_idle_time() {
+    let c = read(vec![
+        prompt_at("go", 0), call("m1", 10, OPUS, 0, 80_000, true),
+        prompt_at("back", 7_800), call("m2", 7_810, OPUS, 20_000, 62_000, true),
+    ]);
+    let found = breaks(&c);
+    assert_eq!(found.len(), 1);
+    let (item, b) = found[0];
+    assert_eq!(item, 1, "on the turn the call belongs to");
+    assert_eq!((b.dropped, b.written), (80_003 - 20_000, 62_000));
+    assert_eq!(b.cause, CacheBreakCause::Idle { gap_ms: 7_800_000, ttl_ms: 3_600_000 });
+    assert!((b.cost_usd.unwrap() - 0.496).abs() < 1e-9, "62k 1-hour writes at $8 per million");
+    assert_eq!(b.ts, turn(&c, 1).ts.map(|t| t + 10_000));
+}
+
+#[test]
+fn five_minute_writes_expire_after_five_minutes() {
+    let c = read(vec![
+        prompt_at("go", 0), call("m1", 1, OPUS, 0, 30_000, false),
+        prompt_at("back", 600), call("m2", 601, OPUS, 0, 31_000, false),
+    ]);
+    let b = breaks(&c)[0].1;
+    assert_eq!(b.cause, CacheBreakCause::Idle { gap_ms: 600_000, ttl_ms: 300_000 });
+    assert!((b.cost_usd.unwrap() - 0.155).abs() < 1e-9, "31k 5-minute writes at $5 per million");
+}
+
+#[test]
+fn a_compaction_a_model_switch_or_nothing_visible_can_break_the_cache() {
+    let compacted = read(vec![
+        prompt_at("go", 0), call("m1", 1, OPUS, 0, 100_000, true),
+        json!({"type":"system","subtype":"compact_boundary","timestamp":at(30)}),
+        json!({"type":"user","isCompactSummary":true,"timestamp":at(31),"message":{"content":"summary"}}),
+        call("m2", 40, OPUS, 20_000, 15_000, true),
+    ]);
+    assert_eq!(breaks(&compacted)[0].1.cause, CacheBreakCause::Compaction);
+    let switched = read(vec![prompt_at("go", 0), call("m1", 1, "claude-opus-4-7", 0, 40_000, true), prompt_at("go on", 60), call("m2", 61, OPUS, 0, 41_000, true)]);
+    assert_eq!(breaks(&switched)[0].1.cause, CacheBreakCause::ModelSwitch { from: "claude-opus-4-7".into() });
+    let unknown = read(vec![prompt_at("go", 0), call("m1", 1, OPUS, 29_000, 60_000, true), call("m2", 4, OPUS, 29_000, 61_000, true)]);
+    assert_eq!(breaks(&unknown)[0].1.cause, CacheBreakCause::Unknown);
+}
+
+#[test]
+fn a_response_written_as_two_records_counts_once_and_small_drops_do_not_count() {
+    let split = call("m2", 7_810, OPUS, 20_000, 62_000, true);
+    let c = read(vec![prompt_at("go", 0), call("m1", 10, OPUS, 0, 80_000, true), prompt_at("back", 7_800), split.clone(), split]);
+    assert_eq!(breaks(&c).len(), 1, "the second record repeats the usage of the same response");
+    let small = read(vec![prompt_at("go", 0), call("m1", 1, OPUS, 0, 50_000, true), prompt_at("x", 900), call("m2", 901, OPUS, 41_000, 9_500, true)]);
+    assert!(breaks(&small).is_empty(), "9,003 tokens dropped is under the 10k bar");
+}
+
+#[test]
+fn records_claude_code_wrote_itself_are_not_calls() {
+    let synthetic = json!({"type":"assistant","timestamp":at(20),"message":{"id":"x","model":"<synthetic>","content":[{"type":"text","text":"No response requested."}],
+        "usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}});
+    let c = read(vec![prompt_at("go", 0), call("m1", 1, OPUS, 0, 50_000, true), synthetic, call("m2", 30, OPUS, 50_003, 100, true)]);
+    assert!(breaks(&c).is_empty());
+}

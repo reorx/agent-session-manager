@@ -2,12 +2,12 @@
 //! index vector. Filtering and sorting run on the main thread (10k rows ≈ 7ms).
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
 use agent_session_core::claude::paths::ClaudeDir;
-use gpui_kit::component::menu::{PopupMenu, PopupMenuItem};
+use gpui_kit::component::menu::{ContextMenuExt, PopupMenu, PopupMenuItem};
 use gpui_kit::component::table::{Column, ColumnSort, TableDelegate, TableState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::*;
@@ -35,6 +35,8 @@ pub const SIZE_W: f32 = 60.;
 pub const KIND_W: f32 = 46.;
 /// Only there while a search is active.
 pub const MATCHES_W: f32 = 64.;
+/// Every column but Preview and Matches.
+#[cfg(test)]
 const FIXED_COLS_W: f32 = PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + COST_W + CTX_W + IN_W + HIT_W + HIT_PCT_W + OUT_W + SIZE_W + KIND_W;
 pub const PREVIEW_MIN_W: f32 = 160.;
 pub const ROW_H: f32 = 36.;
@@ -44,8 +46,7 @@ const MENU_W: f32 = 330.;
 /// on both sides.
 const MENU_ITEM_W: f32 = MENU_W - 24.;
 
-const PREVIEW_COL: usize = 1;
-const MATCHES_COL: usize = 2;
+const PREVIEW_KEY: &str = "preview";
 const MATCHES_KEY: &str = "matches";
 const DEFAULT_SORT_KEY: &str = "updated";
 
@@ -55,6 +56,10 @@ pub struct SessionTableDelegate {
     by_id: HashMap<SharedString, usize>,
     /// Indices into `rows` after filter + sort.
     pub ix: Vec<usize>,
+    /// Every column in table order, Matches aside; the header menu hides any but Preview.
+    all_columns: Vec<Column>,
+    hidden: BTreeSet<SharedString>,
+    /// What shows: `all_columns` minus the hidden ones, Matches after Preview while searching.
     columns: Vec<Column>,
     pub mode: DisplayMode,
     filter: Filter,
@@ -76,9 +81,24 @@ fn col(key: &'static str, name: &'static str, width: f32) -> Column {
     Column::new(key, name).width(px(width)).paddings(Edges { top: px(0.), bottom: px(0.), left: px(6.), right: px(6.) })
 }
 
+fn hideable(key: &str) -> bool {
+    key != PREVIEW_KEY && key != MATCHES_KEY
+}
+
+/// Show or hide a column (the header menu); handled by `AppRoot`, which saves the choice.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, gpui_kit::Action)]
+#[action(namespace = app, no_json)]
+pub struct ToggleColumn {
+    pub key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Default, serde::Deserialize, gpui_kit::Action)]
+#[action(namespace = app, no_json)]
+pub struct ShowAllColumns;
+
 impl SessionTableDelegate {
     pub fn new(claude: ClaudeDir) -> Self {
-        let columns = vec![
+        let all_columns = vec![
             col("project", "Project", PROJECT_W).sortable(),
             col("preview", "Preview", 460.).resizable(false),
             col("started", "Started", STARTED_W).sortable(),
@@ -97,7 +117,9 @@ impl SessionTableDelegate {
             rows: Vec::new(),
             by_id: HashMap::new(),
             ix: Vec::new(),
-            columns,
+            columns: all_columns.clone(),
+            all_columns,
+            hidden: BTreeSet::new(),
             mode: DisplayMode::FirstPrompt,
             filter: Filter::default(),
             search: None,
@@ -166,18 +188,57 @@ impl SessionTableDelegate {
     /// Enter search mode with no hits yet (`true`), or leave it (`false`). The Matches column
     /// comes and goes with it, so the caller must `TableState::refresh` afterwards.
     pub fn set_search(&mut self, active: bool) {
-        if active != self.columns.iter().any(|c| c.key == MATCHES_KEY) {
-            match active {
-                true => self.columns.insert(MATCHES_COL, col(MATCHES_KEY, "Matches", MATCHES_W).text_right().sortable()),
-                false => drop(self.columns.remove(MATCHES_COL)),
-            }
-        }
         if !active && self.sort.as_ref().is_some_and(|(key, _)| key == MATCHES_KEY) {
             self.sort = None;
         }
         self.search = active.then(HashMap::new);
-        self.sync_column_arrows();
+        self.rebuild_columns();
         self.recompute();
+    }
+
+    /// Rebuild `columns` after the hidden set or the search changed. The caller must
+    /// `TableState::refresh` afterwards.
+    fn rebuild_columns(&mut self) {
+        let mut columns: Vec<Column> = self.all_columns.iter().filter(|c| !self.hidden.contains(&c.key)).cloned().collect();
+        if self.search.is_some() {
+            let at = columns.iter().position(|c| c.key == PREVIEW_KEY).map_or(0, |i| i + 1);
+            columns.insert(at, col(MATCHES_KEY, "Matches", MATCHES_W).text_right().sortable());
+        }
+        self.columns = columns;
+        self.sync_column_arrows();
+    }
+
+    /// Hide these columns and show the rest; Preview, Matches and unknown keys are ignored. A
+    /// hidden column cannot stay the sort, so the order goes back to the default. The caller
+    /// must `TableState::refresh` afterwards.
+    pub fn set_hidden_columns(&mut self, keys: impl IntoIterator<Item = String>) {
+        let known = |key: &str| hideable(key) && self.all_columns.iter().any(|c| c.key == key);
+        let hidden: BTreeSet<SharedString> = keys.into_iter().filter(|k| known(k)).map(Into::into).collect();
+        self.hidden = hidden;
+        if self.sort.as_ref().is_some_and(|(key, _)| self.hidden.contains(key)) {
+            self.sort = None;
+        }
+        self.rebuild_columns();
+        self.recompute();
+    }
+
+    pub fn toggle_column(&mut self, key: &str) {
+        let mut hidden = self.hidden_columns();
+        match hidden.iter().position(|k| k == key) {
+            Some(i) => drop(hidden.remove(i)),
+            None => hidden.push(key.to_string()),
+        }
+        self.set_hidden_columns(hidden);
+    }
+
+    /// Sorted keys of the hidden columns.
+    pub fn hidden_columns(&self) -> Vec<String> {
+        self.hidden.iter().map(|k| k.to_string()).collect()
+    }
+
+    /// The header menu: (key, name, shown) of every column it can hide, in table order.
+    pub fn column_menu(&self) -> Vec<(SharedString, SharedString, bool)> {
+        self.all_columns.iter().filter(|c| hideable(&c.key)).map(|c| (c.key.clone(), c.name.clone(), !self.hidden.contains(&c.key))).collect()
     }
 
     /// Hits of the running search, batch by batch.
@@ -204,7 +265,7 @@ impl SessionTableDelegate {
 
     /// Width of every column but Preview.
     pub fn fixed_cols_width(&self) -> f32 {
-        if self.search_active() { FIXED_COLS_W + MATCHES_W } else { FIXED_COLS_W }
+        self.columns.iter().filter(|c| c.key != PREVIEW_KEY).map(|c| c.width.as_f32()).sum()
     }
 
     fn shows(&self, row: &SessionRow) -> bool {
@@ -250,11 +311,13 @@ impl SessionTableDelegate {
     }
 
     pub fn preview_width(&self) -> Pixels {
-        self.columns[PREVIEW_COL].width
+        self.all_columns.iter().find(|c| c.key == PREVIEW_KEY).map_or(px(PREVIEW_MIN_W), |c| c.width)
     }
 
     pub fn set_preview_width(&mut self, width: Pixels) {
-        self.columns[PREVIEW_COL].width = width;
+        for column in self.all_columns.iter_mut().chain(self.columns.iter_mut()).filter(|c| c.key == PREVIEW_KEY) {
+            column.width = width;
+        }
     }
 
     pub fn filter(&self) -> &Filter {
@@ -354,6 +417,14 @@ impl SessionTableDelegate {
     }
 }
 
+fn column_menu(mut menu: PopupMenu, entries: &[(SharedString, SharedString, bool)]) -> PopupMenu {
+    for (key, name, shown) in entries {
+        menu = menu.item(PopupMenuItem::new(name.clone()).checked(*shown).action(Box::new(ToggleColumn { key: key.to_string() })));
+    }
+    let all_shown = entries.iter().all(|(_, _, shown)| *shown);
+    menu.separator().item(PopupMenuItem::new("Show All Columns").action(Box::new(ShowAllColumns)).disabled(all_shown))
+}
+
 /// What the shown rows cost, and would cost with `target` as their main model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Projection {
@@ -394,17 +465,23 @@ impl TableDelegate for SessionTableDelegate {
         cx.notify();
     }
 
-    fn render_th(&mut self, col_ix: usize, _: &mut Window, _: &mut Context<TableState<Self>>) -> impl IntoElement {
+    /// The column name; a right click opens the menu that shows and hides columns.
+    fn render_th(&mut self, col_ix: usize, _: &mut Window, cx: &mut Context<TableState<Self>>) -> impl IntoElement {
         let column = &self.columns[col_ix];
         let is_sorted = self.sort.as_ref().map(|(k, _)| *k == column.key).unwrap_or(column.key == DEFAULT_SORT_KEY);
+        let entries = self.column_menu();
         div()
+            .id(SharedString::from(format!("th-{}", column.key)))
             .size_full()
             .flex()
             .items_center()
             .text_size(px(11.))
             .when(column.align == TextAlign::Right, |el| el.justify_end())
             .when(is_sorted, |el| el.text_color(style::text()).font_weight(FontWeight::SEMIBOLD))
+            // the table's own menu (for rows) would otherwise open on the row right-clicked last
+            .on_mouse_down(MouseButton::Right, cx.listener(|table, _: &MouseDownEvent, _, cx| table.set_right_clicked_row(None, cx)))
             .child(column.name.clone())
+            .context_menu(move |menu, _, _| column_menu(menu, &entries))
     }
 
     /// The actions of the right-clicked row, which need not be the selected one; greyed out as
@@ -672,6 +749,74 @@ mod tests {
         let d = delegate();
         assert_eq!(keys(&d), ["project", "preview", "started", "updated", "prompts", "cost", "context", "input", "cache_read", "cache_hit", "output", "size", "kind"]);
         assert_eq!(FIXED_COLS_W, PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + COST_W + CTX_W + IN_W + HIT_W + HIT_PCT_W + OUT_W + SIZE_W + KIND_W);
+    }
+
+    fn hide(d: &mut SessionTableDelegate, keys: &[&str]) {
+        d.set_hidden_columns(keys.iter().map(|k| k.to_string()));
+    }
+
+    #[test]
+    fn hidden_columns_leave_the_table_and_give_preview_their_width() {
+        let mut d = delegate();
+        hide(&mut d, &["started", "kind"]);
+        assert_eq!(keys(&d), ["project", "preview", "updated", "prompts", "cost", "context", "input", "cache_read", "cache_hit", "output", "size"]);
+        assert_eq!(d.fixed_cols_width(), FIXED_COLS_W - STARTED_W - KIND_W);
+        assert_eq!(d.hidden_columns(), ["kind", "started"]);
+        d.toggle_column("started");
+        assert_eq!(keys(&d)[2], "started", "shown again in its own place");
+        assert_eq!(d.hidden_columns(), ["kind"]);
+    }
+
+    #[test]
+    fn preview_and_matches_stay_and_unknown_keys_are_ignored() {
+        let mut d = delegate();
+        hide(&mut d, &["preview", "matches", "nope"]);
+        assert!(d.hidden_columns().is_empty());
+        hide(&mut d, &["project"]);
+        d.set_search(true);
+        assert_eq!(keys(&d)[..2], ["preview", "matches"], "Matches still follows Preview");
+        assert_eq!(d.fixed_cols_width(), FIXED_COLS_W - PROJECT_W + MATCHES_W);
+        d.set_search(false);
+        assert_eq!(keys(&d)[..2], ["preview", "started"]);
+        d.set_search(true);
+        hide(&mut d, &[]);
+        assert_eq!(keys(&d)[..3], ["project", "preview", "matches"], "showing a column keeps the Matches column");
+    }
+
+    #[test]
+    fn hiding_the_sorted_column_goes_back_to_the_default_order() {
+        let mut d = delegate();
+        d.set_rows(vec![with_prompts("a", "/p/x", 100, 9), with_prompts("b", "/p/x", 200, 1), with_prompts("c", "/p/x", 300, 5)]);
+        d.set_sort("prompts", ColumnSort::Descending);
+        assert_eq!(ids(&d), ["a", "c", "b"]);
+        d.toggle_column("prompts");
+        assert_eq!(d.sort_state(), None);
+        assert_eq!(ids(&d), ["c", "b", "a"], "Updated, newest first");
+        d.set_sort("prompts", ColumnSort::Ascending);
+        assert_eq!(d.sort_state(), None, "a hidden column cannot be sorted by");
+        d.set_sort("cost", ColumnSort::Ascending);
+        d.toggle_column("size");
+        assert_eq!(d.sort_state(), Some(("cost".into(), ColumnSort::Ascending)), "hiding another column keeps the sort");
+    }
+
+    #[test]
+    fn the_column_menu_lists_every_column_but_preview_with_whether_it_shows() {
+        let mut d = delegate();
+        d.toggle_column("size");
+        let menu: Vec<(String, bool)> = d.column_menu().into_iter().map(|(_, name, shown)| (name.to_string(), shown)).collect();
+        let names: Vec<&str> = menu.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["Project", "Started", "Updated", "Prompts", "Cost", "Ctx", "In", "Hit", "Hit%", "Out", "Size", "Kind"]);
+        assert_eq!(menu.iter().filter(|(_, shown)| !shown).map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["Size"]);
+    }
+
+    #[test]
+    fn the_preview_width_survives_hiding_and_showing_columns() {
+        let mut d = delegate();
+        d.set_preview_width(px(300.));
+        d.toggle_column("size");
+        d.set_search(true);
+        d.toggle_column("size");
+        assert_eq!(d.preview_width(), px(300.));
     }
 
     fn cached(id: &str, updated_at: i64, read: u64, other_input: u64) -> Arc<SessionRow> {
