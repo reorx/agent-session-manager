@@ -1,6 +1,6 @@
 ---
 created: 2026-09-08
-updated: 2026-11-03
+updated: 2026-11-12
 tags:
   - claude-code
   - data-format
@@ -109,10 +109,12 @@ assistant 特有：`requestId`、`effort`、`message.model`、`message.id`、`me
 
 - **一次 API 响应会写成多条记录。** 每个内容块（thinking、text、tool_use）各一条 assistant 记录，它们的 `message.id`、`requestId` 相同，`usage` 完全相同。本机 117,536 条 assistant 记录只对应 53,525 次响应，不去重 token 会多算约 2.2 倍。去重键依次取 `message.id` → `requestId` → 记录 `uuid`。增量索引可能把同一次响应的几条记录切在两次扫描之间，所以去重要跨扫描进行。
 - **`usage` 的字段**：`input_tokens`（未命中缓存的输入）、`cache_creation_input_tokens` 及其细分 `cache_creation.ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens`、`cache_read_input_tokens`、`output_tokens`（含 thinking）、`server_tool_use.web_search_requests`、`speed`（`standard` / `fast`）、`service_tier`、`inference_geo`。没有细分字段的旧记录，缓存写入全按 5 分钟算。本机 `speed: fast` 有 422 条，`web_search_requests` 全为 0，`service_tier` 全为 standard，`inference_geo` 只有 `global` 和 `not_available`（没有要加价 1.1 倍的 US-only）。
+- **`usage.iterations`**：每次采样一项（`type` + 同一组 token 字段）。官方语义：服务端 compaction 时会多出一项 `type: "compaction"`，顶层字段不含它，计费要把各项加起来。2026-11-12 本机 112,734 次响应里 iterations 只有 0 或 1 项、全是 `message`，与顶层一致；例外是 3 次 Opus 5.5 响应顶层 token 全为 0（只有 `cache_creation` 细分不为 0），真实数字只在 `iterations[0]` 里。`fallback_credit`（拒答回退的抵扣）全为 null。
+- 官方口径的副本在 `kb/refs/`：价格与缓存倍率 `claude-api-pricing.md`，usage 字段与缓存规则 `claude-api-prompt-caching.md`，`iterations` `claude-api-compaction-threshold.md`，Claude Code 的 TTL 分桶和失效动作 `claude-code-prompt-caching.md`。
 - **`<synthetic>` 不是 API 调用**：`message.model == "<synthetic>"` 的记录是 Claude Code 自己写的（中断、报错），usage 全 0，不计价，也不算进模型列表。
 - **subagent 的花费不能忽略**：257 份 subagent transcript 有 5,545 次响应，cache read 6.16 亿 token、cache write 3,157 万 token，折合几百美元。它们的记录 `isSidechain = true`；主 transcript 里没有 sidechain 的 assistant 记录。
 - **`[1m]` 标记不可靠**：`message.model` 从不带 `[1m]`，`cost-state.modelUsage` 的键有时带（`claude-opus-5[1m]`）。带不带标记都有 session 超过 200K（最高 827K），所以 context 窗口先查模型目录、再查内置表，不看标记，规则见 §1。
-- **`cost-state` 不适合当费用来源**：1,636 份文件里有，其中 670 份 `totalCostUSD = 0`，更早的 session 没有这条记录；被 resume 过的 session 常常只记了最后一次运行（例：一个 session 的记录只覆盖了 32M cache read 里的 3.1M）。它确实包含 subagent 的费用，而且单次运行内的计算口径与官方价格一致（1 小时缓存写入按 2 倍输入价，两份抽样精确到小数点后 6 位）。按 usage 自算后，在 973 个 `cost-state` 非 0 的 session 上：61% 误差在 1% 以内、96% 在 10% 以内，合计相差 1.07%（自算偏低）。偏低推测来自 transcript 之外的调用（标题生成、auto mode 分类器、compact 等），未验证。
+- **`cost-state` 不适合当费用来源**：1,636 份文件里有，其中 670 份 `totalCostUSD = 0`，更早的 session 没有这条记录；被 resume 过的 session 常常只记了最后一次运行（例：一个 session 的记录只覆盖了 32M cache read 里的 3.1M）。它确实包含 subagent 的费用，而且单次运行内的计算口径与官方价格一致（1 小时缓存写入按 2 倍输入价，两份抽样精确到小数点后 6 位）。按 usage 自算后，在 973 个 `cost-state` 非 0 的 session 上：61% 误差在 1% 以内、96% 在 10% 以内，合计相差 1.07%（自算偏低）。偏低来自 transcript 之外的调用：Claude Code 文档写明 compact 的摘要请求、session 标题、部分辅助请求都是主对话之外的独立请求（`kb/refs/claude-code-prompt-caching.md`「Which TTL each request gets」），它们的 usage 不进 transcript；各自占多少未量过。2026-11-12 复测合计相差 −1.95%（1,954 个 session）。
 
 ## 3. 派生字段（每个 session 一行）
 

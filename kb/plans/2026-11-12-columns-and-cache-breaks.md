@@ -87,6 +87,7 @@ tags:
 
 - 表头格子内容上的 `context_menu` 与表格整体的行菜单都在冒泡阶段响应右键；行菜单在右键时读 `right_clicked_row`，若残留上次的行会多弹一个菜单。先清空再试，不行就改为在 View 菜单里放列开关。
 - 原因判断依赖记录里的时间戳；resume 进来的 session 第一条调用与上一次运行间隔很长，会归为空闲，这是对的。
+- 失效原因的官方依据：Claude Code 列出的会 / 不会让缓存失效的操作、主对话与其他请求的 TTL 分桶见 `kb/refs/claude-code-prompt-caching.md`；缓存寿命从请求开始时算、读命中会续期见 `kb/refs/claude-api-prompt-caching.md`。
 
 ### 实现与计划的差异
 

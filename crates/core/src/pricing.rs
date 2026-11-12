@@ -1,7 +1,8 @@
 //! List prices of Claude models, used to price every API response in a transcript.
 //!
 //! Checked against https://platform.claude.com/docs/en/about-claude/pricing on 2026-10-23;
-//! Fable 5.2 / Mythos 5.2 added from Anthropic's model list on 2026-11-10.
+//! Fable 5.2 / Mythos 5.2 added from Anthropic's model list on 2026-11-10; every row re-checked
+//! on 2026-11-12 against the copy in `kb/refs/claude-api-pricing.md`.
 //! Stored costs are computed at index time: after changing a price, bump
 //! `index::db::SCHEMA_VERSION` so the index is rebuilt (about 4 seconds).
 //! Context windows prefer Claude Code's cached catalog, then this table. They are resolved

@@ -97,6 +97,7 @@ M0–M4 完成（M4 详情面板 2026-10-27，总 plan `kb/plans/2026-10-26-m4-d
 
 ## Documentation
 
+- `kb/refs/` — 官方文档副本（2026-11-12）：Claude API 价格与缓存倍率、API prompt caching（usage 字段、TTL 从请求开始算）、compaction 的 `usage.iterations`、Claude Code 的 prompt caching（TTL 分桶、会让缓存失效的操作）；改 `pricing.rs`、用量解析或缓存失效判定前读，与线上页面不一致时以线上为准
 - `kb/plans/2026-11-12-columns-and-cache-breaks.md` — 列开关、Metadata 命中率、回合卡缓存失效：失效的判定与原因、本机 30 天的分布、表头菜单的实现与验收；改表格列、`conversation.rs::cache_check` 或回合卡说明行前读
 - `kb/plans/2026-11-10-cost-analysis.md` — 成本分析：主模型定义、换模型计价口径（只换主模型、fast 与长 prompt 的处理）、分组用量存表的原因、本机 Opus 5.5 → Fable 5.2 / Sonnet 5.5 / Haiku 5.5 实测；改 Cost tab、Model 过滤或 `asm cost --as` 前读
 - `kb/plans/2026-11-03-context-window-from-catalog.md` — Context 窗口的目录格式、合并优先级、刷新与验收；改模型目录读取或窗口来源前读

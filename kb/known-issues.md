@@ -67,8 +67,20 @@
 ## 费用：自算费用不含记录文件之外的 API 调用，个别 session 偏低 10% 以上
 
 - 记录：2026-10-23（`kb/plans/2026-10-23-cost-context-columns.md`）
-- Cost 列按 transcript 里每次 API 响应的 usage 计价。在 973 个 Claude Code 自己记了费用（`cost-state`）的 session 上，96% 与它相差不到 10%，但有 22 个自算偏低超过 10%，合计偏低约 1%。推测是标题生成、auto mode 分类器、compact 等不写进 transcript 的调用，未验证。按项目或月份看合计时，结果会比实际账单略低。
-- 处理方向：找一个偏低的 session，对照 Claude Code 的调用记录确认缺的是哪类调用；如果是固定开销，可以按调用次数补估。
+- Cost 列按 transcript 里每次 API 响应的 usage 计价。2026-11-12 在 1,954 个 Claude Code 自己记了费用（`cost-state`）的 session 上，97.6% 与它相差不到 10%，34 个自算偏低超过 10%，合计偏低 1.95%。Claude Code 文档写明 compact 的摘要请求（会把整段历史读一遍）、session 标题和部分辅助请求是主对话之外的独立请求（`kb/refs/claude-code-prompt-caching.md`），它们不写进 transcript；各类各占多少未量过。按项目或月份看合计时，结果会比实际账单略低。
+- 处理方向：找一个偏低的 session，对照 `cost-state.modelUsage` 确认缺的是哪类调用；compact 的摘要请求可按 compact 次数和当时的 context 大小补估。
+
+## 费用与缓存失效：顶层 usage 全为 0 的响应漏算费用，回合卡误报一次失效、漏报下一次
+
+- 记录：2026-11-12（对照官方 prompt caching 文档核对用量解析时发现；`tmp/cache_audit.py`、`tmp/cache-breaks-causes.py`）
+- 少数响应的 `usage` 顶层 `input` / `cache_read` / `output` / `cache_creation_input_tokens` 全为 0，真实数字只在 `usage.iterations[0]` 里（本机 60 天 3 次，都是 Opus 5.5，读缓存约 36 万 token）。`parse.rs::tokens_of` 只读顶层：这次响应只按 `cache_creation` 细分计了缓存写入，读缓存和输出没计价；`conversation.rs::cache_check` 把它当成「读回 0」报一次失效（不明），又因为它的 prompt 只剩几千 token，紧接着那次真正只读回约 29k 的失效被漏掉。
+- 处理方向：`iterations` 非空时按各项求和（官方语义下服务端 compaction 的那一项也要计费，见 `kb/refs/claude-api-compaction-threshold.md`），context 和失效判定取最后一个 `message` 项；改解析后提升 `SCHEMA_VERSION`。
+
+## 回合卡：`/rewind` 之后的第一次调用被标成缓存失效
+
+- 记录：2026-11-12（`tmp/cache-breaks-causes.py`，本机 60 天 38 次「不明」里 5 次）
+- `cache_check` 按文件顺序和上一次调用比。rewind 后新消息的 `parentUuid` 指回更早的节点，这次调用只读回 rewind 点之前的前缀，被丢掉的那段算进了「少读」，回合卡显示一次原因不明的失效。Claude Code 文档说明 rewind 会命中更早的缓存条目，不是失效（`kb/refs/claude-code-prompt-caching.md`「Rewinding the conversation」）。
+- 处理方向：沿 `parentUuid` 找到这次调用的祖先调用，和它的 prompt 比；compact 之后链会断开，仍按 compact 处理。
 
 ## 费用：价格表写在代码里，新模型上线后它的调用不计价，表格不提示
 

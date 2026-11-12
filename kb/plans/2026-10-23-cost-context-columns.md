@@ -65,7 +65,7 @@ tags:
 - `message.model` 从不带 `[1m]`；有 session 超过 200K（最高 827K），所以窗口按模型查表：Haiku 4.5 为 200K，其余 1M。1,233 个 session 里 379 个结束时超过 200K。2026-11-03 起窗口优先取 Claude Code 模型目录，见 [目录窗口计划](2026-11-03-context-window-from-catalog.md)。
 - `speed: "fast"` 422 条；`web_search_requests` 全为 0；`service_tier` 全为 standard。
 
-价格（$/MTok，核对来源和日期写在 `pricing.rs` 注释里）：
+价格（$/MTok，核对来源和日期写在 `pricing.rs` 注释里；官方页面副本 `kb/refs/claude-api-pricing.md`，2026-11-12 逐行复核一致）：
 
 下表的「窗口」列是内置回退值。2026-11-03 起窗口优先取 Claude Code 模型目录，见 [目录窗口计划](2026-11-03-context-window-from-catalog.md)，价格来源不变。
 
