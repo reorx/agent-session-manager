@@ -40,9 +40,9 @@ tags:
 | 模块 | 状态 | 说明 |
 |---|---|---|
 | Session 收藏 | ✅ | 2026-10-26 完成：⌘D、Favorites 菜单、行右键和详情星标；快照优先、仅收藏过滤、目录迁移、最后副本确认，见 `../plans/2026-10-26-favorites.md` |
-| Session 表格 | ✅ | 11 列（Project / Preview / Started / Updated / Prompts / Cost / Ctx / In / Out / Size / Kind）、36px 两行、虚拟滚动、行选中、表头排序；Preview 列随窗口自适应 |
+| Session 表格 | ✅ | 13 列（Project / Preview / Started / Updated / Prompts / Cost / Ctx / In / Hit / Hit% / Out / Size / Kind）、36px 两行、虚拟滚动、行选中、表头排序；Preview 列随窗口自适应 |
 | 费用与 context | ✅ | Cost 按 token 用量和官方价格自算（含 subagent），Ctx 是结束时的 context 占用；状态栏合计当前显示行的费用；`asm cost` 命令行同样可用，见 `../plans/2026-10-23-cost-context-columns.md`。2026-11-03 起窗口优先取 Claude Code 本机模型目录，启动或扫描后生效，无需重建索引；`asm cost --windows` 可对比窗口与 Ctx 差异 |
-| 成本分析 | ✅ | 2026-11-10：工具栏 Model 下拉按主模型（花费最高的模型）过滤；In / Out 列；详情 Cost tab 列出主模型单价和按 token 种类的费用，可换成另一个模型（默认 Fable 5.2）看同样 token 下的费用与变化，其他模型原价计入；Cost tab 打开时状态栏给出当前所有行换模型后的合计；`asm cost --model … --as …` 同样可用，见 `../plans/2026-11-10-cost-analysis.md` |
+| 成本分析 | ✅ | 2026-11-10：工具栏 Model 下拉按主模型（花费最高的模型）过滤；In / Out 列，2026-11-12 加缓存命中的 Hit / Hit% 列；详情 Cost tab 列出主模型单价和按 token 种类的费用，可换成另一个模型（默认 Fable 5.2）看同样 token 下的费用与变化，其他模型原价计入；Cost tab 打开时状态栏给出当前所有行换模型后的合计；`asm cost --model … --as …` 同样可用，见 `../plans/2026-11-10-cost-analysis.md` |
 | Preview 展示模式切换 | ✅ | 工具栏 Preview 下拉或 `cmd-1..4`，四种模式即时切换 |
 | 详情面板 | ✅ Metadata / ✅ Conversation / ✅ Cost / ✅ 操作入口 | 头部 + 三个 tab（Cost 见上方「成本分析」）；Metadata 为真实数据（含自算费用与 Claude Code 记录的费用、token 用量、context、时长、模型、权限模式、top 工具、修改过的文件）；Conversation 2026-10-27 完成 M4a：直接读记录文件，按回合卡显示全部对话（工具调用、thinking、AUTO、compact、打断与 API 错误），命中在哪都能跳过去，扫描期间照常显示，70MB 的 session 首帧 45–79ms（release，页缓存热；冷的一般 150–160ms）。M4b 同日完成：标题行操作按钮（收藏、复制 resume 命令、复制 ID、在 Finder 中显示、打开项目目录、导出 TXT），表格右键菜单提供同一组操作，`⌘C` / `⇧⌘C`；History session 显示 history.jsonl 里的 prompt 卡片；代码块是等宽框、行内代码等宽浅灰底；`[` / `]` 按回合跳转（`../plans/2026-10-26-m4-detail-panel.md`） |
 | 分栏与折叠 | ✅ | 拖拽调宽，快捷键折叠 |
@@ -92,10 +92,11 @@ tags:
 | Cost | session 整个生命周期的费用（含 subagent），如 `$3.42`；算不出来显示 `—` | 是；没有费用的视为最低，降序时排在最后 |
 | Ctx | 结束时 context 占用：最后一次主线调用的输入 token（含缓存）÷ 该模型的窗口，如 `41%`、`<1%`；窗口优先取 Claude Code 本机缓存的模型目录，缺失时退回内置表 | 是；没有数据的视为最低，降序时排在最后 |
 | In / Out | 全部输入 token（未缓存 + 缓存写 + 缓存读，含 subagent）/ 输出 token，如 `13.1M` / `120k`；没有调用显示 `—` | 是 |
+| Hit / Hit% | 缓存命中：从 prompt 缓存读出的输入 token（含 subagent），以及它占 In 的比例，如 `197.9M` / `99%`。Hit% 向下取整，只有全部命中才显示 `100%`，命中不到 1% 显示 `<1%`，一次都没命中是 `0%`；没有调用显示 `—` | 是；Hit% 没有数据的视为最低 |
 | Size | 记录文件大小 | 是 |
 | Kind | 来源徽章：普通 CLI 不标记；**SDK** / **BG**（后台）/ **HIST**（记录已被清理，仅剩历史 prompt） | 是 |
 
-Branch、Tools、ID 不作为列，只在详情面板的 Metadata 里显示（设计稿把表格收敛到 7 列，Cost、Ctx、In、Out 是后加的）。
+Branch、Tools、ID 不作为列，只在详情面板的 Metadata 里显示（设计稿把表格收敛到 7 列，Cost、Ctx、In、Hit、Hit%、Out 是后加的）。
 
 **费用怎么算**：每次 API 调用的 token 用量（输入、输出、5 分钟 / 1 小时缓存写入、缓存读取、fast mode）乘以官方价格，subagent 的调用计入它所属的 session。Claude Code 自己也会记一个数（`cost-state`），但很多 session 没有这条记录或记成 0，被 resume 过的 session 往往只记了最后一次运行，所以只在详情里作为对照。本机实测：Claude Code 记了费用的 973 个 session 里 96% 与自算相差不到 10%，合计相差约 1%。自算不含记录文件之外的调用（标题生成、分类器等）。新模型上线后要更新价格表，在此之前它的调用不计价，详情里会列出这些模型。Preview 列第一行是标题，第二行按展示模式显示灰色预览（换行显示为 `⏎`，截到 240 字）。没有任何 prompt 的空 session 默认隐藏，View 菜单可切换。
 

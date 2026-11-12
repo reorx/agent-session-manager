@@ -98,6 +98,12 @@ pub struct SessionRow {
     pub input_fmt: SharedString,
     pub output_tokens: u64,
     pub output_fmt: SharedString,
+    /// Input tokens read from the prompt cache: the Hit column.
+    pub cache_read_tokens: u64,
+    pub cache_read_fmt: SharedString,
+    /// Their share of `input_tokens`: the Hit% column; `None` without any input.
+    pub cache_hit: Option<f32>,
+    pub cache_hit_fmt: SharedString,
     /// The model that cost the most (`cost::primary_model`); `None` without any API call.
     pub primary_model: Option<SharedString>,
     /// API calls grouped by what decides their price, for the Cost tab and the projected total.
@@ -190,7 +196,18 @@ fn context_detail(s: &SessionSummary, catalog: &ModelCatalog) -> SharedString {
     text.into()
 }
 
-/// A token count of the In / Out columns: a dash for a session that sent nothing.
+/// The Hit% column, rounded down so that `100%` means every input token was a cache hit.
+/// Integer math: `0.29 * 100.0` is 28.999….
+fn format_hit(s: &SessionSummary) -> SharedString {
+    let (read, total) = (s.tokens_cache_read, s.input_tokens_total());
+    match total {
+        0 => NONE.into(),
+        _ if read > 0 && read * 100 < total => "<1%".into(),
+        _ => format!("{}%", read * 100 / total).into(),
+    }
+}
+
+/// A token count of the In / Hit / Out columns: a dash for a session that sent nothing.
 fn format_tokens(n: u64, s: &SessionSummary) -> SharedString {
     if s.input_tokens_total() == 0 { NONE.into() } else { fmt_tokens(n).into() }
 }
@@ -295,6 +312,10 @@ impl SessionRow {
             input_fmt: format_tokens(s.input_tokens_total(), s),
             output_tokens: s.tokens_out,
             output_fmt: format_tokens(s.tokens_out, s),
+            cache_read_tokens: s.tokens_cache_read,
+            cache_read_fmt: format_tokens(s.tokens_cache_read, s),
+            cache_hit: s.cache_hit_ratio().map(|r| r as f32),
+            cache_hit_fmt: format_hit(s),
             primary_model: primary_model(&s.model_usage).map(|m| SharedString::from(m.to_string())),
             model_usage: s.model_usage.clone(),
             unpriced: s.unpriced_models.iter().cloned().collect::<Vec<_>>().join(", ").into(),
@@ -1060,6 +1081,32 @@ pub mod tests {
         assert_eq!((r.output_tokens, r.output_fmt.as_ref()), (120_000, "120k"));
         let empty = builtin_row(&summary("e", "/p/a", 5000));
         assert_eq!((empty.input_fmt.as_ref(), empty.output_fmt.as_ref()), ("—", "—"), "a session without calls shows dashes");
+    }
+
+    fn cached(read: u64, other_input: u64) -> SessionRow {
+        let mut s = summary("s", "/p/a", 5000);
+        (s.tokens_in, s.tokens_cache_read) = (other_input, read);
+        builtin_row(&s)
+    }
+
+    #[test]
+    fn hit_counts_cache_reads_and_hit_percent_their_share_of_the_input() {
+        let r = cached(13_000_000, 140_012);
+        assert_eq!((r.cache_read_tokens, r.cache_read_fmt.as_ref()), (13_000_000, "13M"));
+        assert_eq!(r.cache_hit_fmt.as_ref(), "98%");
+        assert!((r.cache_hit.unwrap() - 0.989_344).abs() < 1e-5);
+        let empty = builtin_row(&summary("e", "/p/a", 5000));
+        assert_eq!((empty.cache_read_fmt.as_ref(), empty.cache_hit_fmt.as_ref(), empty.cache_hit), ("—", "—", None), "a session without calls shows dashes");
+    }
+
+    #[test]
+    fn hit_percent_rounds_down_so_only_a_perfect_session_reads_100() {
+        assert_eq!(cached(996, 4).cache_hit_fmt.as_ref(), "99%", "99.6% is not 100%");
+        assert_eq!(cached(1_000, 0).cache_hit_fmt.as_ref(), "100%");
+        assert_eq!(cached(5, 995).cache_hit_fmt.as_ref(), "<1%");
+        assert_eq!(cached(0, 1_000).cache_hit_fmt.as_ref(), "0%", "no hit at all is a number, not a dash");
+        assert_eq!(cached(0, 1_000).cache_read_fmt.as_ref(), "0");
+        assert_eq!(cached(290, 710).cache_hit_fmt.as_ref(), "29%", "0.29 * 100 in floating point is 28.999…");
     }
 
     #[test]

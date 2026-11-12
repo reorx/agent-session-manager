@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Launch the app with ASM_COST_AUTOPLAY and capture its window after every step of the scripted
 # Cost tab tour: Opus 5.5 sessions by context compared with Fable 5.2, then Sonnet 5.5; a session
-# with other models compared with Haiku 5.5; sorted by In. The app drives itself and the window is
-# captured by id, so nothing is typed or clicked and the clipboard is left alone.
+# with other models compared with Haiku 5.5; sorted by In, then by Hit% from the lowest. The app
+# drives itself and the window is captured by id, so nothing is typed or clicked and the clipboard
+# is left alone.
 # Runs on the real index with a throwaway view state. Usage: screenshot-cost.sh <binary> <out-dir>.
 set -euo pipefail
 
@@ -11,7 +12,7 @@ OUT=$2
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
 WINID="$ROOT/tmp/winid"
-STEPS=(opus-by-context as-sonnet other-models by-input)
+STEPS=(opus-by-context as-sonnet other-models by-input by-hit)
 
 mkdir -p "$OUT" "$ROOT/tmp"
 if [ ! -x "$WINID" ] || [ "$HERE/winid.swift" -nt "$WINID" ]; then

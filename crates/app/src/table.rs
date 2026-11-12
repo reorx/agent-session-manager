@@ -27,12 +27,15 @@ pub const PROMPTS_W: f32 = 58.;
 pub const COST_W: f32 = 62.;
 pub const CTX_W: f32 = 44.;
 pub const IN_W: f32 = 52.;
+/// Cache-read tokens and their share of In.
+pub const HIT_W: f32 = 52.;
+pub const HIT_PCT_W: f32 = 48.;
 pub const OUT_W: f32 = 48.;
 pub const SIZE_W: f32 = 60.;
 pub const KIND_W: f32 = 46.;
 /// Only there while a search is active.
 pub const MATCHES_W: f32 = 64.;
-const FIXED_COLS_W: f32 = PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + COST_W + CTX_W + IN_W + OUT_W + SIZE_W + KIND_W;
+const FIXED_COLS_W: f32 = PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + COST_W + CTX_W + IN_W + HIT_W + HIT_PCT_W + OUT_W + SIZE_W + KIND_W;
 pub const PREVIEW_MIN_W: f32 = 160.;
 pub const ROW_H: f32 = 36.;
 /// The row context menu (mockup 6), wide enough for the start of a resume command.
@@ -84,6 +87,8 @@ impl SessionTableDelegate {
             col("cost", "Cost", COST_W).text_right().sortable(),
             col("context", "Ctx", CTX_W).text_right().sortable(),
             col("input", "In", IN_W).text_right().sortable(),
+            col("cache_read", "Hit", HIT_W).text_right().sortable(),
+            col("cache_hit", "Hit%", HIT_PCT_W).text_right().sortable(),
             col("output", "Out", OUT_W).text_right().sortable(),
             col("size", "Size", SIZE_W).text_right().sortable(),
             col("kind", "Kind", KIND_W).sortable(),
@@ -285,6 +290,8 @@ impl SessionTableDelegate {
             "cost" => cmp_missing_low(a.cost, b.cost, f64::total_cmp),
             "context" => cmp_missing_low(a.context_pct, b.context_pct, f32::total_cmp),
             "input" => a.input_tokens.cmp(&b.input_tokens),
+            "cache_read" => a.cache_read_tokens.cmp(&b.cache_read_tokens),
+            "cache_hit" => cmp_missing_low(a.cache_hit, b.cache_hit, f32::total_cmp),
             "output" => a.output_tokens.cmp(&b.output_tokens),
             "size" => a.size.cmp(&b.size),
             "kind" => (a.kind as u8).cmp(&(b.kind as u8)),
@@ -466,6 +473,8 @@ impl TableDelegate for SessionTableDelegate {
             "cost" => self.mono_cell(row.cost_fmt.clone(), style::text(), right, cx),
             "context" => self.mono_cell(row.context_fmt.clone(), style::text_secondary(), right, cx),
             "input" => self.mono_cell(row.input_fmt.clone(), style::text_secondary(), right, cx),
+            "cache_read" => self.mono_cell(row.cache_read_fmt.clone(), style::text_secondary(), right, cx),
+            "cache_hit" => self.mono_cell(row.cache_hit_fmt.clone(), style::text_secondary(), right, cx),
             "output" => self.mono_cell(row.output_fmt.clone(), style::text_secondary(), right, cx),
             "size" => self.mono_cell(row.size_fmt.clone(), style::text_secondary(), right, cx),
             "kind" => match style::kind_badge(row.kind, cx) {
@@ -661,8 +670,26 @@ mod tests {
     #[test]
     fn cost_context_and_token_columns_sit_after_prompts() {
         let d = delegate();
-        assert_eq!(keys(&d), ["project", "preview", "started", "updated", "prompts", "cost", "context", "input", "output", "size", "kind"]);
-        assert_eq!(FIXED_COLS_W, PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + COST_W + CTX_W + IN_W + OUT_W + SIZE_W + KIND_W);
+        assert_eq!(keys(&d), ["project", "preview", "started", "updated", "prompts", "cost", "context", "input", "cache_read", "cache_hit", "output", "size", "kind"]);
+        assert_eq!(FIXED_COLS_W, PROJECT_W + STARTED_W + UPDATED_W + PROMPTS_W + COST_W + CTX_W + IN_W + HIT_W + HIT_PCT_W + OUT_W + SIZE_W + KIND_W);
+    }
+
+    fn cached(id: &str, updated_at: i64, read: u64, other_input: u64) -> Arc<SessionRow> {
+        let mut s = summary(id, "/p/x", updated_at);
+        (s.tokens_cache_read, s.tokens_cache_write) = (read, other_input);
+        Arc::new(builtin_row(&s))
+    }
+
+    #[test]
+    fn hit_sorts_by_cache_reads_and_hit_percent_by_share_with_rows_without_input_last() {
+        let mut d = delegate();
+        d.set_rows(vec![cached("a", 100, 900, 100), cached("b", 200, 0, 0), cached("c", 300, 5_000, 5_000), cached("d", 400, 0, 10)]);
+        d.set_sort("cache_read", ColumnSort::Descending);
+        assert_eq!(ids(&d), ["c", "a", "d", "b"]);
+        d.set_sort("cache_hit", ColumnSort::Descending);
+        assert_eq!(ids(&d), ["a", "c", "d", "b"], "90%, 50%, 0%, then the session without input");
+        d.set_sort("cache_hit", ColumnSort::Ascending);
+        assert_eq!(ids(&d), ["b", "d", "c", "a"], "a missing share sorts below 0%");
     }
 
     fn tokens(id: &str, updated_at: i64, input: u64, output: u64) -> Arc<SessionRow> {

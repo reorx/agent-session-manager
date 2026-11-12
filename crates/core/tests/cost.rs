@@ -91,3 +91,16 @@ fn nothing_to_compare_without_usage_or_with_an_unknown_target() {
     assert!(compare(&[], "claude-fable-5-2").is_none());
     assert!(compare(&[group("claude-opus-5-5", output(1))], "claude-opus-9").is_none());
 }
+
+#[test]
+fn the_cache_hit_ratio_is_the_share_of_input_read_from_the_cache() {
+    use agent_session_core::model::SessionSummary;
+    let mut s = SessionSummary::transcript("s", "-p", std::path::Path::new("/p/s.jsonl"));
+    assert_eq!(s.cache_hit_ratio(), None, "no input, nothing to hit");
+    (s.tokens_in, s.tokens_cache_write, s.tokens_cache_read) = (10, 190, 800);
+    assert!(close(s.cache_hit_ratio().unwrap(), 0.8), "reads over uncached + written + read");
+    s.tokens_cache_read = 0;
+    assert_eq!(s.cache_hit_ratio(), Some(0.0), "input that never hit the cache is 0, not missing");
+    s.tokens_out = 1_000;
+    assert_eq!(s.cache_hit_ratio(), Some(0.0), "output does not count");
+}

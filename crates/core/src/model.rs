@@ -243,6 +243,12 @@ impl SessionSummary {
     pub fn input_tokens_total(&self) -> u64 {
         self.tokens_in + self.tokens_cache_write + self.tokens_cache_read
     }
+
+    /// Share of the input read from the prompt cache; `None` when the session sent no input.
+    pub fn cache_hit_ratio(&self) -> Option<f64> {
+        let total = self.input_tokens_total();
+        (total > 0).then(|| self.tokens_cache_read as f64 / total as f64)
+    }
 }
 
 /// Token counts of one or more API responses, by how they are billed.

@@ -60,7 +60,7 @@ screenshot-search: build ## Run the scripted search session (text, next hit, CJK
 screenshot-detail: build ## Tour the Conversation tab (turn cards, steps, search hits, special cards, the 70MB session, history prompts, a code block, ] twice, Metadata) and capture up to 12 screenshots; types and clicks nothing
 	scripts/screenshot-detail.sh "$(BIN)" "$(SHOT_DIR)"
 
-screenshot-cost: build ## Tour the Cost tab (Opus 5.5 by context as Fable 5.2 and Sonnet 5.5, a session with other models as Haiku 5.5, sorted by In) and capture 4 screenshots; types and clicks nothing
+screenshot-cost: build ## Tour the Cost tab (Opus 5.5 by context as Fable 5.2 and Sonnet 5.5, a session with other models as Haiku 5.5, sorted by In, then by Hit% from the lowest) and capture 5 screenshots; types and clicks nothing
 	scripts/screenshot-cost.sh "$(BIN)" "$(SHOT_DIR)"
 
 bin: ## Print the path of the debug binary

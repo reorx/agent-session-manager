@@ -125,7 +125,7 @@ core 在索引时按「模型 × fast × 是否长 prompt」把 `api_usage` 分�
 
 ### 风险与待定
 
-- 列多了以后 Preview 变窄：默认 1440 宽、详情打开时不搜索没有横向滚动（截图 1–4）；搜索时多出 Matches 列，最右的 Kind 列会被挤出一部分，要横向滚动或拉宽窗口。
+- 列多了以后 Preview 变窄：默认 1440 宽、详情打开时不搜索没有横向滚动（截图 1–4）；搜索时多出 Matches 列，最右的 Kind 列会被挤出一部分，要横向滚动或拉宽窗口。2026-11-12 加了 Hit / Hit% 两列（+100px）后，详情打开时不搜索也会横向滚动，见 `kb/known-issues.md`。
 - 主模型按费用定，个别中途换模型的 session 会被归到花钱多的那个模型。
 - 预测只换单价、不换 token 数；Fable 5.2 与 Opus 5.5 分词器相同（据 Anthropic 文档推断 token 数基本不变），但轮数和输出长度会变，只能当价格参考。
 
@@ -140,3 +140,12 @@ core 在索引时按「模型 × fast × 是否长 prompt」把 `api_usage` 分�
 | Haiku 5.5 | $1,276 | −83% | 绝大多数调用 prompt 超过 100K，按 5 倍档计 |
 
 单个 session 换成 Fable 5.2 的涨幅：中位数 +58%，P10 +12%，P90 +99%，范围 +5% 到 +100%。缓存读占比越高涨得越少（83% context 的 m1-web +33%），缓存命中差、以缓存写和输出为主的短 session 接近翻倍。截图在 `tmp/2026-11-10-cost-analysis/`（`make screenshot-cost`）。
+
+### 后续：缓存命中列（2026-11-12）
+
+表格在 In 后面加 Hit、Hit% 两列：Hit 是缓存读 token（`SessionSummary.tokens_cache_read`，含 subagent），Hit% 是它占 In（未缓存 + 缓存写 + 缓存读）的比例，core `SessionSummary::cache_hit_ratio()`，没有输入时为 `None`。
+
+- **口径**：分母用 In 而不是「缓存读 + 缓存写」，与 Claude Code / Anthropic 文档的 cache hit rate 一致；Claude Code 的 session 未缓存输入通常只有几百到几千 token，两种口径差别很小。
+- **显示**：Hit% 用整数、向下取整（用 token 整数算，避免 `0.29 * 100.0 = 28.999…`），这样 `100%` 只表示全部命中；`(0, 1%)` 显示 `<1%`，`0` 显示 `0%`（有输入但一次没命中，和 `—` 区分）。按 Hit% 排序时没有数据的视为最低。
+- **本机分布**（1,854 个有用量的 session，`tmp/cache-hit-dist.sql`）：0% 74 个，低于 50% 309 个，50–90% 227 个，90–95% 186 个，95–99% 711 个，99% 及以上 421 个，没有 100%；合计 98.05%。0% 的多是只调一次的 SDK session（第一次调用只能写缓存）。
+- **验收**：`make screenshot-cost` 加第 5 步「按 Hit% 升序」，截图在 `tmp/2026-11-12-cache-hit-columns/`。m1-web 的 Hit 197.9M / In 199.3M 显示 `99%`，与 Cost tab 的 Cache read 一致。

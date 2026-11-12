@@ -10,6 +10,7 @@ use agent_session_core::format::{fmt_change, fmt_tokens, fmt_usd};
 use agent_session_core::pricing::{CURRENT_MODELS, EARLIER_MODELS, LONG_PROMPT, ModelPrice, display_name, price};
 use gpui_kit::component::menu::{DropdownMenu, PopupMenu};
 use gpui_kit::component::scroll::ScrollableElement;
+use gpui_kit::component::table::ColumnSort;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::*;
 
@@ -235,14 +236,15 @@ type Step = Box<dyn Fn(&mut AppRoot, &mut Context<AppRoot>) -> bool>;
 impl AppRoot {
     /// Scripted tour of the Cost tab for screenshots (`make screenshot-cost`): Opus 5.5 sessions
     /// by context, compared with Fable 5.2 then Sonnet 5.5; a session whose subagents ran on
-    /// another model, compared with Haiku 5.5; the same filter sorted by In. Once the start-up
+    /// another model, compared with Haiku 5.5; the same filter sorted by In, then by Hit% from the
+    /// lowest. Once the start-up
     /// scan is over, every step prints `autoplay-cost: <step>` (or `… skipped`) and holds the
     /// view for a capture.
     pub(crate) fn cost_autoplay(&self, window: &Window, cx: &mut Context<Self>) -> Task<()> {
         let steps: Vec<(&str, Step)> = vec![
             ("opus-by-context", Box::new(|this, cx| {
                 this.set_model_filter(Some("claude-opus-5-5".into()), cx);
-                this.autoplay_sort_and_select("context", cx);
+                this.autoplay_sort_and_select("context", ColumnSort::Descending, cx);
                 this.set_detail_tab(DetailTab::Cost, cx);
                 this.set_compare_model(DEFAULT_COMPARE_MODEL.into(), cx);
                 true
@@ -261,8 +263,12 @@ impl AppRoot {
                 true
             })),
             ("by-input", Box::new(|this, cx| {
-                this.autoplay_sort_and_select("input", cx);
+                this.autoplay_sort_and_select("input", ColumnSort::Descending, cx);
                 this.set_compare_model(DEFAULT_COMPARE_MODEL.into(), cx);
+                true
+            })),
+            ("by-hit", Box::new(|this, cx| {
+                this.autoplay_sort_and_select("cache_hit", ColumnSort::Ascending, cx);
                 true
             })),
         ];
@@ -293,9 +299,9 @@ impl AppRoot {
         })
     }
 
-    fn autoplay_sort_and_select(&mut self, key: &str, cx: &mut Context<Self>) {
+    fn autoplay_sort_and_select(&mut self, key: &str, sort: ColumnSort, cx: &mut Context<Self>) {
         self.table.update(cx, |table, cx| {
-            table.delegate_mut().set_sort(key, gpui_kit::component::table::ColumnSort::Descending);
+            table.delegate_mut().set_sort(key, sort);
             table.refresh(cx);
             table.scroll_to_row(0, cx);
         });
