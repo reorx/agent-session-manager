@@ -36,21 +36,21 @@ asm_args=(list -d 30 code -n 5000); compare "list-code-30d" -L code -d 30 -n 500
 
 echo "== session"
 for sid in $(ls ~/.claude/projects/-Users-reorx-Code-scripts/*.jsonl | head -3 | xargs -n1 basename | cut -c1-8); do
-  asm_args=(session "$sid"); compare "session-$sid" -s "$sid"
+  asm_args=(session-old "$sid"); compare "session-$sid" -s "$sid"
 done
 
 echo "== search"
-asm_args=(search grafana -d 30 -n 10000);                        compare "search-grafana" grafana -d 30 -n 10000
-asm_args=(search 重构 -d 30 -n 10000);                            compare "search-cjk" 重构 -d 30 -n 10000
-asm_args=(search 'docker compose' -d 60 -l tool_use:Bash -n 10000); compare "search-bash" 'docker compose' -d 60 -l tool_use:Bash -n 10000
-asm_args=(search Traceback -d 30 -l tool_result -C 200 -n 10000);   compare "search-traceback" Traceback -d 30 -l tool_result -C 200 -n 10000
-asm_args=(search worktree -d 14 -r user -r assistant -n 10000);    compare "search-roles" worktree -d 14 -r user -r assistant -n 10000
-asm_args=(search '[Pasted text' -d 30 -n 10000);                   compare "search-literal" '[Pasted text' -d 30 -n 10000
-asm_args=(search 'envops (show|copy|set|list-keys)' -d 60 -n 10000); compare "search-regex" 'envops (show|copy|set|list-keys)' -d 60 -n 10000
-asm_args=(search TODO --case-sensitive -d 14 -n 10000);            compare "search-case" TODO --case-sensitive -d 14 -n 10000
-asm_args=(search resume -r user -d 0 -n 50);                       compare "search-limit" resume -r user -d 0 -n 50
-asm_args=(search 'the user' -l thinking -d 30 -n 10000);           compare "search-thinking" 'the user' -l thinking -d 30 -n 10000
-asm_args=(search curl -p tenderbuddy -d 60 -n 10000);              compare "search-project" curl -p tenderbuddy -d 60 -n 10000
+asm_args=(search-old grafana -d 30 -n 10000);                        compare "search-grafana" grafana -d 30 -n 10000
+asm_args=(search-old 重构 -d 30 -n 10000);                            compare "search-cjk" 重构 -d 30 -n 10000
+asm_args=(search-old 'docker compose' -d 60 -l tool_use:Bash -n 10000); compare "search-bash" 'docker compose' -d 60 -l tool_use:Bash -n 10000
+asm_args=(search-old Traceback -d 30 -l tool_result -C 200 -n 10000);   compare "search-traceback" Traceback -d 30 -l tool_result -C 200 -n 10000
+asm_args=(search-old worktree -d 14 -r user -r assistant -n 10000);    compare "search-roles" worktree -d 14 -r user -r assistant -n 10000
+asm_args=(search-old '[Pasted text' -d 30 -n 10000);                   compare "search-literal" '[Pasted text' -d 30 -n 10000
+asm_args=(search-old 'envops (show|copy|set|list-keys)' -d 60 -n 10000); compare "search-regex" 'envops (show|copy|set|list-keys)' -d 60 -n 10000
+asm_args=(search-old TODO --case-sensitive -d 14 -n 10000);            compare "search-case" TODO --case-sensitive -d 14 -n 10000
+asm_args=(search-old resume -r user -d 0 -n 50);                       compare "search-limit" resume -r user -d 0 -n 50
+asm_args=(search-old 'the user' -l thinking -d 30 -n 10000);           compare "search-thinking" 'the user' -l thinking -d 30 -n 10000
+asm_args=(search-old curl -p tenderbuddy -d 60 -n 10000);              compare "search-project" curl -p tenderbuddy -d 60 -n 10000
 
 echo
 echo "$pass passed, $fail failed; outputs in $OUT"

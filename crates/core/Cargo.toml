@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "asm"
-path = "src/bin/asm.rs"
+path = "src/bin/asm/main.rs"
 
 [[bin]]
 name = "transcript-reader"

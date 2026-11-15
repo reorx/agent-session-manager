@@ -18,6 +18,17 @@ pub struct Db {
     path: Option<PathBuf>,
 }
 
+/// True when `error` comes from SQLite finding the database locked by another connection
+/// (`SQLITE_BUSY` / `SQLITE_LOCKED`), e.g. the CLI scanning while the app writes the index.
+pub fn is_busy(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+            .is_some_and(|code| matches!(code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
+    })
+}
+
 /// Per-file bookkeeping for incremental scans.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexState {
@@ -198,6 +209,13 @@ impl Db {
 
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    /// How long a statement waits for another connection's lock before failing as busy
+    /// (rusqlite's default is 5 s).
+    pub fn set_busy_timeout(&self, timeout: std::time::Duration) -> Result<()> {
+        self.conn.busy_timeout(timeout)?;
+        Ok(())
     }
 
     pub fn path(&self) -> Option<&Path> {

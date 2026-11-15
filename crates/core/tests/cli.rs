@@ -11,7 +11,8 @@ fn asm(sb: &Sandbox) -> Command {
         .env("ASM_DB", sb.db_path())
         .env("TZ", "UTC")
         .env("NO_COLOR", "1")
-        .env_remove("CLAUDE_CONFIG_DIR");
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CLAUDE_CODE_SESSION_ID");
     cmd
 }
 
@@ -110,28 +111,28 @@ fn list_includes_project_directories_without_transcripts_in_name_order() {
 }
 
 #[test]
-fn session_looks_up_by_id_prefix_across_transcripts_and_history() {
+fn session_old_looks_up_by_id_prefix_across_transcripts_and_history() {
     let sb = sandbox();
-    let out = asm(&sb).args(["session", "4444"]).output().unwrap();
+    let out = asm(&sb).args(["session-old", "4444"]).output().unwrap();
     assert!(out.status.success());
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         format!("-Users-me-Code-alpha\n\n2026-08-20 01:00  {S4}  4 prompts, updated 2026-08-20 02:30 [history only]\n    Fix the flaky test\n    \n    line1\n    line2\n    line3\n\n")
     );
-    let out = asm(&sb).args(["session", "3333"]).output().unwrap();
+    let out = asm(&sb).args(["session-old", "3333"]).output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.starts_with("-Users-me-Code-beta\n\n2026-09-10 02:00  33333333"));
     assert!(text.contains("    帮我重构一下解析器，处理嵌套数组\n"));
 
-    let out = asm(&sb).args(["session", "zzz"]).output().unwrap();
+    let out = asm(&sb).args(["session-old", "zzz"]).output().unwrap();
     assert_eq!(out.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&out.stderr).contains("no session matches 'zzz'"));
 }
 
 #[test]
-fn search_prints_matches_grouped_per_transcript_with_a_summary() {
+fn search_old_prints_matches_grouped_per_transcript_with_a_summary() {
     let sb = sandbox();
-    let out = asm(&sb).args(["search", "parser", "-d", "0"]).output().unwrap();
+    let out = asm(&sb).args(["search-old", "parser", "-d", "0"]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let expected = format!(
         "
@@ -150,9 +151,10 @@ fn search_prints_matches_grouped_per_transcript_with_a_summary() {
 }
 
 #[test]
-fn search_renders_tool_calls_on_several_lines_and_highlights_with_ansi() {
+fn search_old_renders_tool_calls_on_several_lines_and_highlights_with_ansi() {
     let sb = sandbox();
-    let out = asm(&sb).args(["search", "cargo", "-d", "0", "-l", "tool_use:Bash"]).env_remove("NO_COLOR").output().unwrap();
+    // `asm()` sets NO_COLOR=1: an explicit `--color always` wins over it
+    let out = asm(&sb).args(["search-old", "cargo", "-d", "0", "-l", "tool_use:Bash", "--color", "always"]).output().unwrap();
     let raw = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(raw.contains("\x1b[1;31mcargo\x1b[0m"), "match is highlighted: {raw:?}");
     let text = strip_ansi(&raw);
@@ -161,25 +163,86 @@ fn search_renders_tool_calls_on_several_lines_and_highlights_with_ansi() {
 }
 
 #[test]
-fn search_reports_the_limit_and_the_empty_range() {
+fn output_to_a_pipe_has_no_colors_unless_asked_for() {
     let sb = sandbox();
-    let out = asm(&sb).args(["search", "e", "-d", "0", "-n", "1"]).output().unwrap();
+    let piped = |args: &[&str]| {
+        let out = asm(&sb).args(args).env_remove("NO_COLOR").output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        out.stdout.contains(&0x1b)
+    };
+    for args in [&["list", "alpha"][..], &["search-old", "cargo", "-d", "0"], &["session-old", "1111"], &["cost"]] {
+        assert!(!piped(args), "{args:?} printed an escape code into a pipe");
+    }
+    assert!(piped(&["list", "alpha", "--color", "always"]));
+    assert!(!piped(&["--color", "never", "list", "alpha"]));
+    assert!(!piped(&["list", "alpha", "--color", "always", "--no-color"]), "--no-color is --color never");
+    assert!(!piped(&["--no-color", "list", "alpha", "--color", "always"]), "and wins over --color wherever it is");
+}
+
+#[test]
+fn the_old_search_and_session_answer_to_their_new_names_only() {
+    let sb = sandbox();
+    let out = asm(&sb).args(["search-old", "parser", "-d", "0"]).output().unwrap();
+    assert!(out.status.success());
+    let out = asm(&sb).args(["session-old", "1111"]).output().unwrap();
+    assert!(out.status.success());
+    let help = asm(&sb).arg("--help").output().unwrap();
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("search-old") && help.contains("session-old"), "{help}");
+}
+
+/// What the app does while it writes the index: hold the write lock.
+fn hold_write_lock(sb: &Sandbox) -> rusqlite::Connection {
+    let app = rusqlite::Connection::open(sb.db_path()).unwrap();
+    app.execute_batch("BEGIN IMMEDIATE").unwrap();
+    app
+}
+
+#[test]
+fn a_busy_index_skips_the_refresh_and_answers_from_what_is_indexed() {
+    let sb = sandbox();
+    asm(&sb).arg("index").assert().success();
+    let new_id = "77777777-aaaa-4bbb-8ccc-000000000007";
+    std::fs::write(sb.transcript(ALPHA, new_id), format!(
+        "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"brand new\"}},\"uuid\":\"u7\",\"timestamp\":\"2026-09-15T00:00:00.000Z\",\"sessionId\":\"{new_id}\",\"cwd\":\"/Users/me/Code/alpha\"}}\n"
+    )).unwrap();
+    let app = hold_write_lock(&sb);
+
+    let out = asm(&sb).args(["list", "alpha"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "index busy, results may miss the last few minutes\n");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.starts_with("-Users-me-Code-alpha (4 sessions, 3 with transcript)\n") && !text.contains(new_id), "answered from the index as it was: {text}");
+
+    let out = asm(&sb).arg("index").output().unwrap();
+    assert_eq!(out.status.code(), Some(1), "`asm index` exists to write, so it fails");
+
+    app.execute_batch("COMMIT").unwrap();
+    let out = asm(&sb).args(["list", "alpha"]).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert!(String::from_utf8_lossy(&out.stdout).contains(new_id), "the next refresh catches up");
+}
+
+#[test]
+fn search_old_reports_the_limit_and_the_empty_range() {
+    let sb = sandbox();
+    let out = asm(&sb).args(["search-old", "e", "-d", "0", "-n", "1"]).output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("(showing first 1)"), "{text}");
-    let out = asm(&sb).args(["search", "parser", "-d", "0.0001"]).output().unwrap();
+    let out = asm(&sb).args(["search-old", "parser", "-d", "0.0001"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stdout), "no sessions found in the given range\n");
 }
 
 #[test]
-fn search_via_the_index_lists_sessions_with_hit_counts() {
+fn search_old_via_the_index_lists_sessions_with_hit_counts() {
     let sb = sandbox();
-    let out = asm(&sb).args(["search", "--index", "parser", "-r", "user"]).output().unwrap();
+    let out = asm(&sb).args(["search-old", "--index", "parser", "-r", "user"]).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains(&format!("-Users-me-Code-alpha {S1}  (updated 2026-09-01 15:00, 1 matches)")), "{text}");
     assert!(text.contains("Please refactor the parser"), "{text}");
     assert!(text.contains("1 matches in 1 sessions"), "{text}");
-    let out = asm(&sb).args(["search", "--index", "谢谢"]).output().unwrap();
+    let out = asm(&sb).args(["search-old", "--index", "谢谢"]).output().unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).contains("1 matches in 1 sessions"));
 }
 
@@ -312,7 +375,7 @@ fn favorites_directory_migrates_and_roots_are_guarded() {
     let sb = sandbox(); asm(&sb).args(["favorite", "1111"]).assert().success();
     let new = sb.tmp.path().join("moved");
     asm(&sb).arg("favorites-dir").arg(&new).assert().success();
-    asm(&sb).args(["session", "1111"]).assert().success().stdout(predicates::str::contains(new.to_string_lossy().as_ref()));
+    asm(&sb).args(["session-old", "1111"]).assert().success().stdout(predicates::str::contains(new.to_string_lossy().as_ref()));
     asm(&sb).arg("index").env("ASM_FAVORITES_DIR", sb.tmp.path().join("other")).assert().failure().stderr(predicates::str::contains("index --rebuild"));
 }
 

@@ -4,7 +4,7 @@
 mod common;
 
 use agent_session_core::claude::parse::parse_transcript;
-use agent_session_core::index::{Db, Indexer, ListFilter, Order, SCHEMA_VERSION, ScanEvent};
+use agent_session_core::index::{Db, Indexer, ListFilter, Order, SCHEMA_VERSION, ScanEvent, is_busy};
 use agent_session_core::model::{Role, SessionSummary, Source};
 use common::*;
 
@@ -374,6 +374,31 @@ fn a_read_only_connection_searches_while_the_writer_keeps_the_index() {
     assert_eq!(reader.list_sessions(&Default::default()).unwrap().len(), db.list_sessions(&Default::default()).unwrap().len());
     assert!(reader.conn().execute("DELETE FROM sessions", []).is_err(), "the reader cannot write");
     assert!(Db::open_read_only(&sb.tmp.path().join("missing.sqlite")).is_err(), "and never creates an index");
+}
+
+#[test]
+fn a_scan_blocked_by_another_writer_fails_as_busy_and_leaves_the_index_answering() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    let before = db.list_sessions(&ListFilter::default()).unwrap().len();
+    let new_id = "77777777-aaaa-4bbb-8ccc-000000000007";
+    std::fs::write(sb.transcript(BETA, new_id), format!(
+        "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"brand new\"}},\"uuid\":\"u7\",\"timestamp\":\"2026-09-15T00:00:00.000Z\",\"sessionId\":\"{new_id}\",\"cwd\":\"/Users/me/Code/beta\"}}\n"
+    )).unwrap();
+    let app = rusqlite::Connection::open(sb.db_path()).unwrap();
+    app.execute_batch("BEGIN IMMEDIATE").unwrap();
+    db.set_busy_timeout(std::time::Duration::from_millis(50)).unwrap();
+
+    let error = Indexer::new(sb.claude.clone(), None).scan(&mut db, &mut |_| {}).unwrap_err();
+    assert!(is_busy(&error), "{error:#}");
+    assert_eq!(db.list_sessions(&ListFilter::default()).unwrap().len(), before, "nothing of the blocked scan was kept");
+    assert!(db.session(new_id).unwrap().is_none());
+
+    app.execute_batch("COMMIT").unwrap();
+    scan(&sb, &mut db);
+    assert!(db.session(new_id).unwrap().is_some(), "the next scan catches up");
+    assert!(!is_busy(&anyhow::anyhow!("database is locked")), "only SQLite's own busy / locked errors count");
 }
 
 /// Fixture costs: S1's own five API responses (Opus 5, one in fast mode), its subagent's single
