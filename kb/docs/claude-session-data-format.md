@@ -78,7 +78,7 @@ assistant 特有：`requestId`、`effort`、`message.model`、`message.id`、`me
 
 **判定"人类输入的消息"**（沿用 `human_prompt_text`）：`type == user` 且非 `isSidechain`，content 为 string 或含 text block 且**不含 tool_result**，且非 `isMeta`，且文本不以 `[Image: source:` 开头。再用 `clean_prompt` 去掉 `<system-reminder>`、`<command-message>`、`<ide_opened_file>`、`<ide_selection>` 包裹块，并把 `<command-name>/<command-args>` 还原为 `/cmd args`。
 
-这个口径只用于 prompt 计数（与脚本一致），它把 compact 摘要、后台任务通知（`origin.kind` 非 `human`）、中断标记也算进去。**回合编号**用另一个更严的口径（`transcript::opens_turn`，详情面板、导出和索引的 `messages.kind = 'prompt'` 共用）：再排除 `isCompactSummary`、`origin.kind` 非 `human`、中断标记（`interruptedMessageId` 或 `[Request interrupted by user`）、清理后为空的文本，同一 uuid 只算第一次；只贴了图片 / 文档、没有文字的记录也开一个回合。其余有文字的 user 记录在索引里是 `other`。2026-11-15 在本机 3,321 份记录上核对过：每个会话的 `prompt` 行数都等于详情面板的回合数。
+这个口径只用于 prompt 计数（与脚本一致），它把 compact 摘要、后台任务通知（`origin.kind` 非 `human`）、中断标记也算进去。**回合编号**用另一个更严的口径（`transcript::opens_turn`，详情面板、导出和索引的 `messages.kind = 'prompt'` 共用）：再排除 `isCompactSummary`、`origin.kind` 非 `human`、中断标记（`interruptedMessageId` 或 `[Request interrupted by user`）、清理后为空的文本；只贴了图片 / 文档、没有文字的记录也开一个回合。哪些记录被跳过由 `transcript::RecordFilter` 统一决定（三处共用）：主 transcript 里的 sidechain 记录跳过；uuid 与前面同组记录重复的跳过，分两组，一组是「有自己的文字或图片 / 文档」的 user 记录（`has_own_input`，只有它们能开回合），一组是其余所有记录；被跳过的记录也占用它的 uuid。索引给第一组的每条记录都写一行（没有文字的写空文本，不开回合的是 `other`），这样追加扫描从索引读回的 user uuid 正好等于这组已占用的 uuid。本地命令（`<command-name>` 与随后的 `<local-command-stdout>`，`<bash-input>` 与随后的 `<bash-stdout>`）目前各算两个回合。2026-11-15 在本机 3,318 份记录上核对过（冷建一次、增量追加后一次）：每个会话的 `prompt` 行数都等于详情面板的回合数，导出与改动前逐字节相同；本机记录里没有重复的 uuid，主 transcript 里也没有 sidechain 记录，去重规则只对 fixture 里构造的情况起作用（`tests/fixtures/turn_rules.jsonl`）。
 
 ### 2.2 Session 元数据记录（无 `message`，直接可用作表格列）
 

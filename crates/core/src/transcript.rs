@@ -186,6 +186,67 @@ impl Record<'_> {
     }
 }
 
+/// A user record with text or media of its own, as opposed to tool results only. These are the
+/// records that can open a turn, and the index keeps a row for each of them (a media-only one
+/// with empty text), which is what lets an appending parser know the uuids already taken.
+pub(crate) fn has_own_input(content: &Content) -> bool {
+    match content {
+        Content::Text(_) => true,
+        Content::Blocks(blocks) => {
+            blocks.iter().any(|b| b.kind.as_deref() == Some("text"))
+                || blocks.iter().any(|b| matches!(b.kind.as_deref(), Some("image" | "document")))
+                    && !blocks.iter().any(|b| b.kind.as_deref() == Some("tool_result"))
+        }
+        Content::Other => false,
+    }
+}
+
+/// Which records of one transcript file the readers use. The detail panel, the TXT export and the
+/// indexer's parser all go through it, so they leave out the same records and agree on which
+/// user records open a turn.
+///
+/// A sidechain record of a main transcript is left out (a subagent's own file is all sidechain).
+/// So is a record whose uuid an earlier record of the same group already had; the groups are the
+/// user records with text or media of their own (`has_own_input`) and all other records. The
+/// uuid is taken even when the record is left out.
+#[derive(Debug, Default)]
+pub(crate) struct RecordFilter {
+    subagent: bool,
+    user_input: HashSet<String>,
+    other: HashSet<String>,
+}
+
+impl RecordFilter {
+    pub(crate) fn for_file(path: &Path) -> Self {
+        let subagent = path.parent().and_then(Path::file_name).is_some_and(|name| name == "subagents");
+        RecordFilter { subagent, ..Self::default() }
+    }
+
+    /// Continue a main transcript whose user records with input of their own had these uuids.
+    pub(crate) fn with_user_input(uuids: HashSet<String>) -> Self {
+        RecordFilter { user_input: uuids, ..Self::default() }
+    }
+
+    /// Whether the readers use this record; its uuid is taken either way.
+    pub(crate) fn keep(&mut self, uuid: Option<&str>, sidechain: bool, user_input: bool) -> bool {
+        let seen = if user_input { &mut self.user_input } else { &mut self.other };
+        let first = uuid.filter(|u| !u.is_empty()).is_none_or(|u| seen.insert(u.to_owned()));
+        first && (self.subagent || !sidechain)
+    }
+}
+
+impl Record<'_> {
+    /// The record's content, parsed once for the filter and the reader.
+    pub(crate) fn content(&self) -> Option<Content<'_>> {
+        self.message.as_ref().and_then(|m| m.content).map(parse_content)
+    }
+
+    /// A user record with input of its own: the filter's first group.
+    pub(crate) fn is_user_input(&self, content: Option<&Content>) -> bool {
+        self.kind.as_deref() == Some("user") && content.is_some_and(has_own_input)
+    }
+}
+
 pub(crate) fn is_human_input(flags: &UserFlags, content: &Content) -> bool {
     if flags.is_meta || flags.is_compact_summary || flags.origin.is_some_and(|kind| kind != "human") {
         return false;
@@ -243,8 +304,7 @@ pub fn read_transcript(path: &Path) -> Result<TranscriptExport> {
     let id = path.file_stem().unwrap_or_default().to_string_lossy();
     let mut export = TranscriptExport { text: format!("<transcript session_id=\"{}\">\n\n", xml_attribute(&id)), skipped_lines: 0 };
     let mut turn = Turn::default();
-    let is_subagent = path.parent().and_then(Path::file_name).is_some_and(|name| name == "subagents");
-    let mut seen = HashSet::new();
+    let mut filter = RecordFilter::for_file(path);
     let mut reader = BufReader::new(file);
     let mut line = Vec::new();
     loop {
@@ -262,21 +322,15 @@ pub fn read_transcript(path: &Path) -> Result<TranscriptExport> {
                 continue;
             }
         };
-        if record.is_sidechain && !is_subagent {
+        let content = record.content();
+        if !filter.keep(record.uuid.as_deref(), record.is_sidechain, record.is_user_input(content.as_ref())) {
             continue;
-        }
-        if let Some(uuid) = record.uuid.as_ref().filter(|id| !id.is_empty()) {
-            if !seen.insert(uuid.clone()) {
-                continue;
-            }
         }
         if record.kind.as_deref() == Some("system") && record.subtype.as_deref() == Some("turn_duration") {
             turn.finish(&mut export.text);
             continue;
         }
-        let Some(message) = &record.message else { continue };
-        let Some(raw) = message.content else { continue };
-        let content = parse_content(raw);
+        let (Some(message), Some(content)) = (&record.message, content) else { continue };
         match record.kind.as_deref() {
             Some("user") => {
                 if let Some(text) = human_text(&record, &content) {

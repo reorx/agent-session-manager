@@ -436,6 +436,18 @@ fn rebuild_drops_everything_and_rescans() {
 }
 
 #[test]
+fn the_message_count_keeps_its_meaning_from_before_text_kinds() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    let rows: i64 = db.conn().query_row("SELECT count(*) FROM messages", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 21, "two thinking rows and an image pasted without text have rows too");
+    // what `asm stats` of f059508 (before the index had thinking or media-only rows) printed for
+    // this fixture tree; the app's status bar shows this number
+    assert_eq!(db.stats().unwrap().messages, 18);
+}
+
+#[test]
 fn progress_is_reported_while_scanning() {
     let sb = sandbox();
     let mut db = Db::open(&sb.db_path()).unwrap();

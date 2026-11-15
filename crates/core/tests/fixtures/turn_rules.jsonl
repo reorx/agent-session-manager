@@ -1,0 +1,20 @@
+{"type":"user","uuid":"u-first","timestamp":"2026-11-15T10:01:00.000Z","isSidechain":false,"message":{"role":"user","content":"第一个问题"}}
+{"type":"assistant","uuid":"a-first","timestamp":"2026-11-15T10:02:00.000Z","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"第一个回答"}],"id":"msg_a-first","stop_reason":"end_turn"}}
+{"type":"assistant","uuid":"a-call","timestamp":"2026-11-15T10:03:00.000Z","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_rule1","name":"Bash","input":{}}],"id":"msg_a-call","stop_reason":"tool_use"}}
+{"type":"user","uuid":"u-shared","timestamp":"2026-11-15T10:04:00.000Z","isSidechain":false,"message":{"role":"user","content":[{"tool_use_id":"toolu_rule1","type":"tool_result","content":"ok"}]}}
+{"type":"user","uuid":"u-shared","timestamp":"2026-11-15T10:05:00.000Z","isSidechain":false,"message":{"role":"user","content":"工具结果之后的同 uuid 提问"}}
+{"type":"assistant","uuid":"a-shared","timestamp":"2026-11-15T10:06:00.000Z","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"收到"}],"id":"msg_a-shared","stop_reason":"end_turn"}}
+{"type":"user","uuid":"u-side","timestamp":"2026-11-15T10:07:00.000Z","isSidechain":true,"message":{"role":"user","content":"旁支里的文字"}}
+{"type":"user","uuid":"u-side","timestamp":"2026-11-15T10:08:00.000Z","isSidechain":false,"message":{"role":"user","content":"旁支之后的同 uuid 提问"}}
+{"type":"user","uuid":"u-twice","timestamp":"2026-11-15T10:09:00.000Z","isSidechain":false,"message":{"role":"user","content":"重复写入的提问"}}
+{"type":"user","uuid":"u-twice","timestamp":"2026-11-15T10:10:00.000Z","isSidechain":false,"message":{"role":"user","content":"重复写入的提问"}}
+{"type":"assistant","uuid":"a-twice","timestamp":"2026-11-15T10:11:00.000Z","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"只回答一次"}],"id":"msg_a-twice","stop_reason":"end_turn"}}
+{"type":"user","uuid":"u-meta-image","timestamp":"2026-11-15T10:12:00.000Z","isSidechain":false,"isMeta":true,"message":{"role":"user","content":[{"type":"image","source":{"data":"YWJj"}}]}}
+{"type":"user","uuid":"u-meta-image","timestamp":"2026-11-15T10:13:00.000Z","isSidechain":false,"message":{"role":"user","content":"图片之后的同 uuid 提问"}}
+{"type":"user","uuid":"u-command","timestamp":"2026-11-15T10:14:00.000Z","isSidechain":false,"promptId":"p-command","message":{"role":"user","content":"<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>default</command-args>"}}
+{"type":"user","uuid":"u-command-out","timestamp":"2026-11-15T10:15:00.000Z","isSidechain":false,"promptId":"p-command","message":{"role":"user","content":"<local-command-stdout>Set model to Opus 4.7</local-command-stdout>"}}
+{"type":"user","uuid":"u-bash","timestamp":"2026-11-15T10:16:00.000Z","isSidechain":false,"promptId":"p-bash","message":{"role":"user","content":"<bash-input>node generate_pdf.mjs</bash-input>"}}
+{"type":"user","uuid":"u-bash-out","timestamp":"2026-11-15T10:17:00.000Z","isSidechain":false,"promptId":"p-bash","message":{"role":"user","content":"<bash-stdout></bash-stdout><bash-stderr>Error: Cannot find module\n</bash-stderr>"}}
+{"type":"user","uuid":"u-last","timestamp":"2026-11-15T10:18:00.000Z","isSidechain":false,"message":{"role":"user","content":[{"type":"text","text":"最后一个问题"},{"type":"image","source":{"data":"YWJj"}}]}}
+{"type":"assistant","uuid":"a-last","timestamp":"2026-11-15T10:19:00.000Z","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"正在处理"}],"id":"msg_a-last","stop_reason":"end_turn"}}
+{"type":"user","uuid":"u-stop","timestamp":"2026-11-15T10:20:00.000Z","isSidechain":false,"interruptedMessageId":"a-last","message":{"role":"user","content":"[Request interrupted by user]"}}

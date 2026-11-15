@@ -14,7 +14,7 @@ use crate::model::*;
 use crate::pricing::{LONG_PROMPT, price, price_tokens};
 use crate::transcript::Message;
 use crate::search::{Highlighted, Matcher, regex::{ToolLine, ToolLineKind, stringify}};
-use crate::transcript::{Record, is_human_input, is_interruption};
+use crate::transcript::{Record, RecordFilter, is_interruption, opens_turn};
 
 pub const ENTRY_CHARS: usize = 20_000;
 pub const RESULT_CHARS: usize = 3_000;
@@ -181,7 +181,7 @@ impl Reader<'_> {
         self.tool_messages.clear();
     }
 
-    fn record(&mut self, r: &Record) {
+    fn record(&mut self, r: &Record, content: Content) {
         self.record_no += 1;
         let ts = r.timestamp.as_deref().and_then(parse_ts);
         if r.kind.as_deref() == Some("system") {
@@ -199,8 +199,7 @@ impl Reader<'_> {
             }
             return;
         }
-        let Some(message) = &r.message else { return };
-        let content = message.content.map(parse_content).unwrap_or(Content::Other);
+        if r.message.is_none() { return; }
         match r.kind.as_deref() {
             Some("user") => self.user(r, &content, ts),
             Some("assistant") => self.assistant(r, &content, ts),
@@ -230,7 +229,7 @@ impl Reader<'_> {
         if is_interruption(&flags, &text) {
             self.ensure_turn(ts); self.candidate = None; self.turn().end = TurnEnd::Interrupted { ts }; return;
         }
-        if is_human_input(&flags, content) {
+        if opens_turn(&flags, content) {
             self.number += 1;
             self.start(Some(self.number), None, ts, Marked::new(&clean_prompt(&text), ENTRY_CHARS, self.matcher), attachments(content));
         } else if let Some(origin) = r.origin.as_ref().and_then(|o| o.kind.as_deref()).filter(|k| *k != "human") {
@@ -376,19 +375,17 @@ pub fn read_conversation(path: &Path, matcher: Option<&Matcher>) -> Result<Conve
         current: None, number: 0, record_no: 0, candidate: None, tool_messages: HashSet::new(), calls: HashMap::new(), matcher,
         cache: CacheTrack::default(),
     };
-    let subagent = path.parent().and_then(Path::file_name).is_some_and(|n| n == "subagents");
-    let mut seen = HashSet::new();
+    let mut filter = RecordFilter::for_file(path);
     let mut start = 0;
     for end in memchr_iter(b'\n', &bytes) {
         let line = &bytes[start..end]; start = end + 1;
         if line.iter().all(u8::is_ascii_whitespace) { continue; }
         match serde_json::from_slice::<Record>(line) {
             Ok(r) => {
-                if r.is_sidechain && !subagent { continue; }
-                if let Some(uuid) = r.uuid.as_ref().filter(|s| !s.is_empty()) {
-                    if !seen.insert(uuid.clone()) { continue; }
+                let content = r.content();
+                if filter.keep(r.uuid.as_deref(), r.is_sidechain, r.is_user_input(content.as_ref())) {
+                    reader.record(&r, content.unwrap_or(Content::Other));
                 }
-                reader.record(&r);
             }
             Err(_) => reader.conv.skipped_lines += 1,
         }

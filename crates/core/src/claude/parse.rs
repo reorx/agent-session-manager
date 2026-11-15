@@ -23,7 +23,7 @@ use crate::model::{
     TITLE_RANK_SUMMARY, TextKind, Tokens, UsageRow,
 };
 use crate::pricing;
-use crate::transcript::{UserFlags, opens_turn};
+use crate::transcript::{RecordFilter, UserFlags, has_own_input, opens_turn};
 
 /// Model name Claude Code puts on records it writes itself (interrupts, API errors).
 pub(crate) const SYNTHETIC_MODEL: &str = "<synthetic>";
@@ -161,9 +161,9 @@ impl SessionDelta {
 pub struct TranscriptParser {
     delta: SessionDelta,
     usage_only: bool,
-    /// uuids of the user rows so far: a record written twice opens no second turn (the detail
-    /// panel skips a uuid it has seen), so its copy is `Other`.
-    seen_user: HashSet<String>,
+    /// Leaves out the records the detail panel leaves out (a copy of a record, a sidechain record),
+    /// so that only the user records it numbers become `Prompt` rows.
+    filter: RecordFilter,
 }
 
 impl TranscriptParser {
@@ -180,7 +180,7 @@ impl TranscriptParser {
     /// Continue a file whose user rows with these uuids are already indexed, so that appending
     /// tells prompts apart exactly like parsing the whole file.
     pub fn seen_user_uuids(mut self, uuids: HashSet<String>) -> Self {
-        self.seen_user = uuids;
+        self.filter = RecordFilter::with_user_input(uuids);
         self
     }
 
@@ -215,7 +215,7 @@ impl TranscriptParser {
     fn process_line(&mut self, line: &[u8], offset: u64, out: &mut Vec<MessageRow>, usage: &mut UsageSink) {
         match classify(line) {
             LineKind::Skip => return,
-            LineKind::User if self.usage_only || !(user_line_may_have_text(line) || user_line_has_media_prompt(line)) => return,
+            LineKind::User if self.usage_only || !(user_line_may_have_text(line) || user_line_may_have_media(line)) => return,
             LineKind::Meta if self.usage_only => return,
             _ => {}
         }
@@ -289,15 +289,14 @@ impl TranscriptParser {
 
     fn on_user(&mut self, rec: &RawRecord, offset: u64, len: u64, out: &mut Vec<MessageRow>) {
         let Some(content) = rec.message.as_ref().and_then(|m| m.content).map(parse_content) else { return };
-        let text = user_text(&content);
-        let uuid = rec.uuid.as_deref().unwrap_or("");
-        let new_uuid = uuid.is_empty() || !self.seen_user.contains(uuid);
-        // the detail panel leaves out sidechain records of the main file and repeated uuids
-        let kind = if !rec.is_sidechain && new_uuid && opens_turn(&rec.user_flags(), &content) { TextKind::Prompt } else { TextKind::Other };
-        // an image pasted without text still opens a turn: its row has no text but keeps the count
-        if text.is_none() && kind != TextKind::Prompt {
+        // every record with input of its own gets a row, an image without text one with empty
+        // text, so the uuids in the index are the ones the filter has taken
+        if !has_own_input(&content) {
             return;
         }
+        let kept = self.filter.keep(rec.uuid.as_deref(), rec.is_sidechain, true);
+        let kind = if kept && opens_turn(&rec.user_flags(), &content) { TextKind::Prompt } else { TextKind::Other };
+        let text = user_text(&content);
         let ts = rec.timestamp.as_deref().and_then(parse_ts);
         if let Some(text) = &text
             && is_human_prompt(rec, text)
@@ -311,11 +310,8 @@ impl TranscriptParser {
                 self.delta.last_prompt = Some(cleaned);
             }
         }
-        if !uuid.is_empty() {
-            self.seen_user.insert(uuid.to_string());
-        }
         out.push(MessageRow {
-            uuid: uuid.to_string(),
+            uuid: rec.uuid.as_deref().unwrap_or("").to_string(),
             parent_uuid: rec.parent_uuid.as_deref().map(str::to_string),
             role: Role::User,
             kind,
@@ -589,7 +585,7 @@ fn json_string_after<'a>(hay: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
 
 /// A user record only matters when it carries text: string content, or an array with a text
 /// block. Tool-result-only records (the bulk of the corpus) are skipped without parsing.
-/// (An image or document pasted without text matters too, see `user_line_has_media_prompt`.)
+/// (An image or document without text matters too, see `user_line_may_have_media`.)
 fn user_line_may_have_text(line: &[u8]) -> bool {
     let Some(at) = memmem::find(line, b"\"content\":") else { return false };
     let rest = &line[at + 10..];
@@ -601,10 +597,11 @@ fn user_line_may_have_text(line: &[u8]) -> bool {
     }
 }
 
-/// An image or document pasted without any text opens a turn and needs its `prompt` row. Tool
-/// results carry images too (screenshots read back) but always name a `tool_use_id`, which comes
-/// before their content, so those lines are ruled out after a few bytes.
-fn user_line_has_media_prompt(line: &[u8]) -> bool {
+/// An image or document without any text needs its row too (`transcript::has_own_input`): a
+/// pasted one opens a turn. Tool results carry images as well (screenshots read back) but always
+/// name a `tool_use_id`, which comes before their content, so those lines are ruled out after a
+/// few bytes.
+fn user_line_may_have_media(line: &[u8]) -> bool {
     memmem::find(line, b"\"tool_use_id\"").is_none()
         && (memmem::find(line, b"\"type\":\"image\"").is_some() || memmem::find(line, b"\"type\":\"document\"").is_some())
 }

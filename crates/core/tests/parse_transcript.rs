@@ -197,11 +197,32 @@ fn fixture_transcripts(sb: &Sandbox) -> Vec<std::path::PathBuf> {
         sb.transcript(ALPHA, S5),
         fixtures.join("conversation.jsonl"),
         fixtures.join("reader.jsonl"),
+        fixtures.join("turn_rules.jsonl"),
     ]
 }
 
+/// The bodies of the export's `<user>` elements, without the placeholders it writes for images
+/// and documents (the detail panel shows those as attachments, not in the prompt text).
+fn exported_prompts(path: &std::path::Path) -> Vec<String> {
+    let text = agent_session_core::transcript::read_transcript(path).unwrap().text;
+    text.split("<user>\n")
+        .skip(1)
+        .map(|rest| {
+            let body = &rest[..rest.find("\n</user>").unwrap()];
+            let mut body = body.to_string();
+            for placeholder in ["[Image omitted]", "[Document omitted]"] {
+                body = body.replace(&format!("\n\n{placeholder}"), "").replace(placeholder, "");
+            }
+            body
+        })
+        .collect()
+}
+
+/// The detail panel numbers turns, the TXT export writes a `<user>` element per turn, and the
+/// index stores a `prompt` row per turn: all three follow `transcript::opens_turn` and
+/// `transcript::RecordFilter`, so they agree record by record.
 #[test]
-fn prompt_rows_line_up_with_the_numbered_turns_of_the_conversation() {
+fn the_panel_the_export_and_the_index_agree_on_which_records_open_a_turn() {
     use agent_session_core::claude::clean::clean_prompt;
     use agent_session_core::claude::conversation::read_conversation;
     use agent_session_core::model::ConvItem;
@@ -225,8 +246,71 @@ fn prompt_rows_line_up_with_the_numbered_turns_of_the_conversation() {
             })
             .collect();
         assert!(!turns.is_empty() || path.ends_with(format!("{S5}.jsonl")), "{}", path.display());
-        assert_eq!(prompts, turns, "{}", path.display());
+        assert_eq!(prompts, turns, "index vs panel: {}", path.display());
+        let texts: Vec<String> = turns.into_iter().map(|(_, text)| text).collect();
+        assert_eq!(exported_prompts(&path), texts, "export vs panel: {}", path.display());
     }
+}
+
+#[test]
+fn turns_follow_the_record_rules_of_the_turn_rules_fixture() {
+    use agent_session_core::claude::conversation::read_conversation;
+    use agent_session_core::model::ConvItem;
+    let path = fixture_root().parent().unwrap().join("turn_rules.jsonl");
+    let turns: Vec<String> = read_conversation(&path, None)
+        .unwrap()
+        .items
+        .into_iter()
+        .filter_map(|item| match item {
+            ConvItem::Turn(t) if t.number.is_some() => Some(t.prompt.text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        turns,
+        vec![
+            "第一个问题",
+            "工具结果之后的同 uuid 提问",
+            "重复写入的提问",
+            "/model default",
+            "<local-command-stdout>Set model to Opus 4.7</local-command-stdout>",
+            "<bash-input>node generate_pdf.mjs</bash-input>",
+            "<bash-stdout></bash-stdout><bash-stderr>Error: Cannot find module\n</bash-stderr>",
+            "最后一个问题",
+        ],
+        "a local command and its output are two turns for now"
+    );
+    let rows: Vec<(String, TextKind, String)> = TranscriptParser::new("s")
+        .feed(&std::fs::read(&path).unwrap(), 0)
+        .messages
+        .into_iter()
+        .filter(|m| m.role == Role::User)
+        .map(|m| (m.uuid, m.kind, m.text))
+        .collect();
+    let want: Vec<(String, TextKind, String)> = [
+        ("u-first", TextKind::Prompt, "第一个问题"),
+        ("u-shared", TextKind::Prompt, "工具结果之后的同 uuid 提问"),
+        ("u-side", TextKind::Other, "旁支里的文字"),
+        ("u-side", TextKind::Other, "旁支之后的同 uuid 提问"),
+        ("u-twice", TextKind::Prompt, "重复写入的提问"),
+        ("u-twice", TextKind::Other, "重复写入的提问"),
+        ("u-meta-image", TextKind::Other, ""),
+        ("u-meta-image", TextKind::Other, "图片之后的同 uuid 提问"),
+        (
+            "u-command",
+            TextKind::Prompt,
+            "<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>default</command-args>",
+        ),
+        ("u-command-out", TextKind::Prompt, "<local-command-stdout>Set model to Opus 4.7</local-command-stdout>"),
+        ("u-bash", TextKind::Prompt, "<bash-input>node generate_pdf.mjs</bash-input>"),
+        ("u-bash-out", TextKind::Prompt, "<bash-stdout></bash-stdout><bash-stderr>Error: Cannot find module\n</bash-stderr>"),
+        ("u-last", TextKind::Prompt, "最后一个问题"),
+        ("u-stop", TextKind::Other, "[Request interrupted by user]"),
+    ]
+    .into_iter()
+    .map(|(u, k, t)| (u.to_string(), k, t.to_string()))
+    .collect();
+    assert_eq!(rows, want, "every user record with text or media of its own has a row, the tool result has none");
 }
 
 /// Feed one record at a time, each with a new parser that only knows the user rows found so

@@ -108,12 +108,12 @@ snippet labels use these names.
 
 | Kind | What it is |
 |---|---|
-| `prompt` | A user-side record that opens a numbered turn (see Turns): a message the user typed, or the output of a local slash command. Not an interruption marker, not a repeat of a record already seen (same uuid), not a subagent's (sidechain) record. A pasted image without text is a prompt with empty text |
+| `prompt` | A user-side record that opens a numbered turn (see Turns): a message the user typed, or a local command or its output (`<command-name>`, `<local-command-stdout>`, `<bash-input>`, `<bash-stdout>`). Not an interruption marker, not a repeat of an earlier user-side record (same uuid), not a subagent's (sidechain) record. A pasted image without text is a prompt with empty text |
 | `reply` | Text the agent wrote to the user, including commentary between tool calls, not only the final answer |
 | `thinking` | The agent's thinking. Only about one block in ten still has its text; the rest kept only a signature |
 | `tool-input` | The input of a tool call, as `key: value` text (a Bash command as `$ command`) |
 | `tool-output` | The output of a tool call |
-| `other` | Text that showed up on the user side without being typed: compact summaries, background task notifications, interruption markers (`[Request interrupted by user]`), and the like. The output of a local slash command (`<local-command-stdout>`) is a `prompt`, since it starts a turn |
+| `other` | Text that showed up on the user side without being typed: compact summaries, background task notifications, interruption markers (`[Request interrupted by user]`), and the like. The output of a local command (`<local-command-stdout>`, `<bash-stdout>`) is a `prompt`, since it starts a turn (see Turns) |
 
 `tool` stands for `tool-input,tool-output`, and `all` for every kind. Text Claude Code injects
 on the user side for the model (skill bodies, command caveats, image size notes; `isMeta` records)
@@ -158,6 +158,12 @@ Turn N is the Nth prompt and everything after it up to the next prompt, automati
 included. Turn numbers are the same in `asm search` snippets, `asm session`, `asm transcript`
 and the Turn numbers of the app's detail panel. Text that comes before the first prompt belongs to
 no turn.
+
+A local command takes two turns for now. Claude Code writes a slash command that runs without
+the model (`/model`, `/clear`) as a `<command-name>` record followed by a
+`<local-command-stdout>` record, and a `!` shell command as `<bash-input>` followed by
+`<bash-stdout>` / `<bash-stderr>`. Each of the two records is a prompt and opens a turn, and the
+output's turn has no reply.
 
 ### Hit marks and snippets
 
@@ -799,7 +805,8 @@ matches or MODEL has no price; 2 for invalid arguments.
 ### asm stats
 
 Print index statistics (path, sessions, history-only sessions, messages, projects, files, size)
-without refreshing it.
+without refreshing it. `messages` counts the records with prompt, reply or other text, injected
+text included; thinking and images pasted without text are not counted.
 
 ```
 asm stats

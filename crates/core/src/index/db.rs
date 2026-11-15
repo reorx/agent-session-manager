@@ -56,6 +56,9 @@ pub struct ProjectInfo {
 pub struct IndexStats {
     pub sessions: usize,
     pub history_only: usize,
+    /// Text messages as counted before the index had kinds: no thinking rows, no rows of user
+    /// records without text (images, documents). A user record with empty text is left out as
+    /// well, which the old count included; real transcripts have none.
     pub messages: usize,
     pub projects: usize,
     pub files: usize,
@@ -698,7 +701,7 @@ impl Db {
         Ok(IndexStats {
             sessions: count("SELECT count(*) FROM sessions")?,
             history_only: count("SELECT count(*) FROM sessions WHERE source = 'history' OR transcript_missing = 1")?,
-            messages: count("SELECT count(*) FROM messages")?,
+            messages: count("SELECT count(*) FROM messages WHERE kind <> 'thinking' AND NOT (role = 'user' AND text = '')")?,
             projects: count("SELECT count(*) FROM projects")?,
             files: count("SELECT count(*) FROM index_state")?,
             db_bytes,

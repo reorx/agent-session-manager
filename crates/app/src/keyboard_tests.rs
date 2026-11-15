@@ -592,8 +592,12 @@ fn a_history_session_shows_its_prompts_as_cards(cx: &mut TestAppContext) {
 fn hiding_the_sorted_column_from_the_header_menu_keeps_the_selection_and_is_remembered(cx: &mut TestAppContext) {
     use crate::table::{ShowAllColumns, ToggleColumn};
     let h = launch(cx);
+    let position = |cx: &mut TestAppContext| h.app.read_with(cx, |app, cx| app.table.read(cx).delegate().position_of(S4).unwrap());
+    let by_default = position(cx);
     sort_like_header(cx, &h, "prompts");
-    select(cx, &h, S1);
+    // otherwise the old row index would still point at the session and the test would prove nothing
+    assert_ne!(position(cx), by_default, "S4 sits on another row when sorted by prompts");
+    select(cx, &h, S4);
     // what a click on a menu item does: the action goes to the focused table and up to AppRoot
     in_window(cx, &h, |window, cx| window.dispatch_action(Box::new(ToggleColumn { key: "prompts".into() }), cx));
     cx.run_until_parked();
@@ -603,7 +607,7 @@ fn hiding_the_sorted_column_from_the_header_menu_keeps_the_selection_and_is_reme
         assert_eq!(table.delegate().hidden_columns(), ["prompts"]);
         assert_eq!(table.delegate().sort_state(), None, "the order went back to the default");
         let selected = table.selected_row().map(|ix| table.delegate().row(ix).id.to_string());
-        assert_eq!(selected.as_deref(), Some(S1), "the same session stays selected where it moved");
+        assert_eq!(selected.as_deref(), Some(S4), "the same session stays selected where it moved");
     });
     assert_eq!(state().hidden_columns, ["prompts"]);
     assert_eq!(state().sort, None);

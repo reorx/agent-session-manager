@@ -749,8 +749,76 @@ def conversation_rows():
     ]
 
 
+# Which user records open a turn, kept outside the discovery tree like the two files above. The
+# detail panel, the TXT export and the indexer's prompt rows must agree on every case here.
+def turn_rule_rows():
+    def rec(kind, uuid, minute, content, **kw):
+        d = {'type': kind, 'uuid': uuid, 'timestamp': f'2026-11-15T10:{minute:02d}:00.000Z', 'isSidechain': False}
+        d.update(kw)
+        d['message'] = {'role': kind, 'content': content}
+        if kind == 'assistant':
+            calls = any(b['type'] == 'tool_use' for b in content)
+            d['message'].update(id=f'msg_{uuid}', stop_reason='tool_use' if calls else 'end_turn')
+        return d
+
+    def reply(uuid, minute, text):
+        return rec('assistant', uuid, minute, [{'type': 'text', 'text': text}])
+
+    def text(t):
+        return {'type': 'text', 'text': t}
+
+    return [
+        rec('user', 'u-first', 1, '第一个问题'),
+        reply('a-first', 2, '第一个回答'),
+        rec('assistant', 'a-call', 3, [{'type': 'tool_use', 'id': 'toolu_rule1', 'name': 'Bash', 'input': {}}]),
+        # a tool result and a typed prompt sharing a uuid: only records of the same group collide
+        rec('user', 'u-shared', 4, [{'tool_use_id': 'toolu_rule1', 'type': 'tool_result', 'content': 'ok'}]),
+        rec('user', 'u-shared', 5, '工具结果之后的同 uuid 提问'),
+        reply('a-shared', 6, '收到'),
+        # a sidechain record of a main file is dropped, but its uuid is taken
+        rec('user', 'u-side', 7, '旁支里的文字', isSidechain=True),
+        rec('user', 'u-side', 8, '旁支之后的同 uuid 提问'),
+        # a record written twice opens one turn
+        rec('user', 'u-twice', 9, '重复写入的提问'),
+        rec('user', 'u-twice', 10, '重复写入的提问'),
+        reply('a-twice', 11, '只回答一次'),
+        # an image injected by the harness takes its uuid too, though it has no text
+        rec('user', 'u-meta-image', 12, [{'type': 'image', 'source': {'data': 'YWJj'}}], isMeta=True),
+        rec('user', 'u-meta-image', 13, '图片之后的同 uuid 提问'),
+        # a slash command and its output: two turns for now (brief decision 15)
+        rec(
+            'user',
+            'u-command',
+            14,
+            '<command-name>/model</command-name>\n            <command-message>model</command-message>\n'
+            '            <command-args>default</command-args>',
+            promptId='p-command',
+        ),
+        rec(
+            'user',
+            'u-command-out',
+            15,
+            '<local-command-stdout>Set model to Opus 4.7</local-command-stdout>',
+            promptId='p-command',
+        ),
+        # a `!` shell command and its output: two turns as well
+        rec('user', 'u-bash', 16, '<bash-input>node generate_pdf.mjs</bash-input>', promptId='p-bash'),
+        rec(
+            'user',
+            'u-bash-out',
+            17,
+            '<bash-stdout></bash-stdout><bash-stderr>Error: Cannot find module\n</bash-stderr>',
+            promptId='p-bash',
+        ),
+        rec('user', 'u-last', 18, [text('最后一个问题'), {'type': 'image', 'source': {'data': 'YWJj'}}]),
+        reply('a-last', 19, '正在处理'),
+        rec('user', 'u-stop', 20, '[Request interrupted by user]', interruptedMessageId='a-last'),
+    ]
+
+
 if __name__ == '__main__':
     main()
+    write_jsonl(OUT.parent / 'turn_rules.jsonl', turn_rule_rows())
     write_jsonl(OUT.parent / 'reader.jsonl', reader_rows)
     write_jsonl(OUT.parent / 'conversation.jsonl', conversation_rows())
     with (OUT.parent / 'conversation.jsonl').open('a') as fp:
