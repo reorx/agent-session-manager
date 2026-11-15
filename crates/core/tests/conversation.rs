@@ -190,7 +190,9 @@ fn cli_reads_without_creating_an_index_and_requires_conversation_for_match() {
     assert_cmd::Command::cargo_bin("asm").unwrap().args(["--db", db.to_str().unwrap(), "session-old", fixture, "--conversation", "--match", "needle"])
         .assert().success().stdout(predicates::str::contains("total turns=2 auto=2 compact=1 tools=3 completed=2 interrupted=1 api-error=1 no-reply=0 hits=6 skipped=1"));
     assert!(!db.exists());
-    assert_cmd::Command::cargo_bin("asm").unwrap().args(["session-old", fixture, "--match", "needle"]).assert().failure();
+    assert_cmd::Command::cargo_bin("asm").unwrap().args(["--db", db.to_str().unwrap(), "session-old", fixture, "--match", "needle"])
+        .assert().code(2).stderr(predicates::str::contains("--conversation"));
+    assert!(!db.exists(), "a usage error opens no index");
 }
 
 #[test]

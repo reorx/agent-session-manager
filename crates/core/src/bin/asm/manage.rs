@@ -59,15 +59,20 @@ impl App {
         };
         let report = if rebuild { indexer.rebuild(&mut db, &mut progress)? } else { indexer.scan(&mut db, &mut progress)? };
         let stats = db.stats()?;
+        let stale = match report.files_stale {
+            0 => String::new(),
+            n => format!(", {n} indexed meanwhile by another process"),
+        };
         writeln!(
             self.out,
-            "{} files ({} new, {} appended, {} rebuilt, {} unchanged, {} missing), {} history sessions, {} parsed in {:.3}s (parse {:.3}s, write {:.3}s, history {:.3}s)",
+            "{} files ({} new, {} appended, {} rebuilt, {} unchanged, {} missing{}), {} history sessions, {} parsed in {:.3}s (parse {:.3}s, write {:.3}s, history {:.3}s)",
             report.files_seen,
             report.files_parsed,
             report.files_appended,
             report.files_rebuilt,
             report.files_unchanged,
             report.files_missing,
+            stale,
             report.history_sessions,
             human_size(report.bytes_parsed),
             report.elapsed.as_secs_f64(),

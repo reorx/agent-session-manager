@@ -11,6 +11,8 @@ use crate::model::{MessageRow, ModelUsage, Role, SessionSummary, Source, TextKin
 
 /// Also bump this when a price in `pricing.rs` changes: stored costs are computed at index time.
 pub const SCHEMA_VERSION: i32 = 5;
+/// rusqlite's own default, kept for `Db::open`.
+const DEFAULT_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const SCHEMA: &str = include_str!("schema.sql");
 
 pub struct Db {
@@ -89,16 +91,29 @@ const SESSION_COLUMNS: &str = "s.id, s.id_known, p.encoded_dir, p.path, s.file_p
 
 impl Db {
     /// Open (or create) the index at `path`. Unreadable files are deleted and recreated; an old
-    /// schema version is dropped, so callers must rescan afterwards.
+    /// schema version is dropped, so callers must rescan afterwards. A file that needs either
+    /// while another connection holds its lock is left alone: the open fails as busy.
     pub fn open(path: &Path) -> Result<Db> {
+        Self::open_with(path, DEFAULT_BUSY_TIMEOUT)
+    }
+
+    /// `open`, waiting at most `busy_timeout` for another connection's lock, from the schema
+    /// check on.
+    pub fn open_with(path: &Path, busy_timeout: std::time::Duration) -> Result<Db> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
-        match Self::open_checked(path) {
+        match Self::open_checked(path, busy_timeout) {
             Ok(db) => Ok(db),
+            // Another process has the file open and is writing it (the app, another `asm`):
+            // deleting it would pull it out from under that process.
+            Err(e) if is_busy(&e) => Err(e.context(format!(
+                "{} needs rebuilding, but another connection is writing it",
+                path.display()
+            ))),
             Err(_) => {
                 remove_db_files(path);
-                Self::open_checked(path)
+                Self::open_checked(path, busy_timeout)
             }
         }
     }
@@ -128,8 +143,9 @@ impl Db {
         Ok(db)
     }
 
-    fn open_checked(path: &Path) -> Result<Db> {
+    fn open_checked(path: &Path, busy_timeout: std::time::Duration) -> Result<Db> {
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
+        conn.busy_timeout(busy_timeout)?;
         let mut db = Db { conn, path: Some(path.to_path_buf()) };
         db.configure()?;
         db.ensure_schema()?;

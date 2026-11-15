@@ -146,6 +146,131 @@ fn appended_lines_are_parsed_incrementally() {
     assert_eq!(kinds, [TextKind::Prompt, TextKind::Reply, TextKind::Prompt, TextKind::Reply]);
 }
 
+/// An index from another schema version has to be rebuilt, but another process (the app) is
+/// writing it: opening fails as busy and leaves the file alone, instead of deleting the file that
+/// process has open and starting a new one beside it.
+#[test]
+fn an_index_that_needs_rebuilding_while_another_connection_writes_it_is_left_alone() {
+    let sb = sandbox();
+    let path = sb.db_path();
+    let mut db = Db::open(&path).unwrap();
+    scan(&sb, &mut db);
+    let sessions = db.list_sessions(&ListFilter::default()).unwrap().len();
+    db.set_user_version_for_test(SCHEMA_VERSION - 1);
+    drop(db);
+    let app = rusqlite::Connection::open(&path).unwrap();
+    app.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let error = Db::open_with(&path, std::time::Duration::from_millis(50)).err().expect("no rebuild while another connection writes");
+    assert!(is_busy(&error), "{error:#}");
+    let look = rusqlite::Connection::open(&path).unwrap();
+    let version: i32 = look.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+    let rows: i64 = look.query_row("SELECT count(*) FROM sessions", [], |r| r.get(0)).unwrap();
+    assert_eq!((version, rows as usize), (SCHEMA_VERSION - 1, sessions), "the file on disk is still the one the other connection writes");
+
+    app.execute_batch("COMMIT").unwrap();
+    let db = Db::open(&path).unwrap();
+    assert!(db.list_sessions(&ListFilter::default()).unwrap().is_empty(), "once free, it is rebuilt (empty, to be rescanned)");
+}
+
+/// Two processes refresh the same index at once (the app and `asm`, or two `asm` run in
+/// parallel by an agent) while a transcript grows. `b` scans and commits after `a` has made its
+/// plan but before `a` writes: `a` must not write the same appended lines a second time.
+#[test]
+fn a_writer_that_planned_before_another_one_committed_does_not_index_the_same_lines_twice() {
+    let sb = sandbox();
+    let mut a = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut a);
+    let path = sb.transcript(ALPHA, S2);
+    append(&path, concat!(
+        r#"{"parentUuid":"x","isSidechain":false,"type":"user","message":{"role":"user","content":"And now in French"},"uuid":"u-new","timestamp":"2026-09-06T00:00:00.000Z","sessionId":"22222222-aaaa-4bbb-8ccc-000000000002","cwd":"/Users/me/Code/alpha","gitBranch":"main","entrypoint":"sdk-cli","version":"2.1.261"}"#, "\n",
+        r#"{"parentUuid":"u-new","isSidechain":false,"message":{"model":"claude-haiku-4-5-20251001","id":"m","type":"message","role":"assistant","content":[{"type":"text","text":"Bonjour mon ami."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}],"usage":{"input_tokens":1,"output_tokens":2}},"type":"assistant","uuid":"a-new","timestamp":"2026-09-06T00:00:01.000Z","sessionId":"22222222-aaaa-4bbb-8ccc-000000000002","cwd":"/Users/me/Code/alpha","gitBranch":"main","version":"2.1.261"}"#, "\n",
+    ));
+    set_mtime(&path, MTIME_S2 + 60_000);
+
+    let indexer = Indexer::new(sb.claude.clone(), None);
+    let mut b = Db::open(&sb.db_path()).unwrap();
+    let mut b_scanned = false;
+    // "scanning" is reported once `a` has its plan, before it parses and writes
+    let report = indexer.scan(&mut a, &mut |p| {
+        if p.phase == "scanning" && !b_scanned {
+            b_scanned = true;
+            assert_eq!(indexer.scan(&mut b, &mut |_| {}).unwrap().files_appended, 1);
+        }
+    }).unwrap();
+    assert!(b_scanned);
+    assert_eq!(report.files_appended, 0, "`b` had indexed the new lines already");
+    assert_eq!(report.files_stale, 1);
+
+    let mut fresh = Db::open(&sb.tmp.path().join("fresh.sqlite")).unwrap();
+    scan(&sb, &mut fresh);
+    assert_eq!(a.messages(S2).unwrap(), fresh.messages(S2).unwrap(), "each line indexed once");
+    let (got, want) = (a.session(S2).unwrap().unwrap(), fresh.session(S2).unwrap().unwrap());
+    assert_eq!((got.user_msg_count, got.assistant_msg_count, got.tool_use_count, &got.tool_counts), (want.user_msg_count, want.assistant_msg_count, want.tool_use_count, &want.tool_counts));
+    assert_eq!(a.index_state(&path).unwrap(), fresh.index_state(&path).unwrap());
+    assert_eq!(scan(&sb, &mut a).files_appended, 0, "and nothing is left over for the next scan");
+}
+
+/// The indexed user uuids an appending parser starts from belong to the plan, like the file's
+/// index state. Here `b` planned first, `a` sees one more line than `b` (a repeat of a prompt
+/// `b` is about to index), and `b` commits once `a` has its plan. However `a` handles the file
+/// it overtook, the repeat must end up as a full index has it: not a second prompt.
+#[test]
+fn a_repeated_prompt_in_a_file_another_writer_appended_meanwhile_opens_no_second_turn() {
+    let sb = sandbox();
+    let mut a = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut a);
+    let path = sb.transcript(ALPHA, S2);
+    let prompt = r#"{"parentUuid":"x","isSidechain":false,"type":"user","message":{"role":"user","content":"And now in French"},"uuid":"u-new","timestamp":"2026-09-06T00:00:00.000Z","sessionId":"22222222-aaaa-4bbb-8ccc-000000000002"}"#;
+    append(&path, &format!("{prompt}\n"));
+    set_mtime(&path, MTIME_S2 + 60_000);
+
+    let (planned_tx, planned_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::scope(|s| {
+        let claude = sb.claude.clone();
+        let db_path = sb.db_path();
+        s.spawn(move || {
+            let mut b = Db::open(&db_path).unwrap();
+            let mut waited = false;
+            let report = Indexer::new(claude, None).scan(&mut b, &mut |p| {
+                if p.phase == "scanning" && !waited {
+                    waited = true;
+                    planned_tx.send(()).unwrap();
+                    go_rx.recv().unwrap();
+                }
+            }).unwrap();
+            done_tx.send(report.files_appended).unwrap();
+        });
+        planned_rx.recv().unwrap();
+        // `b` has planned up to the prompt; `a` will also see its repeat and a new prompt
+        append(&path, &format!("{prompt}\n"));
+        append(&path, concat!(
+            r#"{"type":"user","message":{"role":"user","content":"Merci"},"uuid":"u-next","timestamp":"2026-09-06T00:01:00.000Z","sessionId":"22222222-aaaa-4bbb-8ccc-000000000002"}"#, "\n",
+        ));
+        set_mtime(&path, MTIME_S2 + 120_000);
+        let mut released = false;
+        Indexer::new(sb.claude.clone(), None).scan(&mut a, &mut |p| {
+            if p.phase == "scanning" && !released {
+                released = true;
+                go_tx.send(()).unwrap();
+                assert_eq!(done_rx.recv().unwrap(), 1, "`b` indexed the first prompt");
+            }
+        }).unwrap();
+        assert!(released);
+    });
+    scan(&sb, &mut a);
+
+    let mut fresh = Db::open(&sb.tmp.path().join("fresh.sqlite")).unwrap();
+    scan(&sb, &mut fresh);
+    let kinds: Vec<TextKind> = a.messages(S2).unwrap().iter().map(|m| m.kind).collect();
+    assert_eq!(kinds, [TextKind::Prompt, TextKind::Reply, TextKind::Prompt, TextKind::Other, TextKind::Prompt]);
+    assert_eq!(a.messages(S2).unwrap(), fresh.messages(S2).unwrap(), "appending == indexing the whole file");
+    assert_eq!(a.session(S2).unwrap().unwrap().user_msg_count, fresh.session(S2).unwrap().unwrap().user_msg_count);
+    assert_eq!(a.index_state(&path).unwrap(), fresh.index_state(&path).unwrap());
+}
+
 #[test]
 fn an_appended_copy_of_an_indexed_prompt_opens_no_second_turn() {
     // The detail panel skips a record whose uuid it has seen; an appending scan must agree

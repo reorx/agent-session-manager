@@ -28,10 +28,17 @@ These go before or after the command name and apply to every command.
 | `--db FILE` | file | `$ASM_DB`, else `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite` | The SQLite index (shared with the app) |
 | `--color WHEN` | `auto`, `always`, `never` | `auto` | ANSI colors. `auto`: only when stdout is a terminal and `NO_COLOR` is unset or empty. `always` wins over `NO_COLOR` |
 | `--no-color` | — | — | Same as `--color never`, and wins over `--color` when both are given |
-| `--version`, `--help` | — | — | Print the version (`asm 0.1.0`) or the help, then exit 0. The version is the crate's, not the app release's, so check for a command (`asm search --help`) rather than compare versions |
+| `--version`, `--help` | — | — | Print the version (`asm 0.1.0`) or the help, then exit 0. The version is the crate's and never changes, so it cannot tell what the CLI can do; see Checking the CLI below |
 
 Output piped to another program or captured by an agent is never colored unless
 `--color always` is given.
+
+### Checking the CLI
+
+`asm projects --help` exits 0 only on a binary that has the commands for agents this reference
+describes; an older one exits 2 (unrecognized subcommand). Do not check with
+`asm search --help`: older binaries have a `search` too, with other options. When this reference
+adds commands, it names the one to check here.
 
 ### The index and the write lock
 
@@ -50,20 +57,30 @@ index busy, results may miss the last few minutes
 This is not an error: the exit code stays 0. `asm index` is the exception: it exists to write the
 index, so it fails (exit 1) when the lock is taken.
 
+Several `asm` commands may run at once (an agent often starts them in parallel) next to the app:
+each refresh writes a file only if no other one indexed it since it looked, so nothing is indexed
+twice.
+
+An index built by another version of `asm` or the app is rebuilt from scratch on first use. When
+that is needed while another process writes the index, the command fails (exit 1) and leaves the
+file alone; quit the app, or point `--db` / `ASM_DB` at another file.
+
 ### Time range
 
 `search` and `projects` take the same three options:
 
 | Option | Values | Meaning |
 |---|---|---|
-| `--days N` | number, decimals allowed | Activity within the last N days (N × 24 hours before now). `--days 0` removes the limit |
+| `-d, --days N` | number, decimals allowed | Activity within the last N days (N × 24 hours before now). `--days 0` removes the limit |
 | `--since DATE` | `YYYY-MM-DD` | Activity on or after local midnight of DATE |
 | `--until DATE` | `YYYY-MM-DD` | Activity on or before the end of local day DATE; can be used without `--since` |
 
-`--days` cannot be combined with `--since` or `--until` (exit 2). A session is in range when its
-activity span (first prompt to last update) overlaps the range; a hit can be anywhere in such a
-session, even outside the range. Without any of the three, each command has its own default,
-listed with the command.
+`--days` cannot be combined with `--since` or `--until`, and `--since` cannot be later than
+`--until` (exit 2 for both). A session is in range when its activity span (first prompt to last
+update) overlaps the range: last update at or after the start, first prompt before the end. When
+the first prompt time is unknown, the span is the last update alone. A hit can be anywhere in a
+session in range, even outside the range. Without any of the three, each command has its own
+default, listed with the command.
 
 The first line of the output names the range actually used:
 
@@ -91,14 +108,49 @@ snippet labels use these names.
 
 | Kind | What it is |
 |---|---|
-| `prompt` | A message the user typed. Each one starts a turn (interruption markers do not) |
+| `prompt` | A user-side record that opens a numbered turn (see Turns): a message the user typed, or the output of a local slash command. Not an interruption marker, not a repeat of a record already seen (same uuid), not a subagent's (sidechain) record. A pasted image without text is a prompt with empty text |
 | `reply` | Text the agent wrote to the user, including commentary between tool calls, not only the final answer |
 | `thinking` | The agent's thinking. Only about one block in ten still has its text; the rest kept only a signature |
 | `tool-input` | The input of a tool call, as `key: value` text (a Bash command as `$ command`) |
 | `tool-output` | The output of a tool call |
 | `other` | Text that showed up on the user side without being typed: compact summaries, background task notifications, interruption markers (`[Request interrupted by user]`), and the like. The output of a local slash command (`<local-command-stdout>`) is a `prompt`, since it starts a turn |
 
-`tool` stands for `tool-input,tool-output`, and `all` for every kind.
+`tool` stands for `tool-input,tool-output`, and `all` for every kind. Text Claude Code injects
+on the user side for the model (skill bodies, command caveats, image size notes; `isMeta` records)
+is never searched.
+
+### Items
+
+Hits are counted per item, and `--same-message` means one item:
+
+- `prompt`, `reply`, `thinking`, `other`: all the text of that kind in one JSONL record. A record
+  with both thinking and reply text is two items. Claude Code usually writes each block of a
+  response as its own record, so a reply item is usually one block.
+- `tool-input`: one tool call (a `tool_use` block); `tool-output`: one tool result (a
+  `tool_result` block).
+
+Both ways of searching (index and scan, see `asm search`) count the same items, so `hits`,
+`term_hits` and `--same-message` do not depend on which one answers.
+
+### TERMs
+
+`search` and `transcript --grep` take TERMs. Each TERM is one concept; inside it, `|` separates
+ways of saying it, and any one of them counts. Quote a TERM so the shell passes it as one word:
+
+```
+asm search '连不上|无法连接|offline' 'healthz|健康检查'
+```
+
+- Literal text, case-insensitive (Unicode case folding).
+- Empty alternatives are dropped: `'foo|'` is `foo`. A TERM with nothing left (`''`, `'|'`)
+  would match everything and is an error (exit 2).
+- Literal TERMs cannot contain `|` itself; to search for a vertical bar, use `--regex` and write
+  it as `\|`, e.g. `--regex 'a \| b'`.
+- With `--regex`, each TERM is one regular expression (Rust `regex` syntax, case-insensitive
+  unless it starts with `(?-i)`), and `|` is the regular expression's own alternation. A TERM
+  that can match the empty string (`'a|'`, `'x*'`) is an error (exit 2). A TERM that does not
+  compile is matched as one literal text, not split at `|`, and stderr says
+  `term 2 is not a valid regular expression, matched as literal text` (TERMs count from 1).
 
 ### Turns
 
@@ -122,8 +174,11 @@ when unknown.
 ### JSON output
 
 With `--json` a command prints one pretty-printed JSON object on stdout and nothing else there.
-Keys are `snake_case` and always present (`null` when there is no value). Lists of results look
-like:
+Keys are `snake_case` (`tool_output` in `hits`) and always present (`null` when there is no value).
+String values that name a text kind keep the command-line spelling (`"kind": "tool-output"`). The
+same thing has the same key in every command (`main_model`, `project_path`, `turns`). `meta`
+repeats the options under the option's own name: `meta.model` is the `--model` value, while a
+session's model is its `main_model`. Lists of results look like:
 
 ```json
 { "meta": { "command": "search", "elapsed_ms": 31, "...": "..." }, "results": [ ] }
@@ -149,23 +204,23 @@ When a command fails (exit 1) with `--json`, stdout carries
 ### asm search
 
 Find sessions by their content. Each TERM is one concept that the session must contain; a TERM
-can list several ways of saying it, separated by `|`, and any one of them counts.
+can list several ways of saying it (see TERMs).
 
 ```
 asm search TERM... [--in KINDS] [--tool NAME]... [--regex] [--same-message]
-           [--days N | --since DATE [--until DATE]] [--project P]... [--model M] [--favorites]
+           [-d N | --since DATE [--until DATE]] [-p P]... [--model M] [--favorites]
            [--include-self] [--sort recent|hits] [-n N] [--snippets N] [--json] [--no-scan]
 ```
 
 | Option | Values | Default | Meaning |
 |---|---|---|---|
-| `TERM...` | one or more | required | A concept. `a\|b\|c`: any of these. Literal text, case-insensitive. A session is a result only when every TERM occurs somewhere in it (in different messages is fine) |
-| `--in KINDS` | comma-separated: `prompt`, `reply`, `thinking`, `tool`, `tool-input`, `tool-output`, `other`, `all` | `prompt,reply,thinking` | Which text kinds to search |
-| `--tool NAME` | tool name, repeatable | all tools | Only calls of these tools (exact name, case-insensitive, e.g. `Bash`, `mcp__context7__query-docs`). Adds `tool` to `--in` unless it already names `tool-input` or `tool-output`; does not affect the other kinds |
-| `--regex` | — | off | Each TERM is a regular expression (Rust `regex` syntax, case-insensitive; `\|` still means any). A TERM that does not compile is matched as literal text |
-| `--same-message` | — | off | All TERMs must occur in one item: one prompt, one reply, one thinking text, one tool input, one tool output or one `other` text |
-| `--days N`, `--since DATE`, `--until DATE` | see Time range | all time when every kind searched is `prompt`, `reply`, `thinking` or `other` and `--regex` is off; else the last 30 days | Sessions active in this range |
-| `--project P` | text or directory, repeatable | all projects | A value with `/` or starting with `~` is a directory and selects exactly that project; anything else matches projects whose path or encoded directory name contains it (case-insensitive). Several: any of them |
+| `TERM...` | one or more | required | A concept, written as in TERMs. A session is a result only when every TERM occurs somewhere in it (in different items is fine) |
+| `--in KINDS` | comma-separated: `prompt`, `reply`, `thinking`, `tool`, `tool-input`, `tool-output`, `other`, `all` | `prompt,reply,thinking`; `tool` with `--tool` | Which text kinds to search |
+| `--tool NAME` | tool name, repeatable | all tools | Only calls of these tools (exact name, case-insensitive, e.g. `Bash`, `mcp__context7__query-docs`). Without `--in`, search only these tools' inputs and outputs (as `--in tool`). With `--in`, narrow the tool kinds it names to these tools and leave its other kinds alone; an `--in` without a tool kind is an error (exit 2) |
+| `--regex` | — | off | Each TERM is a regular expression, see TERMs |
+| `--same-message` | — | off | All TERMs must occur in one item (see Items) |
+| `-d, --days N`, `--since DATE`, `--until DATE` | see Time range | all time when every kind searched is `prompt`, `reply`, `thinking` or `other` and `--regex` is off; else the last 30 days | Sessions active in this range |
+| `-p, --project P` | directory or text, repeatable | all projects | Only these projects, see Projects below. Several: any of them |
 | `--model M` | model, e.g. `opus-5-5` or `claude-opus-5-5` | all | Only sessions whose main model (the one that cost the most, as in `asm cost --model`) is M |
 | `--favorites` | — | off | Only favorite sessions |
 | `--include-self` | — | off | Include the current session (see The current session) |
@@ -181,8 +236,21 @@ How it searches: when every kind searched is in the index (`prompt`, `reply`, `t
 every TERM; expect about a second per GB that is not skipped, so give tool searches specific
 words and a time range. Subagent conversations are not searched.
 
-Counting: a hit is one item (as in `--same-message`) that contains at least one TERM. `hits`
-counts them per kind; their sum is what `--sort hits` sorts by.
+Projects (`--project P`):
+
+- A directory: P is `.` or `..`, or contains `/`, or starts with `~`. A relative path is taken
+  from the current directory, `~` is the home directory, `.` and `..` parts are resolved
+  without looking at the disk, and a trailing `/` does not matter. The directory need not exist.
+  It selects the project at that directory and the projects inside it. Paths are compared both
+  as written and with symlinks resolved, on either side, so `/tmp/x` and `/private/tmp/x` are
+  the same project. Every path `asm projects` prints works as P.
+- Anything else is text: projects whose path, or encoded directory name under `projects/`,
+  contains it (case-insensitive).
+- When no project matches, the result is 0 sessions with `try: without --project`, not an error
+  (unlike `asm list`).
+
+Counting: a hit is one item (see Items) that contains at least one TERM. `hits` counts them per
+kind; their sum is what `--sort hits` sorts by.
 
 Snippets: the best items first. An item with more of the TERMs comes first, then by kind
 (`prompt`, `reply`, `thinking`, `tool-input`, `tool-output`, `other`), then by position in the
@@ -231,7 +299,7 @@ Text output:
   `try: ` that lists, separated by ` · `, what can be widened, in this order and only those that
   apply: `--days 0 for all time` (a time limit was in effect), `--in all for every kind` (not every
   kind was searched), `fewer terms` (more than one TERM), `without --same-message`,
-  `without --project` / `--model` / `--favorites` (each one given).
+  `without --project` / `--tool` / `--model` / `--favorites` (each one given).
 
 JSON output (`--json`):
 
@@ -241,6 +309,7 @@ JSON output (`--json`):
     "command": "search",
     "terms": [["连不上", "无法连接", "offline"], ["健康检查", "healthz"]],
     "regex": false,
+    "regex_fallback": [],
     "same_message": false,
     "kinds": ["prompt", "reply", "thinking"],
     "tools": [],
@@ -271,12 +340,12 @@ JSON output (`--json`):
       "updated_at": "2026-11-14T17:09:55+08:00",
       "turns": 21,
       "cost_usd": 4.1,
-      "model": "claude-opus-5-5",
+      "main_model": "claude-opus-5-5",
       "kind": "cli",
       "favorite": false,
       "transcript": "/Users/reorx/.claude/projects/-Users-reorx-Code-cw-edge/1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26.jsonl",
       "resume": "cd '/Users/reorx/Code/cw-edge' && claude --resume 1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26",
-      "hits": { "total": 5, "prompt": 1, "reply": 4, "thinking": 0 },
+      "hits": { "total": 5, "prompt": 1, "reply": 4, "thinking": 0, "tool_input": null, "tool_output": null, "other": null },
       "term_hits": [4, 2],
       "snippets": [
         {
@@ -296,8 +365,9 @@ JSON output (`--json`):
 
 | Field | Meaning |
 |---|---|
-| `meta.terms` | One array per TERM, its alternatives as given (the whole TERM is one entry with `--regex`) |
-| `meta.kinds` | Kinds searched, `tool` and `all` expanded, in the order of the Text kinds table |
+| `meta.terms` | One array per TERM, its alternatives as given, empty ones dropped (the whole TERM is one entry with `--regex`) |
+| `meta.regex_fallback` | With `--regex`, the indexes (from 0, into `meta.terms`) of the TERMs that did not compile and were matched as literal text |
+| `meta.kinds` | Kinds searched, `tool` and `all` expanded, in the order of the Text kinds table, spelled as on the command line (`tool-input`) |
 | `meta.tools` | `--tool` values |
 | `meta.range` | `label` as in the first line; `since` and `until` the instants it covers (`until` exclusive), `null` when open; `default` is true when no range option was given |
 | `meta.projects`, `meta.model`, `meta.favorites` | The filters as given |
@@ -311,11 +381,11 @@ JSON output (`--json`):
 | `project_path`, `cwd` | The project directory and the working directory the session started in |
 | `turns` | Number of turns |
 | `cost_usd` | Cost priced from token usage, subagents included; `null` when no call could be priced |
-| `model` | Main model, `null` without API calls |
+| `main_model` | Main model (the one that cost the most), `null` without API calls |
 | `kind` | `cli`, `sdk`, `background` or `history` (the app's Kind column) |
 | `transcript` | Path of the record file that was searched |
 | `resume` | The resume command, `null` when the session cannot be resumed |
-| `hits` | `total`, and one key per kind searched with its count |
+| `hits` | `total`, then every kind with its count: `prompt`, `reply`, `thinking`, `tool_input`, `tool_output`, `other`; `null` for a kind not searched |
 | `term_hits` | Per TERM, how many items contain it |
 | `snippets[].kind`, `.tool` | Text kind; the tool name for tool kinds, else `null` |
 | `snippets[].turn`, `.time` | Turn number (`null` before the first prompt) and the item's time |
@@ -323,8 +393,9 @@ JSON output (`--json`):
 | `snippets[].terms` | Indexes (into `meta.terms`) of the TERMs the item contains |
 | `snippets[].text` | The snippet, with `«»` marks |
 
-Exit codes: 0, also for zero results; 1 on an index error; 2 for invalid arguments (an unknown
-kind in `--in`, `--days` with `--since`).
+Exit codes: 0, also for zero results; 1 on an index error; 2 for invalid arguments: an unknown
+kind in `--in`, a TERM with nothing to match (see TERMs), `--tool` with an `--in` that names no
+tool kind, `--days` with `--since`, `--since` later than `--until`.
 
 ### asm session
 
@@ -458,12 +529,12 @@ List the projects that have sessions, most recently active first. Use it to find
 value when the user names an app or a repository loosely.
 
 ```
-asm projects [--days N | --since DATE [--until DATE]] [-n N] [--include-self] [--json] [--no-scan]
+asm projects [-d N | --since DATE [--until DATE]] [-n N] [--include-self] [--json] [--no-scan]
 ```
 
 | Option | Values | Default | Meaning |
 |---|---|---|---|
-| `--days N`, `--since DATE`, `--until DATE` | see Time range | all time | Only projects with a session active in the range |
+| `-d, --days N`, `--since DATE`, `--until DATE` | see Time range | all time | Only projects with a session active in the range |
 | `-n, --limit N` | number | `50` | At most N projects; `0` for no limit |
 | `--include-self` | — | off | Count the current session too |
 | `--json` | — | off | JSON output |
@@ -526,8 +597,8 @@ asm transcript INPUT [--outline] [--turns RANGE] [--grep TERM... [--regex] [--co
 | `-o, --output FILE` | file | stdout | Write to FILE instead; FILE must not exist yet |
 | `--outline` | — | off | One line per turn instead of the text |
 | `--turns RANGE` | `N`, `N-M`, `N-` (turns start at 1) | all | Only these turns (`N-`: from N to the end) |
-| `--grep TERM...` | one or more TERMs, written as in `asm search` | — | Only turns where any TERM occurs in the text shown (with `--thinking` and `--tools`, in those parts too) |
-| `--regex` | — | off | The `--grep` TERMs are regular expressions (needs `--grep`) |
+| `--grep TERM...` | one or more TERMs (see TERMs) | — | Only turns where any TERM occurs in the parts shown (thinking with `--thinking`, tool calls with `--tools`), judged on their full text before any cutting |
+| `--regex` | — | off | The `--grep` TERMs are regular expressions, see TERMs (needs `--grep`) |
 | `--context N` | number | `0` | With `--grep`, also N turns before and after each matching turn |
 | `--thinking` | — | off | Include the agent's thinking |
 | `--tools` | — | off | Include each tool call with its input and output instead of the one-line summary |
@@ -568,8 +639,13 @@ hit `asm search` reports can be found in its turn:
 - `--tools` adds a `<tool name="Bash">` element per call, holding `<input>` (as in the
   `tool-input` kind) and `<output>` (`<output status="error">` when the tool failed), and drops
   the `<turn-summary>`. Without `--tools`, the `<turn-summary>` comes right after `<user>`.
-- Each `<input>`, `<output>` and `<other>` body is cut at 2,000 characters, ending with
-  `…[cut N chars]`.
+- An `<input>`, `<output>` or `<other>` body longer than 2,000 characters is cut. Without a
+  `--grep` hit inside it, it keeps the first 2,000 characters and ends with a line
+  `…[cut N chars]`. With hits inside, it keeps the first 500 characters and, around each hit,
+  300 characters before it and 700 from its start; windows that touch or overlap merge, at most
+  4,000 characters are kept in all (hits past that get no window), and each gap is a line
+  `…[cut N chars]`. So a hit `asm search` found deep in a long tool output is read with
+  `asm transcript ID --turns N --tools --grep` and the same TERMs.
 - A blank line follows `</user>` and the last element of each turn; the elements inside a turn
   follow each other without one.
 - Turns not kept are left out without a trace; text before the first prompt is never shown.

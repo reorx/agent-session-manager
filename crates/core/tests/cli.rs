@@ -174,6 +174,7 @@ fn output_to_a_pipe_has_no_colors_unless_asked_for() {
         assert!(!piped(args), "{args:?} printed an escape code into a pipe");
     }
     assert!(piped(&["list", "alpha", "--color", "always"]));
+    assert!(piped(&["--color", "always", "list", "alpha"]), "before the command name too");
     assert!(!piped(&["--color", "never", "list", "alpha"]));
     assert!(!piped(&["list", "alpha", "--color", "always", "--no-color"]), "--no-color is --color never");
     assert!(!piped(&["--no-color", "list", "alpha", "--color", "always"]), "and wins over --color wherever it is");
@@ -216,11 +217,38 @@ fn a_busy_index_skips_the_refresh_and_answers_from_what_is_indexed() {
 
     let out = asm(&sb).arg("index").output().unwrap();
     assert_eq!(out.status.code(), Some(1), "`asm index` exists to write, so it fails");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("locked"), "{}", String::from_utf8_lossy(&out.stderr));
 
     app.execute_batch("COMMIT").unwrap();
     let out = asm(&sb).args(["list", "alpha"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&out.stderr), "");
     assert!(String::from_utf8_lossy(&out.stdout).contains(new_id), "the next refresh catches up");
+}
+
+#[test]
+fn a_refresh_that_fails_for_another_reason_than_the_lock_is_still_an_error() {
+    let sb = sandbox();
+    asm(&sb).arg("index").assert().success();
+    let out = asm(&sb).args(["list", "alpha"]).env("ASM_FAVORITES_DIR", sb.tmp.path().join("other")).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("index --rebuild"), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.stdout.is_empty());
+}
+
+#[test]
+fn an_index_from_another_version_is_not_rebuilt_while_the_app_writes_it() {
+    let sb = sandbox();
+    asm(&sb).arg("index").assert().success();
+    rusqlite::Connection::open(sb.db_path()).unwrap().execute_batch(&format!("PRAGMA user_version = {};", agent_session_core::index::SCHEMA_VERSION - 1)).unwrap();
+    let app = hold_write_lock(&sb);
+    let out = asm(&sb).args(["list", "alpha"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("needs rebuilding") && stderr.contains("--db"), "{stderr}");
+    let sessions: i64 = rusqlite::Connection::open(sb.db_path()).unwrap().query_row("SELECT count(*) FROM sessions", [], |r| r.get(0)).unwrap();
+    assert_eq!(sessions, 8, "the index the app writes is still there");
+    drop(app);
+    asm(&sb).args(["list", "alpha"]).assert().success();
 }
 
 #[test]

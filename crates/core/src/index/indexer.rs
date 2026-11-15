@@ -51,6 +51,8 @@ pub struct ScanReport {
     pub files_unchanged: usize,
     pub files_missing: usize,
     pub files_superseded: usize,
+    /// Parsed but not written: another connection indexed the file after this scan planned it.
+    pub files_stale: usize,
     pub bytes_parsed: u64,
     /// Sessions written from history.jsonl (new or refreshed).
     pub history_sessions: usize,
@@ -84,6 +86,8 @@ struct Parsed {
     indexed_offset: u64,
     bytes_parsed: u64,
     subagent_count: u32,
+    /// The file's index state this scan planned from (`None`: not indexed yet).
+    planned_from: Option<IndexState>,
 }
 
 impl Indexer {
@@ -127,20 +131,24 @@ impl Indexer {
             })
             .collect();
         report.files_unchanged = planned.iter().filter(|(f, p)| f.agent.is_empty() && *p == Plan::Unchanged).count();
-        emit(ScanEvent::Progress(Progress { done: report.files_unchanged, total: report.files_seen, phase: "scanning" }));
 
         let to_parse: Vec<(TranscriptFile, Plan)> = planned.into_iter().filter(|(_, p)| *p != Plan::Unchanged).collect();
-        // an appending parser has to know the user rows already indexed (see TranscriptParser)
+        // An appending parser has to know the user rows already indexed (see TranscriptParser).
+        // They belong to the plan, read right after the index states: the write transaction
+        // drops a file whose state moved since (`stale_files`), and with it the uuids read here.
+        // Re-planning inside the transaction instead would mean re-reading both.
         let mut seen_user: HashMap<PathBuf, HashSet<String>> = HashMap::new();
         for (f, _) in to_parse.iter().filter(|(f, p)| f.agent.is_empty() && matches!(p, Plan::Append(_))) {
             seen_user.insert(f.path.clone(), db.user_uuids(&f.session_id)?);
         }
+        emit(ScanEvent::Progress(Progress { done: report.files_unchanged, total: report.files_seen, phase: "scanning" }));
         let t = Instant::now();
         let parsed: Vec<Parsed> = to_parse
             .into_par_iter()
             .map(|(f, plan)| {
                 let seen = seen_user.get(&f.path).cloned().unwrap_or_default();
-                parse_file(f, plan, seen)
+                let planned_from = states.get(&f.path).cloned();
+                Ok(Parsed { planned_from, ..parse_file(f, plan, seen)? })
             })
             .collect::<Result<Vec<_>>>()?;
         report.elapsed_parse = t.elapsed();
@@ -157,13 +165,19 @@ impl Indexer {
             // Subagent usage first, so every session row written below already counts it.
             // Sessions whose subagents changed but whose own transcript did not are sent at the end.
             let mut touched: BTreeSet<String> = forget_subagents(db, &gone.subagents, &live_ids)?;
-            for p in &subagents {
+            let stale = stale_files(db, &parsed)?;
+            for p in subagents.iter().filter(|p| !stale.contains(&p.file.path)) {
                 write_subagent(db, p)?;
                 touched.insert(p.file.session_id.clone());
                 report.subagents_parsed += 1;
                 report.bytes_parsed += p.bytes_parsed;
             }
             for p in &sessions {
+                if stale.contains(&p.file.path) {
+                    report.files_stale += 1;
+                    done += 1;
+                    continue;
+                }
                 write_parsed(db, p)?;
                 emit_session(db, &p.file.session_id, emit)?;
                 touched.remove(&p.file.session_id);
@@ -270,7 +284,22 @@ fn parse_file(file: TranscriptFile, plan: Plan, seen_user: HashSet<String>) -> R
         bytes_parsed: len - from,
         subagent_count: subagents,
         file: file.clone(),
+        planned_from: None,
     })
+}
+
+/// Files another connection indexed after this scan read the index states (the app and `asm`,
+/// or two `asm`, refreshing at once): their state is not the one this scan planned from, and
+/// writing them would add the same lines twice. That writer left them up to date, or the next
+/// scan carries on from where it stopped. Read inside the write transaction, so it is current.
+fn stale_files(db: &Db, parsed: &[Parsed]) -> Result<HashSet<PathBuf>> {
+    let mut stale = HashSet::new();
+    for p in parsed {
+        if db.index_state(&p.file.path)? != p.planned_from {
+            stale.insert(p.file.path.clone());
+        }
+    }
+    Ok(stale)
 }
 
 fn write_parsed(db: &Db, p: &Parsed) -> Result<()> {

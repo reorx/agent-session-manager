@@ -169,10 +169,16 @@ impl App {
         Ok(Indexer::new(self.claude.clone(), Some(ClaudeDir::new(favorites))))
     }
 
-    /// The index, first brought up to date with the files on disk when `scan` is set.
+    /// The index, first brought up to date with the files on disk when `scan` is set. An index
+    /// that needs rebuilding while the app writes it cannot be used at all: that is an error.
     fn open_db(&self, scan: bool) -> Result<Db> {
-        let mut db = Db::open(&self.db_path)?;
-        db.set_busy_timeout(BUSY_TIMEOUT)?;
+        let mut db = Db::open_with(&self.db_path, BUSY_TIMEOUT).map_err(|e| match is_busy(&e) {
+            true => e.context(format!(
+                "{} was built by another version and needs rebuilding, but another process (the app?) is writing it; quit it, or use another index with --db / ASM_DB",
+                self.db_path.display()
+            )),
+            false => e,
+        })?;
         if scan {
             self.refresh_with(&self.indexer()?, &mut db)?;
         }
