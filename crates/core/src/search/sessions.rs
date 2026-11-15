@@ -3,7 +3,7 @@
 //! TERMs are literal; tool kinds and regexes scan the transcripts (`scan.rs`). Both produce the
 //! same `SessionHits`: the same items counted, the same snippets picked, the same turn numbers.
 
-use std::cmp::Reverse;
+use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
 
@@ -217,7 +217,7 @@ impl Engine {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProjectMatcher {
     /// The directory as written (absolute, `.` and `..` resolved without the disk), and with
-    /// symlinks resolved when it exists.
+    /// symlinks resolved (see `resolve_symlinks`) when that differs.
     Dir { written: PathBuf, resolved: Option<PathBuf> },
     /// Lowercase.
     Text(String),
@@ -238,7 +238,7 @@ impl ProjectMatcher {
             cwd.join(arg)
         };
         let written = normalize_path(&path);
-        let resolved = written.canonicalize().ok().filter(|r| *r != written);
+        let resolved = resolve_symlinks(&written).filter(|r| *r != written);
         ProjectMatcher::Dir { written, resolved }
     }
 
@@ -261,6 +261,16 @@ impl ProjectMatcher {
             }
         }
     }
+}
+
+/// The path with symlinks resolved as far as it exists: its longest existing ancestor is
+/// resolved and the rest appended, so that a deleted `/tmp/x` is still `/private/tmp/x`.
+fn resolve_symlinks(path: &Path) -> Option<PathBuf> {
+    path.ancestors().find_map(|ancestor| {
+        let real = ancestor.canonicalize().ok()?;
+        let rest = path.strip_prefix(ancestor).expect("an ancestor is a prefix");
+        Some(if rest.as_os_str().is_empty() { real } else { real.join(rest) })
+    })
 }
 
 /// `.` and `..` resolved without looking at the disk.
@@ -316,7 +326,7 @@ pub fn select_sessions(db: &Db, filter: &SessionFilter) -> Result<Vec<SessionSum
         normalize(&id).to_string()
     });
     let mut real: HashMap<String, Option<PathBuf>> = HashMap::new();
-    let mut resolve = |p: &str| real.entry(p.to_string()).or_insert_with(|| Path::new(p).canonicalize().ok()).clone();
+    let mut resolve = |p: &str| real.entry(p.to_string()).or_insert_with(|| resolve_symlinks(Path::new(p))).clone();
     sessions.retain(|s| {
         filter.in_range(s)
             && filter.exclude.as_deref() != Some(s.id.as_str())
@@ -334,6 +344,9 @@ pub fn select_sessions(db: &Db, filter: &SessionFilter) -> Result<Vec<SessionSum
 pub struct SearchOptions {
     /// Snippets per session.
     pub snippets: usize,
+    pub sort: SortBy,
+    /// At most this many sessions in the outcome (the first ones in `sort` order); 0 for all.
+    pub limit: usize,
     /// Force a way of searching (tests and benchmarks); the index refuses what it cannot answer.
     pub engine: Option<Engine>,
     /// The scan's byte prefilter (off only to check that it never changes a result).
@@ -342,14 +355,16 @@ pub struct SearchOptions {
 
 impl Default for SearchOptions {
     fn default() -> Self {
-        SearchOptions { snippets: 3, engine: None, prefilter: true }
+        SearchOptions { snippets: 3, sort: SortBy::Recent, limit: 0, engine: None, prefilter: true }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct SearchOutcome {
     pub engine: Engine,
-    /// Most recently active first (`sort_results` reorders).
+    /// Sessions found, before the limit.
+    pub total: usize,
+    /// In `sort` order, at most `limit`.
     pub sessions: Vec<SessionHits>,
     /// What the scan read and skipped; `None` for the index.
     pub scan: Option<ScanStats>,
@@ -364,6 +379,9 @@ pub struct SessionHits {
     pub counts: BTreeMap<Kind, u32>,
     /// Per TERM, the items that contain it.
     pub term_hits: Vec<u32>,
+    /// The session's turns where this search numbered them (the index's prompt rows, or the
+    /// prompts in the transcript the scan read), so no snippet's turn is above it.
+    pub turns: u32,
     pub snippets: Vec<Hit>,
 }
 
@@ -397,15 +415,22 @@ pub enum SortBy {
     Hits,
 }
 
-pub fn sort_results(results: &mut [SessionHits], by: SortBy) {
-    let recent = |a: &SessionHits, b: &SessionHits| b.updated_at.cmp(&a.updated_at).then_with(|| a.session_id.cmp(&b.session_id));
-    match by {
-        SortBy::Recent => results.sort_by(recent),
-        SortBy::Hits => results.sort_by(|a, b| b.total().cmp(&a.total()).then_with(|| recent(a, b))),
+impl SortBy {
+    fn order(self, a: &SessionHits, b: &SessionHits) -> Ordering {
+        let recent = b.updated_at.cmp(&a.updated_at).then_with(|| a.session_id.cmp(&b.session_id));
+        match self {
+            SortBy::Recent => recent,
+            SortBy::Hits => b.total().cmp(&a.total()).then(recent),
+        }
     }
 }
 
-/// A session's number of turns (its `prompt` rows).
+/// How many of `total` sessions are shown.
+fn shown(limit: usize, total: usize) -> usize {
+    if limit == 0 { total } else { limit.min(total) }
+}
+
+/// A session's number of turns (its `prompt` rows in the index).
 pub fn turn_count(db: &Db, session_id: &str) -> Result<u32> {
     let mut stmt = db.conn().prepare_cached("SELECT count(*) FROM messages WHERE session_id = ?1 AND kind = 'prompt'")?;
     Ok(stmt.query_row([session_id], |r| r.get(0))?)
@@ -418,15 +443,20 @@ pub fn search(db: &Db, sessions: &[SessionSummary], query: &Query, kinds: &KindS
     if engine == Engine::Index && natural == Engine::Scan {
         bail!("the index cannot answer regexes or tool kinds");
     }
-    let (mut results, scan) = match engine {
-        Engine::Index => (search_index(db, sessions, query, kinds, opts.snippets)?, None),
-        Engine::Scan => {
-            let (results, stats) = super::scan::search_scan(sessions, query, kinds, opts.snippets, opts.prefilter);
-            (results, Some(stats))
+    Ok(match engine {
+        Engine::Index => {
+            let (sessions, total) = search_index(db, sessions, query, kinds, opts)?;
+            SearchOutcome { engine, total, sessions, scan: None }
         }
-    };
-    sort_results(&mut results, SortBy::Recent);
-    Ok(SearchOutcome { engine, sessions: results, scan })
+        Engine::Scan => {
+            // the snippets come with the reading, for every session found
+            let (mut results, stats) = super::scan::search_scan(sessions, query, kinds, opts.snippets, opts.prefilter);
+            results.sort_by(|a, b| opts.sort.order(a, b));
+            let total = results.len();
+            results.truncate(shown(opts.limit, total));
+            SearchOutcome { engine, total, sessions: results, scan: Some(stats) }
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -523,6 +553,7 @@ pub fn tool_input_text(input: &Map<String, Value>) -> String {
 
 /// One index row with a TERM.
 struct Row {
+    id: i64,
     session: usize,
     kind: Kind,
     offset: u64,
@@ -530,7 +561,15 @@ struct Row {
     mask: TermMask,
 }
 
-fn search_index(db: &Db, sessions: &[SessionSummary], query: &Query, kinds: &KindSet, limit: usize) -> Result<Vec<SessionHits>> {
+impl Row {
+    fn item(&self) -> ItemRef {
+        ItemRef { kind: self.kind, offset: self.offset, sub: 0, mask: self.mask }
+    }
+}
+
+/// The sessions shown, with their snippets and turns (looked up for those only), and how many
+/// were found.
+fn search_index(db: &Db, sessions: &[SessionSummary], query: &Query, kinds: &KindSet, opts: &SearchOptions) -> Result<(Vec<SessionHits>, usize)> {
     let wanted: HashMap<&str, usize> = sessions.iter().enumerate().map(|(i, s)| (s.id.as_str(), i)).collect();
     let text_kinds: Vec<TextKind> = kinds.kinds().into_iter().filter_map(Kind::text_kind).collect();
     let mut rows: HashMap<i64, Row> = HashMap::new();
@@ -538,43 +577,52 @@ fn search_index(db: &Db, sessions: &[SessionSummary], query: &Query, kinds: &Kin
         for alt in &term.alternatives {
             rows_with(db, alt, &text_kinds, &mut |id, session_id, kind, offset, ts| {
                 if let Some(&session) = wanted.get(session_id) {
-                    rows.entry(id).or_insert(Row { session, kind, offset, ts, mask: 0 }).mask |= 1 << t;
+                    rows.entry(id).or_insert(Row { id, session, kind, offset, ts, mask: 0 }).mask |= 1 << t;
                 }
             })?;
         }
     }
-    let mut per_session: HashMap<usize, Vec<(i64, ItemRef, i64)>> = HashMap::new();
-    for (id, row) in rows {
-        let item = ItemRef { kind: row.kind, offset: row.offset, sub: 0, mask: row.mask };
-        per_session.entry(row.session).or_default().push((id, item, row.ts));
+    let mut per_session: HashMap<usize, Vec<Row>> = HashMap::new();
+    for row in rows.into_values() {
+        per_session.entry(row.session).or_default().push(row);
     }
-    let mut text_of = db.conn().prepare_cached("SELECT text FROM messages WHERE id = ?1")?;
-    let mut turn_at = db.conn().prepare_cached(
-        "SELECT count(*) FROM messages WHERE session_id = ?1 AND kind = 'prompt' AND byte_offset <= ?2",
-    )?;
-    let mut out = Vec::new();
+    let mut results: Vec<(SessionHits, Vec<Row>)> = Vec::new();
     for (session, found) in per_session {
-        let items: Vec<ItemRef> = found.iter().map(|(_, item, _)| *item).collect();
+        let items: Vec<ItemRef> = found.iter().map(Row::item).collect();
         let Some((counts, term_hits)) = tally(&items, query, kinds) else { continue };
         let s = &sessions[session];
-        let mut snippets = Vec::new();
-        for i in pick(&items, limit) {
-            let (id, item, ts) = &found[i];
-            let text: String = text_of.query_row([id], |r| r.get(0))?;
-            let turn: u32 = turn_at.query_row(rusqlite::params![s.id, item.offset as i64], |r| r.get(0))?;
-            snippets.push(Hit {
+        let hits = SessionHits { session_id: s.id.clone(), updated_at: s.updated_at, counts, term_hits, turns: 0, snippets: Vec::new() };
+        results.push((hits, found));
+    }
+    results.sort_by(|a, b| opts.sort.order(&a.0, &b.0));
+    let total = results.len();
+    results.truncate(shown(opts.limit, total));
+    let mut text_of = db.conn().prepare_cached("SELECT text FROM messages WHERE id = ?1")?;
+    let mut prompts_of =
+        db.conn().prepare_cached("SELECT byte_offset FROM messages WHERE session_id = ?1 AND kind = 'prompt' ORDER BY byte_offset")?;
+    let mut out = Vec::with_capacity(results.len());
+    for (mut hits, found) in results {
+        let prompts: Vec<i64> = prompts_of.query_map([&hits.session_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        hits.turns = prompts.len() as u32;
+        let items: Vec<ItemRef> = found.iter().map(Row::item).collect();
+        for i in pick(&items, opts.snippets) {
+            let (row, item) = (&found[i], &items[i]);
+            let text: String = text_of.query_row([row.id], |r| r.get(0))?;
+            // the prompts up to the item, itself included
+            let turn = prompts.partition_point(|&p| p <= item.offset as i64) as u32;
+            hits.snippets.push(Hit {
                 kind: item.kind,
                 tool: None,
                 turn: (turn > 0).then_some(turn),
-                ts: (*ts != 0).then_some(*ts),
+                ts: (row.ts != 0).then_some(row.ts),
                 offset: item.offset,
                 terms: indexes(item.mask),
                 text: query.matcher().snippet(&text, SNIPPET_BEFORE, SNIPPET_AFTER),
             });
         }
-        out.push(SessionHits { session_id: s.id.clone(), updated_at: s.updated_at, counts, term_hits, snippets });
+        out.push(hits);
     }
-    Ok(out)
+    Ok((out, total))
 }
 
 /// Every indexed row of these kinds whose text contains `alt` (case-insensitive). Three

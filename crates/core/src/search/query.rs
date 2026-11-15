@@ -39,6 +39,9 @@ pub enum QueryError {
     EmptyTerm(usize),
     /// A regular expression that can match the empty string, so it would match everything.
     MatchesEmpty(usize),
+    /// More than the regex engine compiles (10 MiB of program): one huge TERM, or several large
+    /// regexes that each compile but not all together.
+    TooLarge,
 }
 
 impl std::fmt::Display for QueryError {
@@ -48,6 +51,7 @@ impl std::fmt::Display for QueryError {
             QueryError::TooManyTerms => write!(f, "at most {MAX_TERMS} TERMs"),
             QueryError::EmptyTerm(i) => write!(f, "term {} has nothing to match", i + 1),
             QueryError::MatchesEmpty(i) => write!(f, "term {} can match empty text, so it would match everything", i + 1),
+            QueryError::TooLarge => write!(f, "the TERMs are too large to match together; use fewer or smaller ones"),
         }
     }
 }
@@ -64,7 +68,7 @@ impl Query {
         }
         let terms: Vec<Term> =
             terms.iter().enumerate().map(|(i, t)| if regex { regex_term(i, t) } else { literal_term(i, t) }).collect::<Result<_, _>>()?;
-        let union = union_matcher(&terms, regex);
+        let union = union_matcher(&terms, regex).ok_or(QueryError::TooLarge)?;
         Ok(Query { terms, regex, same_message, union })
     }
 
@@ -133,7 +137,7 @@ fn literal_term(i: usize, term: &str) -> Result<Term, QueryError> {
     if alternatives.is_empty() {
         return Err(QueryError::EmptyTerm(i));
     }
-    let re = build(&alternation(alternatives.iter().map(String::as_str))).expect("escaped text always compiles");
+    let re = build(&alternation(alternatives.iter().map(String::as_str))).map_err(|_| QueryError::TooLarge)?;
     Ok(Term { alternatives, fallback: false, re })
 }
 
@@ -147,7 +151,7 @@ fn regex_term(i: usize, term: &str) -> Result<Term, QueryError> {
             Ok(Term { alternatives: vec![term.to_string()], fallback: false, re })
         }
         Err(_) => {
-            let re = build(&regex::escape(term)).expect("escaped text always compiles");
+            let re = build(&regex::escape(term)).map_err(|_| QueryError::TooLarge)?;
             Ok(Term { alternatives: vec![term.to_string()], fallback: true, re })
         }
     }
@@ -174,12 +178,14 @@ fn alternation<'a>(alternatives: impl Iterator<Item = &'a str>) -> String {
     alts.iter().map(|a| regex::escape(a)).collect::<Vec<_>>().join("|")
 }
 
-fn union_matcher(terms: &[Term], regex: bool) -> Matcher {
+/// One regex for every TERM, to highlight them; `None` when it is too large to compile (each
+/// TERM alone did).
+fn union_matcher(terms: &[Term], regex: bool) -> Option<Matcher> {
     let pattern = if regex {
         terms.iter().map(|t| format!("(?:{})", t.re.as_str())).collect::<Vec<_>>().join("|")
     } else {
         alternation(terms.iter().flat_map(|t| t.alternatives.iter().map(String::as_str)))
     };
-    let re = build(&pattern).expect("the TERMs compiled one by one");
-    Matcher { pattern: format!("(?i:{})", re.as_str()), re }
+    let re = build(&pattern).ok()?;
+    Some(Matcher { pattern: format!("(?i:{})", re.as_str()), re })
 }

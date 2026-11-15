@@ -14,7 +14,7 @@ use agent_session_core::model::SessionSummary;
 use agent_session_core::search::query::{Query, QueryError};
 use agent_session_core::search::sessions::{
     Engine, Kind, KindError, KindSet, ProjectMatcher, SearchOptions, SessionFilter, SessionHits, SortBy, search,
-    select_sessions, sort_results, turn_count,
+    select_sessions, turn_count,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -224,6 +224,11 @@ fn a_term_with_nothing_to_match_is_an_error() {
     assert!(Query::parse(&[], false, false).is_err());
     let many: Vec<String> = (0..65).map(|i| format!("t{i}")).collect();
     assert_eq!(Query::parse(&many, false, false).err(), Some(QueryError::TooManyTerms));
+    let big = ["\\w{200}", "x\\w{200}"];
+    for one in big {
+        assert_eq!(Query::parse(&terms(&[one]), true, false).unwrap().regex_fallback(), Vec::<usize>::new(), "{one} compiles alone");
+    }
+    assert_eq!(Query::parse(&terms(&big), true, false).err(), Some(QueryError::TooLarge), "but not with the other, to highlight both");
     assert!(QueryError::EmptyTerm(1).to_string().contains("term 2"), "messages count TERMs from 1");
 }
 
@@ -359,9 +364,11 @@ fn kinds_choose_the_text_searched() {
         .notification("background task quokka finished")
         .meta("skill body mentions narwhal")
         .tool("toolu_1", "Bash", json!({"command": "ls /tmp/wombat", "description": "List the wombat dir"}), "wombat.txt\nexit code 7")
+        .tool("toolu_2", "Read", json!({"file_path": "/x/quagga.conf", "limit": 20, "pages": [1, 2]}), "contents")
         .interrupt();
     let w = world(&[(&a, BASE_MS + DAY)]);
     let found = |term: &str, in_: Option<&str>, tools: &[&str]| !run(&w, &query(&[term]), &kinds(in_, tools), 3).is_empty();
+    let found_re = |term: &str| !run(&w, &Query::parse(&terms(&[term]), true, false).unwrap(), &kinds(Some("tool-input"), &[]), 3).is_empty();
     assert!(found("zanzibar", None, &[]), "thinking is searched by default");
     assert!(!found("zanzibar", Some("prompt,reply"), &[]));
     assert!(!found("quokka", None, &[]), "other is not searched by default");
@@ -375,6 +382,14 @@ fn kinds_choose_the_text_searched() {
     assert!(found("/tmp/wombat", Some("tool-input"), &[]));
     assert!(found("$ ls /tmp", Some("tool-input"), &[]), "a Bash command reads as `$ command`");
     assert!(found("# List the", Some("tool-input"), &[]), "its description as `# description`");
+    assert!(found("file_path:", Some("tool-input"), &[]), "other fields as `key: value`");
+    assert!(found("limit: 20", Some("tool-input"), &[]));
+    assert!(found("pages: [1, 2]", Some("tool-input"), &[]), "nested values as JSON with spaces after `,` and `:`");
+    assert!(found("$", Some("tool-input"), &[]));
+    assert!(found("#", Some("tool-input"), &[]));
+    assert!(found_re("file_path:.*quagga"));
+    assert!(found_re(" /x/quagga"), "a regex keeps its spaces, and the text has one after `:`");
+    assert!(found_re("\\[1, 2\\]"));
     assert!(found("wombat", None, &["bash"]), "--tool alone searches that tool's calls");
     assert!(!found("wombat", None, &["Read"]));
 }
@@ -505,6 +520,26 @@ fn both_ways_number_turns_alike_on_the_turn_rule_fixtures() {
         (Kind::Other, Some(3), "图片之后的同 uuid 提问".into()),
     ]);
     assert_eq!(turn_count(&w.db, &rules.id).unwrap(), 8, "a local command and its output are two turns");
+    assert_eq!(hits[0].turns, 8, "both ways count the session's turns too");
+}
+
+/// When the transcript has grown since it was indexed, the scan numbers turns by the file it read
+/// and counts the session's turns there too, so no snippet's turn is above the count.
+#[test]
+fn the_scan_counts_turns_in_the_transcript_it_read() {
+    let mut a = T::new(SA, "/Users/me/Code/edge");
+    a.prompt("first wombat").reply("ok");
+    let w = world(&[(&a, BASE_MS + DAY)]);
+    a.prompt("second").prompt("third wombat");
+    let path = w.claude_root().join("projects").join(key_of(&a.cwd)).join(format!("{SA}.jsonl"));
+    fs::write(&path, a.text()).unwrap();
+    let q = query(&["wombat"]);
+    let k = kinds(None, &[]);
+    let scan = search(&w.db, &all_sessions(&w), &q, &k, &opts(Some(Engine::Scan), 5)).unwrap().sessions;
+    assert_eq!(scan[0].turns, 3);
+    assert_eq!(scan[0].snippets.iter().map(|h| h.turn).collect::<Vec<_>>(), vec![Some(1), Some(3)]);
+    let index = search(&w.db, &all_sessions(&w), &q, &k, &opts(Some(Engine::Index), 5)).unwrap().sessions;
+    assert_eq!((index[0].turns, index[0].snippets.len()), (1, 1), "the index has not seen the new turns yet");
 }
 
 #[test]
@@ -596,7 +631,13 @@ fn project_directories_match_through_symlinks_on_either_side() {
     a.prompt("hello");
     let mut b = T::new(SB, real.join("other").to_str().unwrap());
     b.prompt("hello");
-    let w = world(&[(&a, BASE_MS + DAY), (&b, BASE_MS + 2 * DAY)]);
+    // directories deleted since (never created here): the part that still exists is resolved
+    let mut c = T::new(SC, real.join("gone/deep").to_str().unwrap());
+    c.prompt("hello");
+    const SD: &str = "dddddddd-0000-4000-8000-00000000000d";
+    let mut d = T::new(SD, link.join("gone2").to_str().unwrap());
+    d.prompt("hello");
+    let w = world(&[(&a, BASE_MS + DAY), (&b, BASE_MS + 2 * DAY), (&c, BASE_MS + 3 * DAY), (&d, BASE_MS + 4 * DAY)]);
     let home = tmp.path().join("home");
     let p = |arg: &Path| {
         let projects = vec![ProjectMatcher::parse(arg.to_str().unwrap(), Path::new("/"), &home)];
@@ -604,7 +645,9 @@ fn project_directories_match_through_symlinks_on_either_side() {
     };
     assert_eq!(p(&real.join("app")), vec![SA], "written through the link, asked by the real path");
     assert_eq!(p(&link.join("other")), vec![SB], "written by the real path, asked through the link");
-    assert_eq!(p(&link), vec![SB, SA]);
+    assert_eq!(p(&link.join("gone")), vec![SC], "a deleted directory, asked through the link");
+    assert_eq!(p(&real.join("gone2")), vec![SD], "a deleted directory written through the link");
+    assert_eq!(p(&link), vec![SD, SC, SB, SA]);
 }
 
 #[test]
@@ -638,12 +681,19 @@ fn results_sort_by_recent_activity_or_by_hits() {
     let mut c = T::new(SC, "/Users/me/Code/edge");
     c.prompt("token").reply("token").reply("token");
     let w = world(&[(&a, BASE_MS + DAY), (&b, BASE_MS + 3 * DAY), (&c, BASE_MS + 2 * DAY)]);
-    let mut hits = run(&w, &query(&["token"]), &kinds(None, &[]), 3);
-    assert_eq!(ids(&hits), vec![SB, SC, SA]);
-    sort_results(&mut hits, SortBy::Hits);
-    assert_eq!(ids(&hits), vec![SC, SA, SB], "most hits first, ties by recent activity");
-    sort_results(&mut hits, SortBy::Recent);
-    assert_eq!(ids(&hits), vec![SB, SC, SA]);
+    let (q, k) = (query(&["token"]), kinds(None, &[]));
+    assert_eq!(ids(&run(&w, &q, &k, 3)), vec![SB, SC, SA], "recent activity by default");
+    let sessions = all_sessions(&w);
+    for engine in [Engine::Index, Engine::Scan] {
+        let ask = |sort, limit| search(&w.db, &sessions, &q, &k, &SearchOptions { sort, limit, ..opts(Some(engine), 3) }).unwrap();
+        let by_hits = ask(SortBy::Hits, 0);
+        assert_eq!(ids(&by_hits.sessions), vec![SC, SA, SB], "most hits first, ties by recent activity");
+        let top = ask(SortBy::Hits, 2);
+        assert_eq!((top.total, ids(&top.sessions)), (3, vec![SC, SA]), "the limit cuts the sorted list; the total counts all");
+        assert_eq!(top.sessions, by_hits.sessions[..2], "{engine:?}: the sessions shown are complete");
+        let recent = ask(SortBy::Recent, 1);
+        assert_eq!((recent.total, ids(&recent.sessions)), (3, vec![SB]));
+    }
 }
 
 #[test]
@@ -673,33 +723,50 @@ fn median(mut v: Vec<f64>) -> f64 {
 
 /// `;` separates queries, `,` the TERMs of one.
 fn bench_queries(var: &str, default: &str) -> Vec<Vec<String>> {
-    std::env::var(var).unwrap_or_else(|_| default.to_string()).split(';').map(|q| q.split(',').map(String::from).collect()).collect()
+    let queries = std::env::var(var).unwrap_or_else(|_| default.to_string());
+    queries.split(';').filter(|q| !q.is_empty()).map(|q| q.split(',').map(String::from).collect()).collect()
 }
 
-/// Index: common and ordinary words over all time (target 100 ms). Scan: the last 30 days with
-/// tool kinds, literal (target 2 s), and how much of it the prefilter skipped whole.
+/// Index: common and ordinary words over all time (target 100 ms), each run on a new connection
+/// as a one-off `asm search` would, the first run apart. Scan: the last 30 days with tool kinds,
+/// literal (target 2 s), and how much of it the prefilter skipped whole.
 #[test]
 #[ignore]
 fn real_search_timings() {
     let db = bench_db();
-    let runs = 3;
+    let runs: usize = std::env::var("ASM_BENCH_RUNS").map_or(3, |r| r.parse().unwrap());
+    // sessions shown, as `asm search -n` (default 20, 0 for all): only they get snippets
+    let limit: usize = std::env::var("ASM_BENCH_LIMIT").map_or(20, |r| r.parse().unwrap());
     let all = select_sessions(&db, &SessionFilter::default()).unwrap();
     println!("sessions: {}", all.len());
-    for t in bench_queries("ASM_BENCH_INDEX", "error;healthz;连不上|无法连接|offline,healthz|健康检查;网络;session,cache") {
+    drop(db);
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    for t in bench_queries("ASM_BENCH_INDEX", "error;healthz;连不上|无法连接|offline,healthz|健康检查;网络;session,cache;的;Ωx") {
         let q = Query::parse(&t, false, false).unwrap();
-        let mut times = Vec::new();
+        let (mut select, mut total) = (Vec::new(), Vec::new());
         let mut out = None;
         for _ in 0..runs {
             let start = std::time::Instant::now();
+            let db = bench_db();
             let sessions = select_sessions(&db, &SessionFilter::default()).unwrap();
-            let r = search(&db, &sessions, &q, &KindSet::default(), &SearchOptions::default()).unwrap();
-            times.push(start.elapsed().as_secs_f64() * 1000.0);
+            select.push(ms(start));
+            let r = search(&db, &sessions, &q, &KindSet::default(), &SearchOptions { limit, ..SearchOptions::default() }).unwrap();
+            total.push(ms(start));
             out = Some(r);
         }
         let out = out.unwrap();
         let items: u32 = out.sessions.iter().map(SessionHits::total).sum();
-        println!("index {t:?}: median {:.1} ms ({:?}), {} sessions, {items} items", median(times.clone()), times.iter().map(|t| format!("{t:.1}")).collect::<Vec<_>>(), out.sessions.len());
+        let f = |v: &[f64]| v.iter().map(|t| format!("{t:.1}")).collect::<Vec<_>>().join("/");
+        println!(
+            "index {t:?} -n {limit}: first {:.1} ms, median {:.1} ms (runs {}; open+select_sessions {}), {} sessions found, {items} items in those shown",
+            total[0],
+            median(total.clone()),
+            f(&total),
+            f(&select),
+            out.total
+        );
     }
+    let db = bench_db();
     let now = chrono::Utc::now().timestamp_millis();
     let filter = SessionFilter { since_ms: Some(now - 30 * DAY), ..Default::default() };
     for t in bench_queries("ASM_BENCH_SCAN", "database is locked;connection refused;error;healthz,连不上|无法连接|offline") {
@@ -767,6 +834,67 @@ fn real_index_and_scan_agree() {
             println!("{t:?} same_message={same}: index {} sessions, scan {} sessions, {bad} differ", index.len(), scan.len());
             differ += bad;
         }
+    }
+    assert_eq!(differ, 0);
+}
+
+
+/// On the last 30 days of real transcripts (those not written in the last minute, so that both
+/// runs read the same bytes), the byte prefilter does not change any result of a tool search.
+/// `ASM_BENCH_TOOLS` overrides the queries: `;` between them, `,` between TERMs, a leading `re:`
+/// for a regex query, `@Name ` before the TERMs for `--tool Name`.
+#[test]
+#[ignore]
+fn real_prefilter_keeps_tool_results() {
+    let db = bench_db();
+    let now = chrono::Utc::now().timestamp_millis();
+    let sessions: Vec<SessionSummary> = select_sessions(&db, &SessionFilter { since_ms: Some(now - 30 * DAY), ..Default::default() })
+        .unwrap()
+        .into_iter()
+        .filter(|s| {
+            let Some(path) = s.file_path.as_deref() else { return false };
+            fs::metadata(path).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > 60)
+        })
+        .collect();
+    println!("{} sessions of the last 30 days, not written in the last minute", sessions.len());
+    let default = "file_path:;limit: 2000;$ git;#;error;connection refused;连不上|无法连接;re:file_path:.*config;re:\\$ cargo (test|build);@Bash git push;@Read file_path:;old_string,new_string";
+    let mut differ = 0;
+    for spec in std::env::var("ASM_BENCH_TOOLS").unwrap_or_else(|_| default.to_string()).split(';') {
+        let (regex, spec) = match spec.strip_prefix("re:") {
+            Some(rest) => (true, rest),
+            None => (false, spec),
+        };
+        let (tools, spec) = match spec.strip_prefix('@') {
+            Some(rest) => {
+                let (tool, rest) = rest.split_once(' ').unwrap();
+                (vec![tool.to_string()], rest)
+            }
+            None => (Vec::new(), spec),
+        };
+        let q = Query::parse(&spec.split(',').map(String::from).collect::<Vec<_>>(), regex, false).unwrap();
+        let k = if tools.is_empty() { KindSet::parse(Some("tool"), &[]).unwrap() } else { KindSet::parse(None, &tools).unwrap() };
+        let run = |prefilter| {
+            let start = std::time::Instant::now();
+            let o = search(&db, &sessions, &q, &k, &SearchOptions { prefilter, ..opts(Some(Engine::Scan), 5) }).unwrap();
+            (o, start.elapsed().as_millis())
+        };
+        let ((on, on_ms), (off, off_ms)) = (run(true), run(false));
+        let st = on.scan.as_ref().unwrap();
+        let by_id: HashMap<&str, &SessionHits> = off.sessions.iter().map(|h| (h.session_id.as_str(), h)).collect();
+        let mut bad = on.sessions.iter().filter(|h| by_id.get(h.session_id.as_str()) != Some(h)).count();
+        bad += off.sessions.len().saturating_sub(on.sessions.len());
+        let items: u32 = off.sessions.iter().map(SessionHits::total).sum();
+        println!(
+            "{}{:?}{}: prefilter on {} sessions ({on_ms} ms, {} of {} files skipped whole), off {} sessions / {items} items ({off_ms} ms), {bad} differ",
+            if regex { "regex " } else { "" },
+            q.terms().iter().map(|t| t.alternatives.join("|")).collect::<Vec<_>>(),
+            if tools.is_empty() { String::new() } else { format!(" --tool {}", tools.join(",")) },
+            on.sessions.len(),
+            st.skipped_files,
+            st.files,
+            off.sessions.len(),
+        );
+        differ += bad;
     }
     assert_eq!(differ, 0);
 }

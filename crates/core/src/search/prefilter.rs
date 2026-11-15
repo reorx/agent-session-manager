@@ -11,8 +11,9 @@
 //! piece cannot be prefiltered and lets every file and line through.
 //!
 //! Tool inputs are searched as text built from the JSON (`# description`, `$ command`,
-//! `key: value`, nested values as JSON with `: ` and `, `), so when they are searched,
-//! alternatives are also cut at those separators.
+//! `key: value`, nested values as JSON with `: ` and `, `), where the raw line has `"key":"value"`
+//! and no spaces. So when they are searched, alternatives are also cut at every `:`, `,`, `$` and
+//! `#`, and a piece's leading spaces are dropped.
 
 use regex::bytes::{Regex, RegexBuilder};
 use regex_syntax::hir::literal::{ExtractKind, Extractor};
@@ -45,10 +46,10 @@ impl Prefilter {
             } else {
                 term.alternatives.iter().map(|a| needle(a, tool_input)).collect::<Option<Vec<_>>>()
             };
-            match needles {
-                Some(needles) => {
-                    terms.push(Some(any_of(&needles)));
-                    all.extend(needles);
+            match needles.as_deref().and_then(any_of) {
+                Some(re) => {
+                    terms.push(Some(re));
+                    all.extend(needles.expect("built from them"));
                 }
                 None => {
                     open = true;
@@ -56,7 +57,7 @@ impl Prefilter {
                 }
             }
         }
-        let any = (!open).then(|| any_of(&all));
+        let any = if open { None } else { any_of(&all) };
         Prefilter { terms, any }
     }
 
@@ -81,43 +82,24 @@ impl Prefilter {
     }
 }
 
-/// Any of the pieces, ASCII case folded, everything else byte for byte.
-fn any_of(needles: &[String]) -> Regex {
+/// Any of the pieces, ASCII case folded, everything else byte for byte; `None` when too many to
+/// compile (then nothing is ruled out).
+fn any_of(needles: &[String]) -> Option<Regex> {
     let pattern = needles.iter().map(|n| regex::escape(n)).collect::<Vec<_>>().join("|");
-    RegexBuilder::new(&format!("(?i-u:{pattern})")).build().expect("escaped pieces compile")
+    RegexBuilder::new(&format!("(?i-u:{pattern})")).build().ok()
 }
 
 /// What to search in the raw bytes for one literal alternative; `None` when nothing can be.
 pub(crate) fn needle(alt: &str, tool_input: bool) -> Option<String> {
-    let mut best: &str = "";
-    for piece in alt.split(|c: char| c == '"' || c == '\\' || c.is_control() || c == '\u{fffd}' || non_ascii_cased(c)) {
-        let pieces: Vec<&str> = if tool_input { split_separators(piece) } else { vec![piece] };
-        for p in pieces {
-            if p.len() > best.len() {
-                best = p;
-            }
-        }
-    }
+    let cut = |c: char| {
+        c == '"' || c == '\\' || c.is_control() || c == '\u{fffd}' || non_ascii_cased(c) || (tool_input && matches!(c, ':' | ',' | '$' | '#'))
+    };
+    let best = alt
+        .split(cut)
+        // the spaces a tool input's text adds all follow one of its separators
+        .map(|p| if tool_input { p.trim_start_matches(' ') } else { p })
+        .fold("", |best, p| if p.len() > best.len() { p } else { best });
     (!best.is_empty()).then(|| best.to_string())
-}
-
-/// Cut at the separators the tool input text adds: `: `, `, `, `$ `, `# `.
-fn split_separators(s: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    let bytes = s.as_bytes();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if bytes[i + 1] == b' ' && matches!(bytes[i], b':' | b',' | b'$' | b'#') {
-            out.push(&s[start..i]);
-            start = i + 2;
-            i += 2;
-        } else {
-            i += 1;
-        }
-    }
-    out.push(&s[start..]);
-    out
 }
 
 /// What to search for a regex TERM: the literals every match starts (or ends) with, each cut
@@ -178,6 +160,13 @@ mod tests {
         assert_eq!(needle("file_path: /x/a.rs", true).as_deref(), Some("file_path"));
         assert_eq!(needle("[1, 2, 3]", true).as_deref(), Some("[1"));
         assert_eq!(needle("$ git push", false).as_deref(), Some("$ git push"));
+        assert_eq!(needle("file_path:", true).as_deref(), Some("file_path"), "the raw line has `\"file_path\":`");
+        assert_eq!(needle("$", true), None);
+        assert_eq!(needle("#", true), None);
+        assert_eq!(needle(" /x/a.rs", true).as_deref(), Some("/x/a.rs"), "a space may follow a separator in the text only");
+        assert_eq!(needle("limit:20", true).as_deref(), Some("limit"));
+        let p = Prefilter::new(&re("file_path:.*config"), true);
+        assert!(p.line_may_match(b"{\"input\":{\"file_path\":\"/x/config.toml\"}}"));
     }
 
     #[test]

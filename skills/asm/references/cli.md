@@ -126,7 +126,7 @@ snippet labels use these names.
 | `prompt` | A user-side record that opens a numbered turn (see Turns): a message the user typed, or a local command or its output (`<command-name>`, `<local-command-stdout>`, `<bash-input>`, `<bash-stdout>`). Not an interruption marker, not a repeat (same uuid) of an earlier user-side record with text or media of its own, not a subagent's (sidechain) record. A pasted image without text is a prompt with empty text |
 | `reply` | Text the agent wrote to the user, including commentary between tool calls, not only the final answer |
 | `thinking` | The agent's thinking. Only about one block in ten still has its text; the rest kept only a signature |
-| `tool-input` | The input of a tool call, as `key: value` text (a Bash command as `$ command`) |
+| `tool-input` | The input of a tool call, as text: `# description` and `$ command` lines first when the input has them (Bash), then `key: value` per other field, nested values as JSON with `: ` and `, ` (`file_path: /x/a.rs`, `edits: [{"old_string": "a"}]`) |
 | `tool-output` | The output of a tool call |
 | `other` | Text that showed up on the user side without being typed: compact summaries, background task notifications, interruption markers (`[Request interrupted by user]`), and the like. The output of a local command (`<local-command-stdout>`, `<bash-stdout>`) is a `prompt`, since it starts a turn (see Turns) |
 
@@ -171,6 +171,9 @@ asm search '连不上|无法连接|offline' 'healthz|健康检查'
   position included, is an error (exit 2): `'a|'`, `'x*'`, `'\b'`, `'^'`, `'foo|\b'`. A TERM that does not
   compile is matched as one literal text, not split at `|`, and stderr says
   `term 2 is not a valid regular expression, matched as literal text` (TERMs count from 1).
+- TERMs too large for the regular expression engine are an error (exit 2), also when each one
+  alone is fine but they are too large together (they are matched as one expression to mark
+  them in snippets), e.g. `--regex '\w{200}' 'x\w{200}'`.
 
 ### Turns
 
@@ -259,11 +262,11 @@ asm search TERM... [--in KINDS] [--tool NAME]... [--regex] [--same-message]
 
 How it searches: when every kind searched is in the index (`prompt`, `reply`, `thinking`,
 `other`) and `--regex` is off, the full-text index answers (tens of milliseconds). Tool kinds and
-`--regex` scan the transcript files of the sessions in range. Every file is read, but only the
-lines that can contain a TERM are parsed, and a file that cannot contain every TERM is not
-parsed at all; reading dominates, at about half a second per GB of transcripts in range (more
-when the files are not in the OS file cache), so give tool searches a time range. Subagent
-conversations are not searched.
+`--regex` scan the transcript files of the sessions in range. Every file is read. A file that
+cannot contain every TERM is not parsed at all; in the others, the lines parsed are those that
+can contain a TERM and the user-side lines with text or media (they number the turns). Reading
+dominates, at about half a second per GB of transcripts in range (more when the files are not in
+the OS file cache), so give tool searches a time range. Subagent conversations are not searched.
 
 Projects (`--project P`):
 
@@ -272,7 +275,9 @@ Projects (`--project P`):
   without looking at the disk, and a trailing `/` does not matter. The directory need not exist.
   It selects the project at that directory and the projects inside it. Paths are compared both
   as written and with symlinks resolved, on either side, so `/tmp/x` and `/private/tmp/x` are
-  the same project. Every path `asm projects` prints works as P.
+  the same project. For a directory that no longer exists, the symlinks in the part of its path
+  that still exists are resolved (a deleted `/tmp/x` is still `/private/tmp/x`). Every path
+  `asm projects` prints works as P.
 - Anything else is text: projects whose path, or encoded directory name under `projects/`,
   contains it (case-insensitive).
 - When no project matches, the result is 0 sessions with `try: without --project`, not an error
@@ -408,7 +413,7 @@ JSON output (`--json`):
 | `first_prompt` | The first prompt, cleaned of injected tags, at most 2,000 characters (`…` when cut) |
 | `project` | Last component of `project_path` |
 | `project_path`, `cwd` | The project directory and the working directory the session started in |
-| `turns` | Number of turns |
+| `turns` | Number of turns, counted where the snippets' turn numbers come from (the index, or the transcript as the scan read it), so no snippet's turn is above it |
 | `cost_usd` | Cost priced from token usage, subagents included; `null` when no call could be priced |
 | `main_model` | Main model (the one that cost the most), `null` without API calls |
 | `kind` | `cli`, `sdk`, `background` or `history` (the app's Kind column) |

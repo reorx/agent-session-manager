@@ -213,9 +213,10 @@ impl TranscriptParser {
     }
 
     fn process_line(&mut self, line: &[u8], offset: u64, out: &mut Vec<MessageRow>, usage: &mut UsageSink) {
-        match classify(line) {
+        let kind = classify(line);
+        match kind {
             LineKind::Skip => return,
-            LineKind::User if self.usage_only || !(user_line_may_have_text(line) || user_line_may_have_media(line)) => return,
+            LineKind::User if self.usage_only || !may_be_user_row(kind, line) => return,
             LineKind::Meta if self.usage_only => return,
             _ => {}
         }
@@ -583,10 +584,20 @@ fn json_string_after<'a>(hay: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     Some(&rest[1..1 + end])
 }
 
+/// Whether the parser reads `line` for a user row: a user line that may carry text or media, or
+/// a line its bytes do not classify. The other user lines (tool results only, the bulk of the
+/// corpus) are skipped unparsed. The session search's scan counts turns on these same lines.
+pub(crate) fn may_be_user_row(kind: LineKind, line: &[u8]) -> bool {
+    match kind {
+        LineKind::User => user_line_may_have_text(line) || user_line_may_have_media(line),
+        LineKind::Unknown => true,
+        LineKind::Skip | LineKind::Meta | LineKind::Assistant => false,
+    }
+}
+
 /// A user record only matters when it carries text: string content, or an array with a text
-/// block. Tool-result-only records (the bulk of the corpus) are skipped without parsing.
-/// (An image or document without text matters too, see `user_line_may_have_media`.)
-pub(crate) fn user_line_may_have_text(line: &[u8]) -> bool {
+/// block. (An image or document without text matters too, see `user_line_may_have_media`.)
+fn user_line_may_have_text(line: &[u8]) -> bool {
     let Some(at) = memmem::find(line, b"\"content\":") else { return false };
     let rest = &line[at + 10..];
     let skip = rest.iter().take_while(|b| b.is_ascii_whitespace()).count();
@@ -601,7 +612,7 @@ pub(crate) fn user_line_may_have_text(line: &[u8]) -> bool {
 /// pasted one opens a turn. Tool results carry images as well (screenshots read back) but always
 /// name a `tool_use_id`, which comes before their content, so those lines are ruled out after a
 /// few bytes.
-pub(crate) fn user_line_may_have_media(line: &[u8]) -> bool {
+fn user_line_may_have_media(line: &[u8]) -> bool {
     memmem::find(line, b"\"tool_use_id\"").is_none()
         && (memmem::find(line, b"\"type\":\"image\"").is_some() || memmem::find(line, b"\"type\":\"document\"").is_some())
 }

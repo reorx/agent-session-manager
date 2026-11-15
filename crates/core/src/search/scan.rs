@@ -18,9 +18,7 @@ use super::prefilter::Prefilter;
 use super::query::{Query, indexes};
 use super::regex::{Block, iter_texts};
 use super::sessions::{Hit, ItemRef, Kind, KindSet, SNIPPET_AFTER, SNIPPET_BEFORE, SessionHits, pick, tally, tool_input_text};
-use crate::claude::parse::{
-    Content, LineKind, RawRecord, classify, parse_content, user_line_may_have_media, user_line_may_have_text,
-};
+use crate::claude::parse::{Content, LineKind, RawRecord, classify, may_be_user_row, parse_content};
 use crate::format::parse_ts;
 use crate::model::SessionSummary;
 use crate::transcript::{RecordFilter, has_own_input, opens_turn};
@@ -115,7 +113,7 @@ fn scan_file(s: &SessionSummary, path: &Path, ctx: &Ctx) -> FileOutcome {
         out.skipped = true;
         return out;
     }
-    let mut found = find_items(&bytes, path, ctx);
+    let (mut found, turns) = find_items(&bytes, path, ctx);
     if found.is_empty() {
         return out;
     }
@@ -137,23 +135,19 @@ fn scan_file(s: &SessionSummary, path: &Path, ctx: &Ctx) -> FileOutcome {
     }
     name_tools(&bytes, picked.iter_mut().collect());
     let snippets = picked.into_iter().map(|f| snippet(&bytes, f, ctx)).collect();
-    out.hits = Some(SessionHits { session_id: s.id.clone(), updated_at: s.updated_at, counts, term_hits, snippets });
+    out.hits = Some(SessionHits { session_id: s.id.clone(), updated_at: s.updated_at, counts, term_hits, turns, snippets });
     out
 }
 
-/// Every item with a TERM, in file order, with the turn it belongs to.
-fn find_items(bytes: &[u8], path: &Path, ctx: &Ctx) -> Vec<Found> {
+/// Every item with a TERM, in file order, with the turn it belongs to; and the turns in the file.
+fn find_items(bytes: &[u8], path: &Path, ctx: &Ctx) -> (Vec<Found>, u32) {
     let mut found = Vec::new();
     let mut filter = RecordFilter::for_file(path);
     let mut turn: u32 = 0;
     for (offset, line) in lines(bytes) {
         let class = classify(line);
         // the lines the indexer parses for user rows: these decide the turns
-        let turn_line = match class {
-            LineKind::User => user_line_may_have_text(line) || user_line_may_have_media(line),
-            LineKind::Unknown => true,
-            _ => false,
-        };
+        let turn_line = may_be_user_row(class, line);
         let wanted = match class {
             LineKind::Skip | LineKind::Meta => false,
             LineKind::User => ctx.user_side,
@@ -189,7 +183,7 @@ fn find_items(bytes: &[u8], path: &Path, ctx: &Ctx) -> Vec<Found> {
             }
         }
     }
-    found
+    (found, turn)
 }
 
 /// Complete lines (a partial last line is still being written, the indexer waits for it too)
