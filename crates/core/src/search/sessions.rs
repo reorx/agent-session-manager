@@ -17,7 +17,7 @@ use crate::index::Db;
 use crate::model::{SessionSummary, TextKind};
 use crate::pricing::normalize;
 
-pub use super::scan::ScanStats;
+pub use super::scan::{READ_BUDGET, ScanStats};
 
 /// Characters a snippet keeps before the first hit of its item, and from its start.
 pub const SNIPPET_BEFORE: usize = 60;
@@ -351,11 +351,13 @@ pub struct SearchOptions {
     pub engine: Option<Engine>,
     /// The scan's byte prefilter (off only to check that it never changes a result).
     pub prefilter: bool,
+    /// Bytes of transcripts the scan holds in memory at once (see `scan::Budget`).
+    pub read_budget: u64,
 }
 
 impl Default for SearchOptions {
     fn default() -> Self {
-        SearchOptions { snippets: 3, sort: SortBy::Recent, limit: 0, engine: None, prefilter: true }
+        SearchOptions { snippets: 3, sort: SortBy::Recent, limit: 0, engine: None, prefilter: true, read_budget: READ_BUDGET }
     }
 }
 
@@ -450,7 +452,7 @@ pub fn search(db: &Db, sessions: &[SessionSummary], query: &Query, kinds: &KindS
         }
         Engine::Scan => {
             // the snippets come with the reading, for every session found
-            let (mut results, stats) = super::scan::search_scan(sessions, query, kinds, opts.snippets, opts.prefilter);
+            let (mut results, stats) = super::scan::search_scan(sessions, query, kinds, opts);
             results.sort_by(|a, b| opts.sort.order(a, b));
             let total = results.len();
             results.truncate(shown(opts.limit, total));

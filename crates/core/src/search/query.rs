@@ -141,7 +141,8 @@ fn literal_term(i: usize, term: &str) -> Result<Term, QueryError> {
     Ok(Term { alternatives, fallback: false, re })
 }
 
-/// Regex mode: the TERM as given; one that does not compile is literal text (not split at `|`).
+/// Regex mode: the TERM as given; one that is not a valid regex is literal text (not split at
+/// `|`). A valid one too large to compile is an error, not text.
 fn regex_term(i: usize, term: &str) -> Result<Term, QueryError> {
     match build(term) {
         Ok(re) => {
@@ -150,6 +151,7 @@ fn regex_term(i: usize, term: &str) -> Result<Term, QueryError> {
             }
             Ok(Term { alternatives: vec![term.to_string()], fallback: false, re })
         }
+        Err(regex::Error::CompiledTooBig(_)) => Err(QueryError::TooLarge),
         Err(_) => {
             let re = build(&regex::escape(term)).map_err(|_| QueryError::TooLarge)?;
             Ok(Term { alternatives: vec![term.to_string()], fallback: true, re })

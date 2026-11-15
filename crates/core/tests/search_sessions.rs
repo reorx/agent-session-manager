@@ -13,7 +13,7 @@ use agent_session_core::index::{Db, Indexer};
 use agent_session_core::model::SessionSummary;
 use agent_session_core::search::query::{Query, QueryError};
 use agent_session_core::search::sessions::{
-    Engine, Kind, KindError, KindSet, ProjectMatcher, SearchOptions, SessionFilter, SessionHits, SortBy, search,
+    Engine, Kind, KindError, KindSet, ProjectMatcher, READ_BUDGET, SearchOptions, SessionFilter, SessionHits, SortBy, search,
     select_sessions, turn_count,
 };
 use serde_json::{Value, json};
@@ -178,7 +178,8 @@ fn run(w: &World, q: &Query, k: &KindSet, snippets: usize) -> Vec<SessionHits> {
 fn run_on(w: &World, sessions: &[SessionSummary], q: &Query, k: &KindSet, snippets: usize) -> Vec<SessionHits> {
     let out = search(&w.db, sessions, q, k, &opts(None, snippets)).unwrap();
     let scan = search(&w.db, sessions, q, k, &opts(Some(Engine::Scan), snippets)).unwrap();
-    let raw = search(&w.db, sessions, q, k, &SearchOptions { prefilter: false, ..opts(Some(Engine::Scan), snippets) }).unwrap();
+    // without the prefilter, and with a read budget smaller than any file: one file at a time
+    let raw = search(&w.db, sessions, q, k, &SearchOptions { prefilter: false, read_budget: 1, ..opts(Some(Engine::Scan), snippets) }).unwrap();
     if out.engine == Engine::Index {
         assert_eq!(out.sessions, scan.sessions, "index and scan disagree");
     }
@@ -229,6 +230,8 @@ fn a_term_with_nothing_to_match_is_an_error() {
         assert_eq!(Query::parse(&terms(&[one]), true, false).unwrap().regex_fallback(), Vec::<usize>::new(), "{one} compiles alone");
     }
     assert_eq!(Query::parse(&terms(&big), true, false).err(), Some(QueryError::TooLarge), "but not with the other, to highlight both");
+    assert_eq!(Query::parse(&terms(&["\\w{400}"]), true, false).err(), Some(QueryError::TooLarge), "a valid regex too large alone is not text");
+    assert_eq!(Query::parse(&terms(&["\\w{400"]), true, false).unwrap().regex_fallback(), vec![0], "an invalid one is");
     assert!(QueryError::EmptyTerm(1).to_string().contains("term 2"), "messages count TERMs from 1");
 }
 
@@ -737,6 +740,8 @@ fn real_search_timings() {
     let runs: usize = std::env::var("ASM_BENCH_RUNS").map_or(3, |r| r.parse().unwrap());
     // sessions shown, as `asm search -n` (default 20, 0 for all): only they get snippets
     let limit: usize = std::env::var("ASM_BENCH_LIMIT").map_or(20, |r| r.parse().unwrap());
+    // the scan's read budget in MiB (default `READ_BUDGET`)
+    let budget: u64 = std::env::var("ASM_BENCH_BUDGET").map_or(READ_BUDGET, |r| r.parse::<u64>().unwrap() << 20);
     let all = select_sessions(&db, &SessionFilter::default()).unwrap();
     println!("sessions: {}", all.len());
     drop(db);
@@ -776,7 +781,8 @@ fn real_search_timings() {
         for _ in 0..runs {
             let start = std::time::Instant::now();
             let sessions = select_sessions(&db, &filter).unwrap();
-            let r = search(&db, &sessions, &q, &KindSet::parse(Some("all"), &[]).unwrap(), &SearchOptions::default()).unwrap();
+            let opts = SearchOptions { read_budget: budget, ..SearchOptions::default() };
+            let r = search(&db, &sessions, &q, &KindSet::parse(Some("all"), &[]).unwrap(), &opts).unwrap();
             times.push(start.elapsed().as_secs_f64() * 1000.0);
             out = Some(r);
         }

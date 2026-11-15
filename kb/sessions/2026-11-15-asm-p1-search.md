@@ -10,6 +10,17 @@ tags:
 
 # asm skill P1-3：会话级搜索（core）
 
+## 协调者摘要（asmcli-p1-search-r2）
+
+- 结果：决定 19 的字节预算做了（`scan.rs::Budget`，默认 `READ_BUDGET` = 256 MiB，可由 `SearchOptions.read_budget` 改）。实测发现，原来的峰值主要不是「几份大文件同时在内存里」，而是 macOS 分配器把释放掉的大块读缓冲留着备用：预算降到 16 MiB，footprint 仍有 240–290 MB；用 `MallocLargeCache=0` 关掉这个缓存，就降到 122–189 MB。所以文件改为读进匿名映射（`memmap2::MmapMut::map_anon`，drop 时还给系统），预算照样保留。R1-1：单个大到编不了的合法正则报 `TooLarge`（exit 2），语法错误仍按字面搜。R1-2：`cli.md` 的 tool-input 写明「`description` / `command` 字段不论哪个工具都渲染成 `# …` / `$ …`」。
+- 提交：见本提交。
+- 证据：`cargo test -p agent-session-core` 267 过 0 败 4 忽略（R1 时 263；新增 1 个预算单测，3 个来自 1aeba06）；`cargo test -p agent-session-manager` 151 过 0 败 2 忽略。预算单测改成「不等待」时失败（峰值 1650 > 250）；`run()` 里不带预过滤的那次扫描改用 1 字节预算（逐个文件读），所有行为测试的结果不变。R1-1 的测试修前失败（`r2/r1-1-before.txt`）。真实数据上 index 与 scan 在 3,268 个会话 × 16 组查询上 0 处不同（`r2/agree-r2.txt`）。没改解析器和旧搜索路径，没跑 parity。
+- 测量（30 天 `--in all`，4 组查询，改前 / 改后的二进制交替运行，每种设置每轮一个进程跑 3 次取中位数，共 3 轮；负载约 8；`r2/measure-final*.txt`）：峰值 RSS 改前 520–628 MB（footprint 最高 610 MB），改后（256 MiB）226–277 MB（footprint 最高 268 MB），其中约 86 MB 是索引的 mmap。4 组耗时合计 5,243 → 4,908 ms（−6%）。单组从 −16% 到 +17%：只有 `healthz`+`连不上…` 一组慢了超过 15%，它改后三轮是 784 / 1,332 / 1,267 ms，改前是 1,082 / 874 / 1,361 ms，两组数互相重叠，属于噪声。
+- 预算取值：128 MiB 合计 +5%（单组最高 +30%）；512 MiB −7%；不限 −12%；峰值都在 183–268 MB。建议保持 256 MiB：峰值已由匿名映射压住，预算只兜「很多大文件同时读」的最坏情况，在 256 MiB 时没测出代价。
+- 自己的决定：读进匿名映射，而不是复用缓冲池或在 macOS 上调 `malloc_zone_pressure_relief`；预算按文件的 `metadata` 长度申请，读这么多字节（之后才写入的行本来就不完整）。
+- 未验证：清空系统页缓存后的冷读耗时；多个 `asm search` 并行时的总内存（预算是每个进程各自一份）。
+- 交给协调者：2 条（「返工 R2」末尾）。
+
 ## 协调者摘要（asmcli-p1-search-r1）
 
 - 结果：F1–F9 都改了。F1：搜 tool-input 时说法在每个 `:`、`,`、`$`、`#` 处切开并去掉段首空格，`file_path:`、正则 `file_path:.*config`、单独的 `$` / `#` 不再被预过滤漏掉。F5：选行判断抽成 `parse.rs::may_be_user_row`，解析器和扫描共用。F6：TERM 编译失败（含合起来超出大小限制）返回 `QueryError::TooLarge`（exit 2），预过滤的字节正则编不过就放行。F8：`SessionHits.turns`，两条路径都从给片段编号的同一处数出；顺带 `SearchOptions` 加 `sort` / `limit`、`SearchOutcome.total`，index 路径只给显示的 session 取片段和回合。F9：符号链接按「最长的存在的祖先」解析。F7 及 F6、F9、`turns`、tool-input 文本格式写进 `cli.md`。
@@ -56,7 +67,7 @@ scan 路径（`search/scan.rs`）：rayon 并行，文件按大小降序派发�
 
 1. **scan 的回合号逐行重算**（不是去索引里按偏移查）：scan 读的是文件当前的内容，索引可能落后（`--no-scan`，或扫描后文件又被写入），按偏移查索引在新写入的部分会数错；照搬解析器的行选择，代价只是对每行做字节分类。`both_ways_number_turns_alike_on_the_turn_rule_fixtures` 用 P1-2 的回合规则 fixture 对两条路径断言回合号相同。
 2. **R1-7 在 Rust 里补过滤**：规范写的是 Unicode 大小写折叠，`LIKE` 只折 ASCII；短词含非 ASCII 大小写字母（`ÉÀ`、`Ωx`）很少见，读出全部行再判定的成本可以接受（R1 实测 `Ωx` 约 55 ms，其中 `select_sessions` 约 25 ms），规范不必多一条例外。没有这类字母的短词（含 CJK 两字词）仍走 LIKE。
-3. **扫描用 `std::fs::read`，预过滤用 `regex::bytes`**：mmap 版本 30 天约 8.5 s（`floor/prof-1.txt`，页没在缓存里时按页缺页），改 read 后 2.3–3.5 s；aho-corasick 带 ASCII 大小写折叠的重叠匹配占 7,938 ms 线程时间，`(?i-u:…)` 的字节正则 784 ms、memmem 218 ms（`floor/matchers.txt`），换成字节正则后 1.0–1.8 s。现在的瓶颈是读 5.7 GB，20 和 10 个 rayon 线程没有差别。
+3. **扫描用 `std::fs::read`（R2 起改为读进匿名映射，见「返工 R2」），预过滤用 `regex::bytes`**：mmap 版本 30 天约 8.5 s（`floor/prof-1.txt`，页没在缓存里时按页缺页），改 read 后 2.3–3.5 s；aho-corasick 带 ASCII 大小写折叠的重叠匹配占 7,938 ms 线程时间，`(?i-u:…)` 的字节正则 784 ms、memmem 218 ms（`floor/matchers.txt`），换成字节正则后 1.0–1.8 s。现在的瓶颈是读 5.7 GB，20 和 10 个 rayon 线程没有差别。
 4. **`--same-message` 下 hits 的口径**：session 要有一个 item 同时含全部 TERM 才算结果，但 `hits` / `term_hits` 仍数含至少一个 TERM 的 item（规范 Counting 一节）。
 5. **过滤和参数解析放在 core**：`SessionFilter`、`ProjectMatcher::parse`、`KindSet::parse`（含决定 12：`--tool` 无 `--in` 等于 `--in tool` 且只限该工具；有 `--in` 时只收窄工具类）都有行为测试，P1-4 只做 CLI 参数到这些类型的映射。
 6. **预过滤的切分**：Claude Code 只转义 `"`、`\` 和控制字符（普查确认），所以每种说法在这些字符、U+FFFD、非 ASCII 大小写字母处切开，取最长的一段做字节搜索；搜 tool-input 时再在 `: `、`, `、`$ `、`# ` 处切（这些是 `tool_input_text` 加的）。正则 TERM 用 `regex-syntax` 的 Extractor 取前缀或后缀字面量（≤ 64 个），各自同样切分，取最短一段较长的那组。理论缺口：(a) 会折叠成 ASCII 的非 ASCII 字符（开尔文符号 K→k、长 s ſ→s）出现在原文里时，ASCII TERM 在原始字节里找不到；(b) tool-input 里嵌套的浮点数，`json.dumps` 的写法可能和原始 JSON 不同。真实数据上「带预过滤 == 不带预过滤」的比较没有差异。
@@ -174,3 +185,53 @@ assertion `left == right` failed: the raw line has `"file_path":`
 2. P1-4：`search(db, &sessions, &query, &kinds, &SearchOptions { snippets, sort, limit, .. })`，`SearchOutcome.total` 给 `meta.total` 和 `(showing M)`，`sessions.len()` 给 `meta.shown`；结果头的 `turns` 用 `SessionHits.turns`，不要再用 `turn_count`（索引落后时会小于片段的回合号）；`QueryError::TooLarge` 也是 exit 2。
 3. `select_sessions` 约 25 ms 是 index 搜索的大头：`attach_details` 给全部会话整表读工具计数、会话文件和模型用量。若要再快，可以先按 SQL 能判断的条件筛会话，`attach_details` 只给剩下的（输出只需要显示的那些，`--model` 才需要全部的模型用量）；这要动 `Db` 的接口，本任务没做。
 4. scratch 里 `index-1.sqlite`（193 MB）和 `parity/index.sqlite`（186 MB）复核完可以删。
+
+## 返工 R2
+
+复核：`tmp/2026-11-14-asm-skill-cli/reviews/asmcli-p1-rv-search-r1.md`（可签收，R1-1、R1-2 两处小问题）；brief 决定 19。scratch 输出在 `tmp/2026-11-14-asm-skill-cli/asmcli-p1-search/r2/`。
+
+### 决定 19：读文件的字节预算
+
+`scan.rs::Budget` 由各扫描线程共用：`scan_file` 先取文件长度，向预算申请这么多字节（大于整份预算的文件申请整份），等到够了才读，处理完这份文件后归还（`Lease` 的 `Drop`）。每个文件只申请一次，持有期间不会再等别的，所以不会死锁。默认 `READ_BUDGET` = 256 MiB，`SearchOptions.read_budget` 可改，bench 用 `ASM_BENCH_BUDGET`（MiB）。
+
+测试：`leases_never_hold_more_than_the_budget`（12 个线程，预算 250，申请 100 或 1,000：同时持有不超过 250、全部归还、超大的申请拿到整份预算）；把等待去掉后这个测试失败（峰值 1650）。`run_on` 里不带预过滤的扫描改用 `read_budget: 1`，让每个行为测试都在「一次只读一份文件」下再比一次结果。
+
+### 峰值其实来自分配器缓存
+
+只加预算时，峰值没降（交替测量的第一版 `r2/measure-2.txt`：256 MiB 预算下 RSS 414–683 MB，改前 394–599 MB）。逐步排查（`r2/budget-probe.txt`，`database is locked` / `error`，各跑一次）：
+
+| 设置 | 峰值 RSS | footprint |
+|---|---|---|
+| 只打开索引并 `select_sessions`，不扫描 | 86 MB | 31 MB |
+| `Vec` 读缓冲，预算 16 MiB | 229–305 MB | 240–290 MB |
+| `Vec`，预算 256 MiB | 315–348 MB | 339–371 MB |
+| `Vec`，不限预算 | 350–472 MB | 362–505 MB |
+| `Vec`，`MallocLargeCache=0`，预算 16 / 256 / 不限 | 138 / 190 / 207 MB | 122 / 133 / 189 MB |
+| 匿名映射，预算 64 / 256 / 不限 | 129–206 MB | 124–237 MB |
+
+预算 16 MiB 时同一时刻只有一份文件（最大 76 MB）在内存里，footprint 却有 240–290 MB；关掉分配器的大块缓存后就降下来了。说明多出来的是释放后被分配器留着的读缓冲，不是同时读的文件。复核时估计的「10 个线程同时持有最大的 10 份文件，约 532 MB」实际也不成立：不限预算、关掉缓存时峰值只有 189 MB（推测是 rayon 把文件列表对半拆给各线程，最大的几份不会同时开读）。所以文件改为读进匿名映射：`read_file` 按 `metadata` 的长度 `map_anon`，`read_exact` 读满，drop 时 `munmap` 还给系统。读多少以取长度那一刻为准，之后才写入的行本来就不完整，原来也不处理。
+
+### 改前 / 改后的耗时与峰值
+
+`r2/measure.sh 3`：改前的二进制（`r2/bench-before`，1aeba06）和改后的（`r2/bench-after`，预算 256 / 128 / 512 / 不限）按「查询 × 设置」交替，每次一个新进程，`ASM_BENCH_RUNS=3` 取中位数，`/usr/bin/time -l` 取峰值；共 3 轮。下表的耗时是 3 轮中位数的中位数（`r2/measure-final-summary.txt`）。
+
+| 查询 | 改前 | 256 MiB | 128 MiB | 512 MiB | 不限 |
+|---|---|---|---|---|---|
+| `database is locked` | 1,454 ms | 1,290（−11%） | 1,490（+2%） | 1,037（−29%） | 932（−36%） |
+| `connection refused` | 1,158 | 1,054（−9%） | 1,500（+30%） | 1,230（+6%） | 1,039（−10%） |
+| `error` | 1,549 | 1,297（−16%） | 1,342（−13%） | 1,537（−1%） | 1,457（−6%） |
+| `healthz` + `连不上\|无法连接\|offline` | 1,082 | 1,267（+17%） | 1,177（+9%） | 1,084（0%） | 1,168（+8%） |
+| 合计 | 5,243 | 4,908（−6%） | 5,509（+5%） | 4,888（−7%） | 4,596（−12%） |
+| 峰值 RSS / footprint | 628 / 610 MB | 277 / 268 MB | 228 / 189 MB | 246 / 223 MB | 239 / 217 MB |
+
+各轮的波动有 ±50%（同一设置三轮可以是 784 和 1,332 ms），表里 ±15% 以内的差别都分不出来。慢了 17% 的那一组，改后三轮 784 / 1,332 / 1,267 ms，改前 1,082 / 874 / 1,361 ms，两边重叠。128 MiB 那组 +30% 可能是真的：预算小了，开头的大文件只能两三份同时读。
+
+### R1-1、R1-2
+
+- R1-1：`regex_term` 遇到 `regex::Error::CompiledTooBig` 返回 `QueryError::TooLarge`，只有语法错误才按字面搜。确认了 `\w{400}` 单个就超出限制。测试：`\w{400}` 报 `TooLarge`，`\w{400`（没闭合）回退成字面。修前输出：`assertion failed: a valid regex too large alone is not text, left: None, right: Some(TooLarge)`。`cli.md` 的 TERMs 一节同步写明了。
+- R1-2：`cli.md` 的 tool-input 一行改为「`description` 字段在前写成 `# description`，`command` 字段接着写成 `$ command`，不论哪个工具（Bash、Agent、Monitor、Write…）」，并提示搜 Agent 调用的描述要写 `# …` 或直接写内容，不要写 `description: …`。
+
+### 交给协调者（R2）
+
+1. 决定 19 的理由（「峰值 ~490 MB 是几份大文件同时读」）实测不成立：峰值来自分配器缓存，已经靠匿名映射解决；预算留着兜底。brief 里决定 19 的说明可按此更新。
+2. 预算是每个 `asm search` 进程各一份：agent 并行跑 3 个工具搜索时，总量最多约 3 × 270 MB（按 RSS 算；其中索引的 mmap 页是各进程共享的）。要更低，得把 `READ_BUDGET` 降到 128 MiB（单组可能慢三成），或者跨进程协调，后者不值得做。

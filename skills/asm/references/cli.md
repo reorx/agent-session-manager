@@ -133,7 +133,7 @@ snippet labels use these names.
 | `prompt` | A user-side record that opens a numbered turn (see Turns): a message the user typed, or a local command or its output (`<command-name>`, `<local-command-stdout>`, `<bash-input>`, `<bash-stdout>`). Not an interruption marker, not a repeat (same uuid) of an earlier user-side record with text or media of its own, not a subagent's (sidechain) record. A pasted image without text is a prompt with empty text |
 | `reply` | Text the agent wrote to the user, including commentary between tool calls, not only the final answer |
 | `thinking` | The agent's thinking. Only about one block in ten still has its text; the rest kept only a signature |
-| `tool-input` | The input of a tool call, as text: `# description` and `$ command` lines first when the input has them (Bash), then `key: value` per other field, nested values as JSON with `: ` and `, ` (`file_path: /x/a.rs`, `edits: [{"old_string": "a"}]`) |
+| `tool-input` | The input of a tool call, as text: a `description` field comes first as `# description` and a `command` field next as `$ command`, whatever the tool (Bash, Agent, Monitor, Write, …); then `key: value` per other field, nested values as JSON with `: ` and `, ` (`file_path: /x/a.rs`, `edits: [{"old_string": "a"}]`). So search an Agent call's description as `# fix the login` or `fix the login`, not `description: …` |
 | `tool-output` | The output of a tool call |
 | `other` | Text that showed up on the user side without being typed: compact summaries, background task notifications, interruption markers (`[Request interrupted by user]`), and the like. The output of a local command (`<local-command-stdout>`, `<bash-stdout>`) is a `prompt`, since it starts a turn (see Turns) |
 
@@ -175,12 +175,13 @@ asm search '连不上|无法连接|offline' 'healthz|健康检查'
 - With `--regex`, each TERM is one regular expression (Rust `regex` syntax, case-insensitive
   unless it starts with `(?-i)`), and `|` is the regular expression's own alternation; spaces
   are part of the expression. A TERM that can match the empty string, an empty match at a
-  position included, is an error (exit 2): `'a|'`, `'x*'`, `'\b'`, `'^'`, `'foo|\b'`. A TERM that does not
-  compile is matched as one literal text, not split at `|`, and stderr says
+  position included, is an error (exit 2): `'a|'`, `'x*'`, `'\b'`, `'^'`, `'foo|\b'`. A TERM that is not
+  a valid regular expression is matched as one literal text, not split at `|`, and stderr says
   `term 2 is not a valid regular expression, matched as literal text` (TERMs count from 1).
-- TERMs too large for the regular expression engine are an error (exit 2), also when each one
-  alone is fine but they are too large together (they are matched as one expression to mark
-  them in snippets), e.g. `--regex '\w{200}' 'x\w{200}'`.
+- TERMs too large for the regular expression engine are an error (exit 2), not literal text:
+  one valid expression too large alone (`--regex '\w{400}'`), or several that are each fine but
+  too large together (they are matched as one expression to mark them in snippets), e.g.
+  `--regex '\w{200}' 'x\w{200}'`.
 
 ### Turns
 

@@ -8,16 +8,22 @@
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
+use std::sync::{Condvar, Mutex};
 
 use aho_corasick::AhoCorasick;
 use memchr::{memchr, memchr_iter, memrchr};
+use memmap2::MmapMut;
 use rayon::prelude::*;
 
 use super::prefilter::Prefilter;
 use super::query::{Query, indexes};
 use super::regex::{Block, iter_texts};
-use super::sessions::{Hit, ItemRef, Kind, KindSet, SNIPPET_AFTER, SNIPPET_BEFORE, SessionHits, pick, tally, tool_input_text};
+use super::sessions::{
+    Hit, ItemRef, Kind, KindSet, SNIPPET_AFTER, SNIPPET_BEFORE, SearchOptions, SessionHits, pick, tally, tool_input_text,
+};
 use crate::claude::parse::{Content, LineKind, RawRecord, classify, may_be_user_row, parse_content};
 use crate::format::parse_ts;
 use crate::model::SessionSummary;
@@ -34,24 +40,69 @@ pub struct ScanStats {
     pub skipped_bytes: u64,
 }
 
+/// Default `SearchOptions::read_budget`: 256 MiB. Without it, the threads each read one of the
+/// biggest transcripts at once and a scan's peak grew with them (about 490 MB over 30 days on
+/// 2026-11-15, decision 19).
+pub const READ_BUDGET: u64 = 256 << 20;
+
+/// Bytes of transcripts held in memory at once, shared by the scan's threads: a thread waits
+/// until its file fits, and a file bigger than the whole budget waits for all of it.
+struct Budget {
+    total: u64,
+    left: Mutex<u64>,
+    freed: Condvar,
+}
+
+/// Bytes taken from the budget, given back when dropped.
+struct Lease<'a> {
+    budget: &'a Budget,
+    bytes: u64,
+}
+
+impl Budget {
+    fn new(total: u64) -> Budget {
+        let total = total.max(1);
+        Budget { total, left: Mutex::new(total), freed: Condvar::new() }
+    }
+
+    fn take(&self, bytes: u64) -> Lease<'_> {
+        let bytes = bytes.min(self.total);
+        let mut left = self.left.lock().expect("budget lock");
+        while *left < bytes {
+            left = self.freed.wait(left).expect("budget lock");
+        }
+        *left -= bytes;
+        Lease { budget: self, bytes }
+    }
+}
+
+impl Drop for Lease<'_> {
+    fn drop(&mut self) {
+        *self.budget.left.lock().expect("budget lock") += self.bytes;
+        self.budget.freed.notify_all();
+    }
+}
+
 struct Ctx<'q> {
     query: &'q Query,
     kinds: &'q KindSet,
     limit: usize,
     prefilter: Option<Prefilter>,
+    budget: Budget,
     /// Kinds that come from user records (prompt, other, tool-output) / assistant records.
     user_side: bool,
     assistant_side: bool,
     tools: bool,
 }
 
-pub(crate) fn search_scan(sessions: &[SessionSummary], query: &Query, kinds: &KindSet, limit: usize, prefilter: bool) -> (Vec<SessionHits>, ScanStats) {
+pub(crate) fn search_scan(sessions: &[SessionSummary], query: &Query, kinds: &KindSet, opts: &SearchOptions) -> (Vec<SessionHits>, ScanStats) {
     let has = |k| kinds.contains(k);
     let ctx = Ctx {
         query,
         kinds,
-        limit,
-        prefilter: prefilter.then(|| Prefilter::new(query, has(Kind::ToolInput))),
+        limit: opts.snippets,
+        prefilter: opts.prefilter.then(|| Prefilter::new(query, has(Kind::ToolInput))),
+        budget: Budget::new(opts.read_budget),
         user_side: has(Kind::Prompt) || has(Kind::Other) || has(Kind::ToolOutput),
         assistant_side: has(Kind::Reply) || has(Kind::Thinking) || has(Kind::ToolInput),
         tools: has(Kind::ToolInput) || has(Kind::ToolOutput),
@@ -104,9 +155,10 @@ struct Found {
 
 fn scan_file(s: &SessionSummary, path: &Path, ctx: &Ctx) -> FileOutcome {
     let mut out = FileOutcome::default();
-    // read, not mapped: page faults on a mapped transcript cost several times a read here
-    // (2026-11-15: 7 s vs 2 s over 30 days of transcripts), and their pages do not stay cached
-    let Ok(bytes) = std::fs::read(path) else { return out };
+    let Ok(meta) = std::fs::metadata(path) else { return out };
+    // held until the file's hits are made; released when this function returns
+    let _lease = ctx.budget.take(meta.len());
+    let Ok(bytes) = read_file(path, meta.len()) else { return out };
     out.opened = true;
     out.bytes = bytes.len() as u64;
     if ctx.prefilter.as_ref().is_some_and(|p| !p.file_may_match(&bytes)) {
@@ -137,6 +189,20 @@ fn scan_file(s: &SessionSummary, path: &Path, ctx: &Ctx) -> FileOutcome {
     let snippets = picked.into_iter().map(|f| snippet(&bytes, f, ctx)).collect();
     out.hits = Some(SessionHits { session_id: s.id.clone(), updated_at: s.updated_at, counts, term_hits, turns, snippets });
     out
+}
+
+/// The first `len` bytes of the file (what it held when its size was taken; a line written since
+/// is incomplete anyway).
+///
+/// Read, not mapped from the file: page faults on a mapped transcript cost several times a read
+/// here (2026-11-15: 7 s vs 2 s over 30 days of transcripts). Read into an anonymous map rather
+/// than a `Vec`: macOS's allocator keeps freed buffers this big for reuse, and with them a scan's
+/// peak footprint reached about 500 MB however few files were in memory at once; the map is
+/// given back to the system when dropped (2026-11-16 measurements in the P1-3 session note).
+fn read_file(path: &Path, len: u64) -> std::io::Result<MmapMut> {
+    let mut buf = MmapMut::map_anon(len as usize)?;
+    File::open(path)?.read_exact(&mut buf)?;
+    Ok(buf)
 }
 
 /// Every item with a TERM, in file order, with the turn it belongs to; and the turns in the file.
@@ -336,5 +402,36 @@ fn name_tools(bytes: &[u8], found: Vec<&mut Found>) {
                 None => Tool::Call(None),
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::*;
+
+    /// Threads holding leases never hold more than the budget together; a request bigger than the
+    /// budget waits for all of it.
+    #[test]
+    fn leases_never_hold_more_than_the_budget() {
+        let budget = Budget::new(250);
+        let (held, peak) = (AtomicU64::new(0), AtomicU64::new(0));
+        std::thread::scope(|scope| {
+            for i in 0..12 {
+                let (budget, held, peak) = (&budget, &held, &peak);
+                scope.spawn(move || {
+                    let want = if i % 4 == 0 { 1_000 } else { 100 };
+                    let lease = budget.take(want);
+                    let now = held.fetch_add(lease.bytes, Ordering::SeqCst) + lease.bytes;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    held.fetch_sub(lease.bytes, Ordering::SeqCst);
+                });
+            }
+        });
+        assert!(peak.load(Ordering::SeqCst) <= 250, "peak {}", peak.load(Ordering::SeqCst));
+        assert_eq!(*budget.left.lock().unwrap(), 250, "every lease was given back");
+        assert_eq!(budget.take(1_000).bytes, 250, "a big file takes the whole budget");
     }
 }
