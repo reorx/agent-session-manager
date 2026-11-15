@@ -1,9 +1,14 @@
 //! Two search paths: FTS5 over the index (text mode) and a regex scan of the raw transcripts
-//! (regex mode, the only way to search tool inputs / outputs).
+//! (regex mode, the only way to search tool inputs / outputs). `sessions` (with `query`, `scan`
+//! and `prefilter`) is the session-level search of `asm search`, built on both.
 
 pub mod fts;
+mod prefilter;
 pub mod pyjson;
+pub mod query;
 pub mod regex;
+mod scan;
+pub mod sessions;
 
 use std::ops::Range;
 

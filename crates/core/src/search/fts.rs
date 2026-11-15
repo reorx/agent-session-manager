@@ -168,6 +168,6 @@ fn count_per_session(db: &Db, q: &FtsQuery) -> Result<Vec<(SessionHit, i64)>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-fn escape_like(w: &str) -> String {
+pub(crate) fn escape_like(w: &str) -> String {
     w.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")
 }

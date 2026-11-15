@@ -323,15 +323,28 @@ fn search_line(line: &[u8], re: &Regex, opts: &RegexOptions, out: &mut Found) {
     }
 }
 
-struct Piece<'a> {
-    role: MatchRole,
-    text: Cow<'a, str>,
-    detail: String,
-    tool_input: Option<Map<String, Value>>,
+pub(crate) struct Piece<'a> {
+    pub(crate) role: MatchRole,
+    pub(crate) text: Cow<'a, str>,
+    pub(crate) detail: String,
+    pub(crate) tool_input: Option<Map<String, Value>>,
+    pub(crate) block: Block,
+}
+
+/// The content block a piece comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Block {
+    Text,
+    Thinking,
+    /// A tool call, with the tool's name (`?` when missing).
+    ToolUse(String),
+    /// A tool result, with the id of its call.
+    ToolResult(Option<String>),
 }
 
 /// The reference script's `iter_texts`: (role, text, label, tool input) per content block.
-fn iter_texts<'a>(rec: &RawRecord<'a>, want_tool: bool) -> Vec<Piece<'a>> {
+/// An assistant text block without a `text` field gives no piece (the indexer skips it too).
+pub(crate) fn iter_texts<'a>(rec: &RawRecord<'a>, want_tool: bool) -> Vec<Piece<'a>> {
     let mut pieces = Vec::new();
     let role = match rec.kind.as_deref() {
         Some("user") => MatchRole::User,
@@ -342,17 +355,20 @@ fn iter_texts<'a>(rec: &RawRecord<'a>, want_tool: bool) -> Vec<Piece<'a>> {
     match parse_content(content) {
         Content::Text(text) => {
             if role == MatchRole::User {
-                pieces.push(Piece { role, text, detail: String::new(), tool_input: None });
+                pieces.push(Piece { role, text, detail: String::new(), tool_input: None, block: Block::Text });
             }
         }
         Content::Blocks(blocks) => {
             for block in blocks {
                 match block.kind.as_deref() {
                     Some("text") => {
-                        pieces.push(Piece { role, text: block.text.unwrap_or_default(), detail: String::new(), tool_input: None });
+                        if role == MatchRole::Assistant && block.text.is_none() {
+                            continue;
+                        }
+                        pieces.push(Piece { role, text: block.text.unwrap_or_default(), detail: String::new(), tool_input: None, block: Block::Text });
                     }
                     Some("thinking") if role == MatchRole::Assistant => {
-                        pieces.push(Piece { role, text: block.thinking.unwrap_or_default(), detail: "thinking".into(), tool_input: None });
+                        pieces.push(Piece { role, text: block.thinking.unwrap_or_default(), detail: "thinking".into(), tool_input: None, block: Block::Thinking });
                     }
                     Some("tool_use") if want_tool => {
                         let input = match block.input.and_then(|raw| serde_json::from_str::<Value>(raw.get()).ok()) {
@@ -362,20 +378,18 @@ fn iter_texts<'a>(rec: &RawRecord<'a>, want_tool: bool) -> Vec<Piece<'a>> {
                         };
                         let text = input.iter().map(|(k, v)| format!("{k}: {}", stringify(v))).collect::<Vec<_>>().join("\n");
                         let name = block.name.as_deref().unwrap_or("?");
-                        pieces.push(Piece { role: MatchRole::Tool, text: Cow::Owned(text), detail: format!("tool_use:{name}"), tool_input: Some(input) });
+                        pieces.push(Piece {
+                            role: MatchRole::Tool,
+                            text: Cow::Owned(text),
+                            detail: format!("tool_use:{name}"),
+                            tool_input: Some(input),
+                            block: Block::ToolUse(name.to_string()),
+                        });
                     }
                     Some("tool_result") if want_tool => {
-                        let text = match block.content.and_then(|raw| serde_json::from_str::<Value>(raw.get()).ok()) {
-                            Some(Value::String(s)) => s,
-                            Some(Value::Array(items)) => items
-                                .iter()
-                                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-                                .map(|b| b.get("text").and_then(Value::as_str).unwrap_or(""))
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                            _ => String::new(),
-                        };
-                        pieces.push(Piece { role: MatchRole::Tool, text: Cow::Owned(text), detail: "tool_result".into(), tool_input: None });
+                        let text = tool_result_text(block.content);
+                        let id = block.tool_use_id.map(Cow::into_owned);
+                        pieces.push(Piece { role: MatchRole::Tool, text: Cow::Owned(text), detail: "tool_result".into(), tool_input: None, block: Block::ToolResult(id) });
                     }
                     _ => {}
                 }
@@ -384,6 +398,20 @@ fn iter_texts<'a>(rec: &RawRecord<'a>, want_tool: bool) -> Vec<Piece<'a>> {
         Content::Other => {}
     }
     pieces
+}
+
+/// A tool result's text: its string content, or its text blocks joined by line breaks.
+pub(crate) fn tool_result_text(content: Option<&serde_json::value::RawValue>) -> String {
+    match content.and_then(|raw| serde_json::from_str::<Value>(raw.get()).ok()) {
+        Some(Value::String(s)) => s,
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .map(|b| b.get("text").and_then(Value::as_str).unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
 }
 
 /// `ctx` characters on each side of the match; `…` marks cut text and `⏎` a line break.

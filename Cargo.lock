@@ -113,6 +113,7 @@ dependencies = [
 name = "agent-session-core"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "anyhow",
  "assert_cmd",
  "chrono",
@@ -123,6 +124,7 @@ dependencies = [
  "predicates",
  "rayon",
  "regex",
+ "regex-syntax",
  "rusqlite",
  "serde",
  "serde_json",

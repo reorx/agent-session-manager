@@ -112,7 +112,7 @@ snippet labels use these names.
 
 | Kind | What it is |
 |---|---|
-| `prompt` | A user-side record that opens a numbered turn (see Turns): a message the user typed, or a local command or its output (`<command-name>`, `<local-command-stdout>`, `<bash-input>`, `<bash-stdout>`). Not an interruption marker, not a repeat of an earlier user-side record (same uuid), not a subagent's (sidechain) record. A pasted image without text is a prompt with empty text |
+| `prompt` | A user-side record that opens a numbered turn (see Turns): a message the user typed, or a local command or its output (`<command-name>`, `<local-command-stdout>`, `<bash-input>`, `<bash-stdout>`). Not an interruption marker, not a repeat (same uuid) of an earlier user-side record with text or media of its own, not a subagent's (sidechain) record. A pasted image without text is a prompt with empty text |
 | `reply` | Text the agent wrote to the user, including commentary between tool calls, not only the final answer |
 | `thinking` | The agent's thinking. Only about one block in ten still has its text; the rest kept only a signature |
 | `tool-input` | The input of a tool call, as `key: value` text (a Bash command as `$ command`) |
@@ -145,14 +145,19 @@ ways of saying it, and any one of them counts. Quote a TERM so the shell passes 
 asm search '连不上|无法连接|offline' 'healthz|健康检查'
 ```
 
-- Literal text, case-insensitive (Unicode case folding).
-- Empty alternatives are dropped: `'foo|'` is `foo`. A TERM with nothing left (`''`, `'|'`)
-  would match everything and is an error (exit 2).
+- Literal text, case-insensitive (Unicode case folding, also for words shorter than 3
+  characters, which the full-text index cannot look up by itself).
+- Spaces around `|` do not count: `'连不上 | 无法连接'` is `'连不上|无法连接'`, and
+  `' foo bar | baz'` is `'foo bar|baz'`. Spaces inside an alternative do.
+- Empty alternatives are dropped: `'foo|'` is `foo`. A TERM with nothing left (`''`, `'|'`,
+  `' | '`) would match everything and is an error (exit 2).
+- At most 64 TERMs (exit 2).
 - Literal TERMs cannot contain `|` itself; to search for a vertical bar, use `--regex` and write
   it as `\|`, e.g. `--regex 'a \| b'`.
 - With `--regex`, each TERM is one regular expression (Rust `regex` syntax, case-insensitive
-  unless it starts with `(?-i)`), and `|` is the regular expression's own alternation. A TERM
-  that can match the empty string (`'a|'`, `'x*'`) is an error (exit 2). A TERM that does not
+  unless it starts with `(?-i)`), and `|` is the regular expression's own alternation; spaces
+  are part of the expression. A TERM that can match the empty string, an empty match at a
+  position included, is an error (exit 2): `'a|'`, `'x*'`, `'\b'`, `'^'`, `'foo|\b'`. A TERM that does not
   compile is matched as one literal text, not split at `|`, and stderr says
   `term 2 is not a valid regular expression, matched as literal text` (TERMs count from 1).
 
@@ -242,9 +247,11 @@ asm search TERM... [--in KINDS] [--tool NAME]... [--regex] [--same-message]
 
 How it searches: when every kind searched is in the index (`prompt`, `reply`, `thinking`,
 `other`) and `--regex` is off, the full-text index answers (tens of milliseconds). Tool kinds and
-`--regex` scan the transcript files of the sessions in range, skipping files that cannot contain
-every TERM; expect about a second per GB that is not skipped, so give tool searches specific
-words and a time range. Subagent conversations are not searched.
+`--regex` scan the transcript files of the sessions in range. Every file is read, but only the
+lines that can contain a TERM are parsed, and a file that cannot contain every TERM is not
+parsed at all; reading dominates, at about half a second per GB of transcripts in range (more
+when the files are not in the OS file cache), so give tool searches a time range. Subagent
+conversations are not searched.
 
 Projects (`--project P`):
 

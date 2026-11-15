@@ -586,7 +586,7 @@ fn json_string_after<'a>(hay: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
 /// A user record only matters when it carries text: string content, or an array with a text
 /// block. Tool-result-only records (the bulk of the corpus) are skipped without parsing.
 /// (An image or document without text matters too, see `user_line_may_have_media`.)
-fn user_line_may_have_text(line: &[u8]) -> bool {
+pub(crate) fn user_line_may_have_text(line: &[u8]) -> bool {
     let Some(at) = memmem::find(line, b"\"content\":") else { return false };
     let rest = &line[at + 10..];
     let skip = rest.iter().take_while(|b| b.is_ascii_whitespace()).count();
@@ -601,7 +601,7 @@ fn user_line_may_have_text(line: &[u8]) -> bool {
 /// pasted one opens a turn. Tool results carry images as well (screenshots read back) but always
 /// name a `tool_use_id`, which comes before their content, so those lines are ruled out after a
 /// few bytes.
-fn user_line_may_have_media(line: &[u8]) -> bool {
+pub(crate) fn user_line_may_have_media(line: &[u8]) -> bool {
     memmem::find(line, b"\"tool_use_id\"").is_none()
         && (memmem::find(line, b"\"type\":\"image\"").is_some() || memmem::find(line, b"\"type\":\"document\"").is_some())
 }
