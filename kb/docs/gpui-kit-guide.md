@@ -1,6 +1,6 @@
 ---
 created: 2026-09-28
-updated: 2026-10-27
+updated: 2026-11-15
 tags:
   - gpui
   - gpui-kit
@@ -233,6 +233,18 @@ use core::prelude::v1::test;
 否则 `#[test]` 展开时递归超限，报错信息看不出和导入有关。
 
 ## 脚本化交互与截图
+
+现有五个截图脚本（`scripts/screenshot*.sh`），每一张截的是什么写在各脚本的文件头和步骤注释里：
+
+| 命令 | 驱动方式 | 截图 | 可调变量 |
+|---|---|---|---|
+| `make screenshot` | `ASM_SPIKE_AUTOPLAY=1` | 3 张：初始、自动滚动后、自动过滤加排序后 | 无 |
+| `make screenshot-search` | `ASM_SEARCH_AUTOPLAY=1` | 7 张：文本搜索、下一个命中、两字 CJK、正则、Tools 范围、按 Matches 排序、清空 | `ASM_AUTOPLAY_QUERY` / `ASM_AUTOPLAY_CJK` / `ASM_AUTOPLAY_REGEX` 换查询 |
+| `make screenshot-detail` | `ASM_DETAIL_AUTOPLAY=1` | 最多 12 张：选中、展开步骤、展开一步、全部展开、搜索命中、下一个命中、特殊回合、70MB 文件、History 行（第一个 prompt 不少于 3 条的）、代码块（展开离开头最近的带代码块的回复）、从顶部按两次 `]`、Metadata | `ASM_AUTOPLAY_SESSION` / `ASM_AUTOPLAY_REGEX` / `ASM_AUTOPLAY_SPECIAL` 指定 session 和查询；`ASM_AUTOPLAY_STEP` 取 `cut-output`、`thinking` 或 `mcp`，决定展开哪种步骤 |
+| `make screenshot-cost` | `ASM_COST_AUTOPLAY=1` | 最多 9 张：Opus 5.5 按 Ctx 降序比 Fable 5.2、换 Sonnet 5.5、有其他模型的 session 比 Haiku 5.5、按 In 排序、按 Hit% 升序、指定 session 的 Conversation 顶部与第一处缓存失效、它的 Metadata、隐藏 Started / Size / Kind | `ASM_AUTOPLAY_CACHE_SESSION` 指定看缓存失效的 session，没给就跳过那 3 张 |
+| `make screenshot-clicks` | cliclick 真点击，启动三次 | 22 张：1–11 是下拉菜单、过滤、Preview 模式、选中行和 Metadata tab，12–15 是自定义区间与日期选择器，16–20 是回合卡（第二次启动，预选 `5f6eea99`），21–22 是普通行和 History 行的右键菜单（第三次启动） | 坐标写在脚本里；换机器要换一个不再变化的 session 并重量坐标 |
+
+五个脚本都先 `wake-screen`，再用 `caffeinate` 让显示器在 app 运行期间不睡（中途睡着会截不到图）。它们跑在真实索引上，用一次性的 `state.json` 保证从默认视图开始，按窗口 ID 截图，输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）。autoplay 的步骤做不了时会跳过不截。`screenshot-cost.sh` 用 `winid --pid` 只找自己启动的窗口，用户开着的同名 app 不受影响。
 
 需要自动驱动界面时，优先加环境变量控制的内置脚本（`ASM_SPIKE_AUTOPLAY=1`：启动后滚动并选中，再切过滤、排序和 tab）。它走的是和用户操作相同的代码路径，不依赖屏幕坐标。
 
