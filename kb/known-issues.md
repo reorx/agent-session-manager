@@ -39,11 +39,11 @@
 - 用户粘贴的长文本在记录里包在 `<pasted_content id="9c86">…</pasted_content>` 里。表格 Preview 列、详情标题和回合卡 prompt 的第一行都是这个标签，真正的内容要往下看；本机 2061 个 session 里有 72 个的第一条 prompt 以它开头（`tmp/2026-10-27-m4a-turn-cards/accept/pasted-count.py`）。
 - 处理方向（推测）：显示时剥掉标签外壳、保留内容，必要时加一个 `pasted` 小标签。First prompt / Preview 的文字也进 `asm list` 的输出，和 Python 脚本逐字比对（`make parity`），所以只在 app 显示层改，或者两边一起改。
 
-## 搜索：正则模式带 Tools 范围的扫描已到 500ms 目标线
+## 搜索：正则扫描远超 500ms 目标，30 天的数据要 6–8 秒
 
-- 记录：2026-09-28（复测 M3 的数字时发现；`kb/sessions/2026-09-28-m3-known-issues.md`）
-- 本机 1278 份 transcript、2.0GB。正则只搜 User + Assistant 是 250–310ms，加上 Tools 是 460–530ms，PRD 的目标是 500ms 以内。M3 验收时（950 份、1.27GB）是 380–425ms，耗时随数据量线性增长。结果是流式出现的，首批行远早于结束。
-- 处理方向：每行先在原始字节上做字面量预过滤，通过了再解析 JSON。正则匹配的是 JSON 解码后的文本，预过滤要处理转义，改完必须跑 `make parity`。
+- 记录：2026-09-28（复测 M3 的数字时发现；`kb/sessions/2026-09-28-m3-known-issues.md`）；2026-11-14 复测
+- 2026-09-28 本机 2.0GB 时，app 探针量到只搜 User + Assistant 250–310ms、加上 Tools 460–530ms，PRD 目标 500ms 以内。2026-11-14 数据已到 7.4GB，用 CLI 的正则搜索（`asm search` 无 `--index`）量到约 1 秒/GB：7 天 1.6GB 2.4s，30 天 5.1GB 6.0–7.7s，只搜 User + Assistant 与全搜一样慢，时间花在逐行解析 JSON 上（当时机器 load 5–6）。app 的正则模式用同一套逐行解析，推测同样慢，未在 app 里量。结果是流式出现的，首批行远早于结束。
+- 处理方向：每行先在原始字节上做字面量预过滤，通过了再解析 JSON；整份文件不含查询词时直接跳过。`kb/plans/2026-11-15-asm-skill-and-cli/session-search.md` 先在新的 `asm search` 上做，旧路径（app、`search-old`）之后再接，改完必须跑 `make parity`。
 
 ## 搜索：刚唤醒屏幕后的十几秒里查询耗时可以到平时的 4–8 倍，原因没有查明
 
