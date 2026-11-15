@@ -552,6 +552,30 @@ fn an_index_whose_schema_differs_from_this_build_is_rebuilt_even_if_the_version_
     assert!(!db.session(S1).unwrap().unwrap().model_usage.is_empty(), "and the missing table is back");
 }
 
+/// A read-only file is not a locked one: opening it says the file cannot be written and which
+/// file, whether that shows when switching it to WAL (a file in rollback-journal mode) or when
+/// building the index in it (a file already in WAL), and leaves it alone.
+#[test]
+fn an_index_file_that_cannot_be_written_is_reported_as_such_and_left_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    for (name, journal) in [("rollback.sqlite", "DELETE"), ("wal.sqlite", "WAL")] {
+        let path = tmp.path().join(name);
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(&format!("PRAGMA journal_mode = {journal}; CREATE TABLE other(x); INSERT INTO other VALUES (1);"))
+            .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let e = Db::open(&path).err().unwrap();
+        let chain = format!("{e:#}");
+        assert!(!is_busy(&e), "{name}: {chain}");
+        assert!(chain.contains("readonly") && !chain.contains("locked") && !chain.contains("another connection"), "{name}: {chain}");
+        assert!(chain.contains(&path.display().to_string()), "{name}: names the file: {chain}");
+        let rows: i64 = rusqlite::Connection::open(&path).unwrap().query_row("SELECT count(*) FROM other", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 1, "{name}: left alone");
+    }
+}
+
 #[test]
 fn rebuild_drops_everything_and_rescans() {
     let sb = sandbox();

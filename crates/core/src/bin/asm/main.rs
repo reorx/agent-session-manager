@@ -4,7 +4,7 @@
 
 use std::ffi::OsStr;
 use std::io::{IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -24,6 +24,10 @@ mod transcript;
 
 /// How long a refresh waits for the app to release the index's write lock before giving up.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a refresh waits instead when no scan has gone through on the index yet, so another
+/// process holding the lock is building it: a cold build of real data writes for 8-12 s
+/// (2026-11), and agents' shell tools commonly give up on a command after two minutes.
+const BUILD_TIMEOUT: Duration = Duration::from_secs(60);
 const BUSY_NOTICE: &str = "index busy, results may miss the last few minutes";
 
 #[derive(Parser)]
@@ -171,14 +175,15 @@ impl App {
 
     /// The index, first brought up to date with the files on disk when `scan` is set. An index
     /// that needs building while another process writes it cannot be used at all: that is an
-    /// error, which says why it needs building (only the outermost message is printed).
+    /// error, which says why it needs building. `main` prints only the outermost message, so any
+    /// other failure to open is printed with its causes (a read-only file, a full disk).
     fn open_db(&self, scan: bool) -> Result<Db> {
         let mut db = Db::open_with(&self.db_path, BUSY_TIMEOUT).map_err(|e| match is_busy(&e) {
             true => {
                 let why = e.to_string();
                 e.context(format!("{why} (the app, or another asm); wait for it, quit it, or use another index with --db / ASM_DB"))
             }
-            false => e,
+            false => anyhow::anyhow!("{e:#}"),
         })?;
         if scan {
             self.refresh_with(&self.indexer()?, &mut db)?;
@@ -186,17 +191,36 @@ impl App {
         Ok(db)
     }
 
-    /// Scan with `indexer`. When the app holds the write lock, the scan is dropped (its
-    /// transaction rolls back) and the command answers from the index as it is.
     fn refresh_with(&self, indexer: &Indexer, db: &mut Db) -> Result<()> {
-        match indexer.scan(db, &mut |_| {}) {
-            Ok(_) => Ok(()),
-            Err(e) if is_busy(&e) => {
-                eprintln!("{BUSY_NOTICE}");
-                Ok(())
-            }
-            Err(e) => Err(e),
+        refresh(indexer, db, &self.db_path, BUILD_TIMEOUT)
+    }
+}
+
+/// Scan with `indexer`. When another process (the app, or another `asm`) holds the write lock,
+/// the scan is dropped (its transaction rolls back) and the command answers from the index as it
+/// is. Unless no scan has gone through on the index yet (a new index, or one being rebuilt):
+/// that process is building it, and answering now would answer from nothing, so the scan waits
+/// for the lock up to `build_timeout` (it then finds the build's files written and skips them),
+/// and fails if the build takes longer.
+fn refresh(indexer: &Indexer, db: &mut Db, db_path: &Path, build_timeout: Duration) -> Result<()> {
+    let scanned = Indexer::has_scanned(db)?;
+    if !scanned {
+        db.conn().busy_timeout(build_timeout)?;
+    }
+    let result = indexer.scan(db, &mut |_| {});
+    db.conn().busy_timeout(BUSY_TIMEOUT)?;
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) if is_busy(&e) && scanned => {
+            eprintln!("{BUSY_NOTICE}");
+            Ok(())
         }
+        Err(e) if is_busy(&e) => Err(e.context(format!(
+            "{} is being built by another process (the app, or another asm), which still held it after {} s; run again when it is done, or use another index with --db / ASM_DB",
+            db_path.display(),
+            build_timeout.as_secs_f64()
+        ))),
+        Err(e) => Err(e),
     }
 }
 
@@ -215,5 +239,33 @@ mod tests {
         assert!(use_color(ColorWhen::Always, false, false, set), "always wins over NO_COLOR and a pipe");
         assert!(!use_color(ColorWhen::Never, false, true, None));
         assert!(!use_color(ColorWhen::Always, true, true, None), "--no-color");
+    }
+
+    /// A build that keeps the lock past the wait is an error, not an answer from an empty index.
+    /// (Waiting for a build that ends in time is tested in `tests/cli.rs`.)
+    #[test]
+    fn a_build_that_holds_the_lock_past_the_wait_fails_the_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude = tmp.path().join("claude");
+        std::fs::create_dir_all(claude.join("projects")).unwrap();
+        let indexer = Indexer::new(ClaudeDir::new(claude), None);
+        let path = tmp.path().join("index.sqlite");
+        let mut db = Db::open_with(&path, BUSY_TIMEOUT).unwrap();
+        let builder = rusqlite::Connection::open(&path).unwrap();
+        builder.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let wait = Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let e = refresh(&indexer, &mut db, &path, wait).unwrap_err();
+        assert!(started.elapsed() >= wait, "waited for the build first: {:?}", started.elapsed());
+        assert_eq!(
+            e.to_string(),
+            format!("{} is being built by another process (the app, or another asm), which still held it after 0.3 s; run again when it is done, or use another index with --db / ASM_DB", path.display())
+        );
+        assert!(!Indexer::has_scanned(&db).unwrap());
+
+        builder.execute_batch("COMMIT").unwrap();
+        refresh(&indexer, &mut db, &path, wait).unwrap();
+        assert!(Indexer::has_scanned(&db).unwrap(), "the next command builds it");
     }
 }

@@ -167,7 +167,11 @@ impl Db {
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         conn.busy_timeout(busy_timeout)?;
         let mut db = Db { conn, path: Some(path.to_path_buf()) };
-        db.use_wal(busy_timeout).with_context(|| format!("{}: another connection kept it locked", path.display()))?;
+        db.use_wal(busy_timeout).map_err(|e| match is_busy(&e) {
+            true => e.context(format!("{}: another connection kept it locked", path.display())),
+            // a read-only file, a full disk, an I/O error: report it as it is
+            false => e.context(format!("open {}", path.display())),
+        })?;
         db.configure()?;
         db.ensure_schema()?;
         Ok(db)
@@ -213,15 +217,22 @@ impl Db {
         // dropping tables with foreign keys on deletes their rows one by one; the pragma is a
         // no-op inside a transaction
         self.conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .with_context(|| format!("{path} {why}, but another connection is writing it"))?;
+        self.build_schema().map_err(|e| match is_busy(&e) {
+            true => e.context(format!("{path} {why}, but another connection is writing it")),
+            false => e.context(format!("{path} {why}")),
+        })?;
+        self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+        Ok(())
+    }
+
+    /// Build the schema in one write transaction, unless another connection built it while this
+    /// one waited for the lock.
+    fn build_schema(&mut self) -> Result<()> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if schema_mismatch(&tx)?.is_some() {
             reset_schema(&tx)?;
         }
         tx.commit()?;
-        self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(())
     }
 

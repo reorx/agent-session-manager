@@ -57,17 +57,28 @@ index busy, results may miss the last few minutes
 This is not an error: the exit code stays 0. `asm index` is the exception: it exists to write the
 index, so it fails (exit 1) when the lock is taken.
 
+Answering from the index as it is needs an index that a scan has gone through. A new index, or
+one being rebuilt (`asm index --rebuild`, the app's rebuild, a version change), holds nothing
+until its first scan is written, and the process holding the lock on it is writing that scan. So
+on such an index the command waits for the lock up to 60 seconds instead, then answers from the
+finished index, without the stderr line. A first scan of a large `~/.claude` writes for several
+seconds. If the lock is still held after 60 seconds, the command fails (exit 1) and says the
+index is being built by another process; run it again later, or point `--db` / `ASM_DB` at
+another file.
+
 Several `asm` commands may run at once (an agent often starts them in parallel) next to the app:
 each refresh writes a file only if no other one indexed it since it looked, so nothing is indexed
 twice.
 
 A new index (a new `--db` / `ASM_DB` path) is built by the first command that opens it, and an
 index built by another version of `asm` or the app is rebuilt from scratch on first use. Commands
-started at the same moment build it once: the others wait for that build and use it. When a build
-is needed while another process keeps the index locked for more than about 2 seconds, the command
+started at the same moment build it once: the others wait for that build and use it. When the
+index needs building or rebuilding as the command opens it, and another process keeps it locked
+for more than about 2 seconds (an older app writing an index of its own version, say), the command
 fails (exit 1), says why the index needs building, and leaves the file alone; wait for that
 process, quit the app, or point `--db` / `ASM_DB` at another file. Only a file that is not an
-index at all (not an SQLite database, or a damaged one) is deleted and built again.
+index at all (not an SQLite database, or a damaged one) is deleted and built again. Any other
+failure to open the index (a read-only file, a full disk) fails the command with its cause.
 
 ### Time range
 
@@ -200,7 +211,8 @@ session's model is its `main_model`. Lists of results look like:
 ```
 
 `meta.index_refresh` is `"done"` (the index was brought up to date), `"busy"` (the write lock
-was taken, see above) or `"skipped"` (`--no-scan`).
+was taken and the command answered from the index as it was, see above) or `"skipped"`
+(`--no-scan`).
 
 When a command fails (exit 1) with `--json`, stdout carries
 `{ "error": { "code": "...", "message": "..." } }` and stderr the same message. `code` is

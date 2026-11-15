@@ -214,6 +214,13 @@ impl Indexer {
         Ok(report)
     }
 
+    /// Whether a scan has gone through on this index since it was built or emptied: the scan
+    /// writes `claude_root` in its transaction, and neither a new schema nor `clear_all` has it.
+    /// Until then the index has nothing to answer from.
+    pub fn has_scanned(db: &Db) -> Result<bool> {
+        Ok(db.meta("claude_root")?.is_some())
+    }
+
     /// Drop the whole index and scan again.
     pub fn rebuild(&self, db: &mut Db, progress: &mut dyn FnMut(&Progress)) -> Result<ScanReport> {
         db.clear_all()?;

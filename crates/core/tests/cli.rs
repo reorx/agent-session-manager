@@ -225,6 +225,76 @@ fn a_busy_index_skips_the_refresh_and_answers_from_what_is_indexed() {
     assert!(String::from_utf8_lossy(&out.stdout).contains(new_id), "the next refresh catches up");
 }
 
+/// What `asm list alpha` answers while another process (the app, or another `asm`) builds the
+/// index from nothing: a new index when `rebuild` is false, one the other process empties and
+/// rebuilds when it is true. That process holds the write lock for 4 s, longer than a refresh
+/// waits for the app before answering from the index as it is.
+fn list_while_another_process_builds(sb: &Sandbox, rebuild: bool) -> std::process::Output {
+    use agent_session_core::claude::paths::ClaudeDir;
+    use agent_session_core::index::{Db, Indexer};
+    if rebuild {
+        asm(sb).arg("index").assert().success();
+    }
+    let (db_path, claude) = (sb.db_path(), sb.claude.clone());
+    let (holding, held) = std::sync::mpsc::channel();
+    let builder = std::thread::spawn(move || {
+        let favorites = agent_session_core::config::favorites_dir(&db_path).unwrap().join("claude");
+        let indexer = Indexer::new(claude, Some(ClaudeDir::new(favorites)));
+        let mut db = Db::open(&db_path).unwrap();
+        let mut hold = |p: &agent_session_core::index::Progress| {
+            // "indexing" is reported from inside the write transaction
+            if p.phase == "indexing" && p.done == 1 {
+                holding.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_secs(4));
+            }
+        };
+        match rebuild {
+            true => indexer.rebuild(&mut db, &mut hold).unwrap(),
+            false => indexer.scan(&mut db, &mut hold).unwrap(),
+        };
+    });
+    held.recv().unwrap();
+    let out = asm(sb).args(["list", "alpha"]).output().unwrap();
+    builder.join().unwrap();
+    out
+}
+
+fn assert_waited_for_the_build(out: &std::process::Output) {
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success() && stderr.is_empty() && stdout.starts_with("-Users-me-Code-alpha (4 sessions, 3 with transcript)\n"),
+        "should answer from the finished build, with no notice that anything is missing; got {:?}, stderr {stderr:?}, stdout {stdout:?}",
+        out.status.code()
+    );
+}
+
+#[test]
+fn a_command_on_a_new_index_another_process_is_building_waits_for_the_build() {
+    let sb = sandbox();
+    assert_waited_for_the_build(&list_while_another_process_builds(&sb, false));
+}
+
+#[test]
+fn a_command_on_an_index_another_process_is_rebuilding_waits_for_the_rebuild() {
+    let sb = sandbox();
+    assert_waited_for_the_build(&list_while_another_process_builds(&sb, true));
+}
+
+/// The CLI prints only the outermost message of most errors; for an index it cannot open, that
+/// message has to carry the reason.
+#[test]
+fn an_index_file_that_cannot_be_written_is_reported_as_such_not_as_locked() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = sandbox();
+    rusqlite::Connection::open(sb.db_path()).unwrap().execute_batch("CREATE TABLE other(x);").unwrap();
+    std::fs::set_permissions(sb.db_path(), std::fs::Permissions::from_mode(0o444)).unwrap();
+    let out = asm(&sb).args(["list", "alpha"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("readonly") && stderr.contains(&sb.db_path().display().to_string()) && !stderr.contains("locked"), "{stderr}");
+    assert!(out.stdout.is_empty());
+}
+
 #[test]
 fn a_refresh_that_fails_for_another_reason_than_the_lock_is_still_an_error() {
     let sb = sandbox();
