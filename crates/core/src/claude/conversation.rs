@@ -226,10 +226,11 @@ impl Reader<'_> {
                 return;
             }
         }
-        if is_interruption(r, &text) {
+        let flags = r.user_flags();
+        if is_interruption(&flags, &text) {
             self.ensure_turn(ts); self.candidate = None; self.turn().end = TurnEnd::Interrupted { ts }; return;
         }
-        if is_human_input(r, content) {
+        if is_human_input(&flags, content) {
             self.number += 1;
             self.start(Some(self.number), None, ts, Marked::new(&clean_prompt(&text), ENTRY_CHARS, self.matcher), attachments(content));
         } else if let Some(origin) = r.origin.as_ref().and_then(|o| o.kind.as_deref()).filter(|k| *k != "human") {

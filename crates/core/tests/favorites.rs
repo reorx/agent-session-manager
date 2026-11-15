@@ -18,7 +18,7 @@ fn favoriting_moves_the_row_to_the_copy_without_changing_it() {
     let after = db.session(S1).unwrap().unwrap();
     assert!(after.favorite); assert!(after.file_path.unwrap().starts_with(sb.fav_root()));
     assert_eq!(before.cost_usd, after.cost_usd); assert_eq!(after.updated_at, MTIME_S1);
-    assert_eq!(db.messages(S1).unwrap().len(), 10); assert_eq!(after.subagent_count, 1);
+    assert_eq!(db.messages(S1).unwrap().len(), 12); assert_eq!(after.subagent_count, 1);
     assert_eq!(report.files_missing, 0); assert_eq!(rows.len(), 1);
     assert!(!db.all_index_states().unwrap().contains_key(&sb.transcript(ALPHA, S1)));
 }
@@ -93,7 +93,7 @@ fn migrating_the_root_reindexes_from_the_new_place() {
     db.set_meta("favorites_root", &agent_session_core::config::canonical_root(&new.join("claude")).unwrap().to_string_lossy()).unwrap();
     Indexer::new(sb.claude.clone(), Some(ClaudeDir::new(new.join("claude")))).scan(&mut db, &mut |_| {}).unwrap();
     assert!(db.session(S1).unwrap().unwrap().file_path.unwrap().starts_with(new));
-    assert_eq!(db.messages(S1).unwrap().len(), 10);
+    assert_eq!(db.messages(S1).unwrap().len(), 12);
 }
 #[test]
 fn migration_keeps_the_new_roots_copy_on_conflict() {
@@ -114,7 +114,7 @@ fn rebuild_keeps_favorites_whose_original_is_gone() {
     let sb = sandbox(); save(&sb); std::fs::remove_file(sb.transcript(ALPHA, S1)).unwrap();
     let mut db = Db::open_in_memory().unwrap();
     Indexer::new(sb.claude.clone(), Some(ClaudeDir::new(sb.fav_root().join("claude")))).rebuild(&mut db, &mut |_| {}).unwrap();
-    assert!(db.session(S1).unwrap().unwrap().favorite); assert_eq!(db.messages(S1).unwrap().len(), 10);
+    assert!(db.session(S1).unwrap().unwrap().favorite); assert_eq!(db.messages(S1).unwrap().len(), 12);
 }
 #[test]
 fn resolve_transcript_and_list_transcripts_see_favorites() {

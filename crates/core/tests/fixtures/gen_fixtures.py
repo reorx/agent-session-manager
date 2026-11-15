@@ -410,6 +410,9 @@ def session_3():
             sid,
             '2026-09-10T02:00:03.000Z',
             [
+                # a thinking block that kept its text (most keep only the signature); "核对" is
+                # only here, so text search must not find it
+                {'type': 'thinking', 'thinking': '先核对现有实现，再动手修改。', 'signature': 'sig'},
                 {'type': 'text', 'text': '好的，我先看看现有的解析器实现。'},
                 {
                     'type': 'tool_use',
@@ -422,6 +425,33 @@ def session_3():
             branch='master',
         ),
         tool_result(sid, '2026-09-10T02:00:04.000Z', tu, 'src/parse.rs:12:fn parse_line', cwd=BETA),
+        # user-side text the user did not type: neither opens a turn (both still count as prompts
+        # for the reference script, which only looks at isMeta / isSidechain)
+        user(
+            sid,
+            '2026-09-10T02:10:00.000Z',
+            '后台任务已结束：全部检查通过',
+            cwd=BETA,
+            branch='master',
+            origin={'kind': 'task-notification'},
+            promptSource='system',
+        ),
+        dict(
+            env(sid, '2026-09-10T02:19:59.000Z', BETA, branch='master'),
+            type='system',
+            subtype='compact_boundary',
+            content='Conversation compacted',
+            compactMetadata={'trigger': 'manual', 'preTokens': 1000},
+        ),
+        user(
+            sid,
+            '2026-09-10T02:20:00.000Z',
+            '本会话延续自之前的对话，摘要：用户请求整理数据结构。',
+            cwd=BETA,
+            branch='master',
+            isCompactSummary=True,
+            isVisibleInTranscriptOnly=True,
+        ),
         assistant(
             sid,
             '2026-09-10T02:30:00.000Z',
@@ -609,18 +639,60 @@ def main():
 # Kept outside the discovery tree so existing index/parity fixtures stay unchanged.
 reader_rows = [
     {'type': 'user', 'message': {'content': '<system-reminder>noise</system-reminder>修复问题'}},
-    {'type': 'assistant', 'message': {'content': [{'type': 'thinking', 'thinking': 'private'}, {'type': 'text', 'text': '我先检查'}, {'type': 'tool_use', 'name': 'Read', 'id': 'r1'}]}},
-    {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'content': 'huge output'}, {'type': 'text', 'text': 'tool noise'}]}},
-    {'type': 'assistant', 'uuid': 'tool-1', 'message': {'content': [{'type': 'tool_use', 'name': 'Bash', 'id': 'b1'}, {'type': 'tool_use', 'name': 'Bash', 'id': 'b2'}]}},
-    {'type': 'assistant', 'uuid': 'tool-1', 'message': {'content': [{'type': 'tool_use', 'name': 'Bash', 'id': 'b1'}, {'type': 'tool_use', 'name': 'Bash', 'id': 'b2'}]}},
+    {
+        'type': 'assistant',
+        'message': {
+            'content': [
+                {'type': 'thinking', 'thinking': 'private'},
+                {'type': 'text', 'text': '我先检查'},
+                {'type': 'tool_use', 'name': 'Read', 'id': 'r1'},
+            ]
+        },
+    },
+    {
+        'type': 'user',
+        'message': {
+            'content': [{'type': 'tool_result', 'content': 'huge output'}, {'type': 'text', 'text': 'tool noise'}]
+        },
+    },
+    {
+        'type': 'assistant',
+        'uuid': 'tool-1',
+        'message': {
+            'content': [
+                {'type': 'tool_use', 'name': 'Bash', 'id': 'b1'},
+                {'type': 'tool_use', 'name': 'Bash', 'id': 'b2'},
+            ]
+        },
+    },
+    {
+        'type': 'assistant',
+        'uuid': 'tool-1',
+        'message': {
+            'content': [
+                {'type': 'tool_use', 'name': 'Bash', 'id': 'b1'},
+                {'type': 'tool_use', 'name': 'Bash', 'id': 'b2'},
+            ]
+        },
+    },
     {'type': 'user', 'isMeta': True, 'message': {'content': 'injected skill'}},
     {'type': 'user', 'origin': {'kind': 'task-notification'}, 'message': {'content': 'background result'}},
     {'type': 'user', 'isCompactSummary': True, 'message': {'content': 'compacted context'}},
     {'type': 'assistant', 'message': {'id': 'final1', 'content': [{'type': 'text', 'text': '完成。'}]}},
-    {'type': 'assistant', 'message': {'id': 'final1', 'content': [{'type': 'text', 'text': '```rust\nlet x = 1;\n```'}], 'stop_reason': 'end_turn'}},
+    {
+        'type': 'assistant',
+        'message': {
+            'id': 'final1',
+            'content': [{'type': 'text', 'text': '```rust\nlet x = 1;\n```'}],
+            'stop_reason': 'end_turn',
+        },
+    },
     {'type': 'system', 'subtype': 'turn_duration'},
     {'type': 'user', 'message': {'content': '继续'}},
-    {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': '正在修改'}, {'type': 'tool_use', 'name': 'Edit'}]}},
+    {
+        'type': 'assistant',
+        'message': {'content': [{'type': 'text', 'text': '正在修改'}, {'type': 'tool_use', 'name': 'Edit'}]},
+    },
     'broken json',
     {'type': 'user', 'message': {'content': '[Request interrupted by user]'}},
     {'type': 'user', 'message': {'content': [{'type': 'image', 'source': {'data': 'base64-noise'}}]}},
@@ -632,19 +704,33 @@ reader_rows = [
 def conversation_rows():
     def u(text, **kw):
         return dict(type='user', message={'content': text}, **kw)
+
     def a(blocks, mid=None, **kw):
         return dict(type='assistant', message={'id': mid, 'content': blocks}, **kw)
+
     def text(t):
         return {'type': 'text', 'text': t}
-    call = {'type': 'tool_use', 'id': 'bash', 'name': 'Bash',
-            'input': {'timeout': 1000, 'command': 'echo needle', 'description': 'inspect'}}
+
+    call = {
+        'type': 'tool_use',
+        'id': 'bash',
+        'name': 'Bash',
+        'input': {'timeout': 1000, 'command': 'echo needle', 'description': 'inspect'},
+    }
     return [
         a([text('startup')]),
         u([text('first needle'), {'type': 'image', 'source': {'data': 'YWJj'}}], uuid='prompt'),
         u('duplicate', uuid='prompt'),
         u('injected', isMeta=True),
-        a([{'type': 'thinking', 'thinking': '', 'signature': 'sig'},
-           {'type': 'thinking', 'thinking': 'think needle'}, text('working'), call], 'work'),
+        a(
+            [
+                {'type': 'thinking', 'thinking': '', 'signature': 'sig'},
+                {'type': 'thinking', 'thinking': 'think needle'},
+                text('working'),
+                call,
+            ],
+            'work',
+        ),
         u([{'type': 'tool_result', 'tool_use_id': 'bash', 'content': 'line\n' * 900 + 'needle', 'is_error': True}]),
         a([{'type': 'tool_use', 'id': 'read', 'name': 'Read', 'input': {'file_path': '/tmp/a'}}]),
         u([{'type': 'tool_result', 'tool_use_id': 'read', 'content': [text('array result')]}]),
@@ -661,6 +747,7 @@ def conversation_rows():
         u('summary needle', isCompactSummary=True),
         'broken json',
     ]
+
 
 if __name__ == '__main__':
     main()

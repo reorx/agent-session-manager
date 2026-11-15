@@ -25,7 +25,8 @@ impl Source {
     }
 }
 
-/// Role of an indexed message (tool results and thinking are never indexed).
+/// Role of an indexed message: whose side of the conversation its record is on. Tool inputs and
+/// outputs are never indexed; what kind of text a row holds is its `TextKind`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Role {
     User,
@@ -44,6 +45,40 @@ impl Role {
         match s {
             "user" => Some(Role::User),
             "assistant" => Some(Role::Assistant),
+            _ => None,
+        }
+    }
+}
+
+/// What an indexed text is. A user record is a `Prompt` exactly when it opens a numbered turn
+/// (the detail panel's and the transcript export's rule); every other user-side text is `Other`.
+/// An assistant record gives a `Reply` row for its text blocks and a `Thinking` row for the
+/// thinking blocks that kept their text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TextKind {
+    Prompt,
+    Reply,
+    Thinking,
+    Other,
+}
+
+impl TextKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TextKind::Prompt => "prompt",
+            TextKind::Reply => "reply",
+            TextKind::Thinking => "thinking",
+            TextKind::Other => "other",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<TextKind> {
+        match s {
+            "prompt" => Some(TextKind::Prompt),
+            "reply" => Some(TextKind::Reply),
+            "thinking" => Some(TextKind::Thinking),
+            "other" => Some(TextKind::Other),
             _ => None,
         }
     }
@@ -334,12 +369,14 @@ impl UsageRow {
     }
 }
 
-/// One searchable message: the text blocks of a user or assistant record.
+/// One searchable text of a user or assistant record. An assistant record with both thinking and
+/// text gives two rows on the same line (`byte_offset`), thinking first.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageRow {
     pub uuid: String,
     pub parent_uuid: Option<String>,
     pub role: Role,
+    pub kind: TextKind,
     /// Unix ms; 0 when the record has no timestamp.
     pub ts: i64,
     pub text: String,

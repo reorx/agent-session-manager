@@ -467,6 +467,16 @@ mod tests {
     }
 
     #[test]
+    fn a_text_search_leaves_thinking_out_and_keeps_the_other_user_side_text() {
+        let f = fixture();
+        assert!(run(&f, "terminal window", SearchOptions::default(), f.targets.clone()).0.is_empty(), "thinking is in the index for the CLI only");
+        assert!(run(&f, "核对", SearchOptions::default(), f.targets.clone()).0.is_empty(), "two-character queries too");
+        let user_only = SearchOptions { scope: ScopeSet { user: true, assistant: false, tools: false }, ..Default::default() };
+        let (hits, _) = run(&f, "后台任务", user_only, f.targets.clone());
+        assert_eq!((hits[0].0.as_ref(), hits[0].1.label.as_ref()), (S3, "user"), "a task notification is user text, as before");
+    }
+
+    #[test]
     fn only_the_given_targets_are_searched() {
         let f = fixture();
         let others: Vec<SearchTarget> = f.targets.iter().filter(|t| t.session_id != S1).cloned().collect();

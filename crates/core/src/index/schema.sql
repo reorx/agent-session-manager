@@ -74,6 +74,9 @@ CREATE TABLE messages (
   uuid TEXT NOT NULL,
   parent_uuid TEXT,
   role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+  -- prompt: a user record that opens a numbered turn; other: any other user-side text;
+  -- reply / thinking: an assistant record's text / thinking blocks (two rows on one line)
+  kind TEXT NOT NULL CHECK (kind IN ('prompt', 'reply', 'thinking', 'other')),
   ts INTEGER NOT NULL,
   text TEXT NOT NULL,
   is_meta INTEGER NOT NULL DEFAULT 0,
@@ -88,16 +91,17 @@ CREATE INDEX messages_session_ts ON messages(session_id, byte_offset);
 CREATE VIRTUAL TABLE messages_fts USING fts5(
   text,
   role UNINDEXED,
+  kind UNINDEXED,
   session_id UNINDEXED,
   content='messages',
   content_rowid='id',
   tokenize="trigram case_sensitive 0"
 );
 CREATE TRIGGER messages_ai AFTER INSERT ON messages WHEN new.is_meta = 0 BEGIN
-  INSERT INTO messages_fts(rowid, text, role, session_id) VALUES (new.id, new.text, new.role, new.session_id);
+  INSERT INTO messages_fts(rowid, text, role, kind, session_id) VALUES (new.id, new.text, new.role, new.kind, new.session_id);
 END;
 CREATE TRIGGER messages_ad AFTER DELETE ON messages WHEN old.is_meta = 0 BEGIN
-  INSERT INTO messages_fts(messages_fts, rowid, text, role, session_id) VALUES ('delete', old.id, old.text, old.role, old.session_id);
+  INSERT INTO messages_fts(messages_fts, rowid, text, role, kind, session_id) VALUES ('delete', old.id, old.text, old.role, old.kind, old.session_id);
 END;
 
 -- One row per API response. agent = '' for the session's own transcript, else the subagent file

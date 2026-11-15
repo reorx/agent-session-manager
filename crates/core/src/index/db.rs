@@ -1,16 +1,16 @@
 //! The SQLite index: one connection, owned by whoever indexes or queries (never shared across
 //! threads). Schema in `schema.sql`; a version mismatch or an unreadable file rebuilds it.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::model::{MessageRow, ModelUsage, Role, SessionSummary, Source, Tokens, UsageRow};
+use crate::model::{MessageRow, ModelUsage, Role, SessionSummary, Source, TextKind, Tokens, UsageRow};
 
 /// Also bump this when a price in `pricing.rs` changes: stored costs are computed at index time.
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 const SCHEMA: &str = include_str!("schema.sql");
 
 pub struct Db {
@@ -474,8 +474,8 @@ impl Db {
 
     pub fn insert_messages(&self, session_id: &str, messages: &[MessageRow]) -> Result<()> {
         let mut stmt = self.conn.prepare_cached(
-            "INSERT INTO messages (session_id, uuid, parent_uuid, role, ts, text, is_meta, byte_offset, byte_len, model, input_tokens, output_tokens)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO messages (session_id, uuid, parent_uuid, role, kind, ts, text, is_meta, byte_offset, byte_len, model, input_tokens, output_tokens)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         )?;
         for m in messages {
             stmt.execute(params![
@@ -483,6 +483,7 @@ impl Db {
                 m.uuid,
                 m.parent_uuid,
                 m.role.as_str(),
+                m.kind.as_str(),
                 m.ts,
                 m.text,
                 m.is_meta,
@@ -496,16 +497,23 @@ impl Db {
         Ok(())
     }
 
+    /// uuids of a session's indexed user rows, for a parser that appends to its transcript.
+    pub fn user_uuids(&self, session_id: &str) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare_cached("SELECT uuid FROM messages WHERE session_id = ?1 AND role = 'user' AND uuid <> ''")?;
+        let uuids = stmt.query_map([session_id], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?;
+        Ok(uuids)
+    }
+
     pub fn delete_messages(&self, session_id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM messages WHERE session_id = ?1", [session_id])?;
         Ok(())
     }
 
-    /// Messages of one session in file order.
+    /// Messages of one session in file order (the rows of one line in the order they were written).
     pub fn messages(&self, session_id: &str) -> Result<Vec<MessageRow>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT uuid, parent_uuid, role, ts, text, is_meta, byte_offset, byte_len, model, input_tokens, output_tokens
-             FROM messages WHERE session_id = ?1 ORDER BY byte_offset",
+            "SELECT uuid, parent_uuid, role, kind, ts, text, is_meta, byte_offset, byte_len, model, input_tokens, output_tokens
+             FROM messages WHERE session_id = ?1 ORDER BY byte_offset, id",
         )?;
         let rows = stmt
             .query_map([session_id], |r| {
@@ -513,14 +521,15 @@ impl Db {
                     uuid: r.get(0)?,
                     parent_uuid: r.get(1)?,
                     role: Role::parse(&r.get::<_, String>(2)?).unwrap_or(Role::User),
-                    ts: r.get(3)?,
-                    text: r.get(4)?,
-                    is_meta: r.get(5)?,
-                    byte_offset: r.get::<_, i64>(6)? as u64,
-                    byte_len: r.get::<_, i64>(7)? as u64,
-                    model: r.get(8)?,
-                    input_tokens: r.get(9)?,
-                    output_tokens: r.get(10)?,
+                    kind: TextKind::parse(&r.get::<_, String>(3)?).unwrap_or(TextKind::Other),
+                    ts: r.get(4)?,
+                    text: r.get(5)?,
+                    is_meta: r.get(6)?,
+                    byte_offset: r.get::<_, i64>(7)? as u64,
+                    byte_len: r.get::<_, i64>(8)? as u64,
+                    model: r.get(9)?,
+                    input_tokens: r.get(10)?,
+                    output_tokens: r.get(11)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?;

@@ -163,9 +163,31 @@ fn write_body(output: &mut String, role: &str, text: &str) {
     output.push_str(&format!("<{role}>\n{body}\n</{role}>\n\n"));
 }
 
-pub(crate) fn is_human_input(record: &Record, content: &Content) -> bool {
-    if record.is_meta || record.is_compact_summary
-        || record.origin.as_ref().and_then(|o| o.kind.as_deref()).is_some_and(|kind| kind != "human") {
+/// The facts of a user record that decide whether the user typed it. The readers here and the
+/// indexer's parser (`claude/parse.rs`) each fill it in from their own record type, so turn
+/// numbers and the index's `prompt` rows follow one rule.
+pub(crate) struct UserFlags<'a> {
+    pub(crate) is_meta: bool,
+    pub(crate) is_compact_summary: bool,
+    /// `origin.kind`; absent on records older than the field.
+    pub(crate) origin: Option<&'a str>,
+    /// The record has an `interruptedMessageId`.
+    pub(crate) interrupted: bool,
+}
+
+impl Record<'_> {
+    pub(crate) fn user_flags(&self) -> UserFlags<'_> {
+        UserFlags {
+            is_meta: self.is_meta,
+            is_compact_summary: self.is_compact_summary,
+            origin: self.origin.as_ref().and_then(|o| o.kind.as_deref()),
+            interrupted: self.interrupted_message_id.is_some(),
+        }
+    }
+}
+
+pub(crate) fn is_human_input(flags: &UserFlags, content: &Content) -> bool {
+    if flags.is_meta || flags.is_compact_summary || flags.origin.is_some_and(|kind| kind != "human") {
         return false;
     }
     if let Content::Blocks(blocks) = content {
@@ -181,14 +203,18 @@ pub(crate) fn is_human_input(record: &Record, content: &Content) -> bool {
         if blocks.iter().any(|b| matches!(b.kind.as_deref(), Some("image" | "document"))))
 }
 
-pub(crate) fn is_interruption(record: &Record, text: &str) -> bool {
-    record.interrupted_message_id.is_some() || text.trim().starts_with("[Request interrupted by user")
+pub(crate) fn is_interruption(flags: &UserFlags, text: &str) -> bool {
+    flags.interrupted || text.trim().starts_with("[Request interrupted by user")
+}
+
+/// A user record that starts a numbered turn: typed by the user and not an interruption.
+pub(crate) fn opens_turn(flags: &UserFlags, content: &Content) -> bool {
+    is_human_input(flags, content) && !is_interruption(flags, &user_text(content).unwrap_or_default())
 }
 
 fn human_text(record: &Record, content: &Content) -> Option<String> {
-    if !is_human_input(record, content) { return None; }
+    if !opens_turn(&record.user_flags(), content) { return None; }
     let text = user_text(content).unwrap_or_default();
-    if is_interruption(record, &text) { return None; }
     let mut text = clean_prompt(&text);
     if let Content::Blocks(blocks) = content {
         for block in blocks {

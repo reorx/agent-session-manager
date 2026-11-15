@@ -5,7 +5,7 @@ mod common;
 
 use agent_session_core::claude::parse::parse_transcript;
 use agent_session_core::index::{Db, Indexer, ListFilter, Order, SCHEMA_VERSION, ScanEvent, is_busy};
-use agent_session_core::model::{Role, SessionSummary, Source};
+use agent_session_core::model::{Role, SessionSummary, Source, TextKind};
 use common::*;
 
 fn ms(iso: &str) -> i64 {
@@ -38,7 +38,7 @@ fn first_scan_indexes_transcripts_and_fills_gaps_from_history() {
     assert_eq!(s1.project_path.as_deref(), Some("/Users/me/Code/alpha"));
     assert_eq!(s1.tool_counts.get("Bash"), Some(&2));
     assert_eq!(s1.files_touched.len(), 1);
-    assert_eq!(db.messages(S1).unwrap().len(), 10);
+    assert_eq!(db.messages(S1).unwrap().len(), 12);
 
     let s4 = db.session(S4).unwrap().unwrap();
     assert_eq!(s4.source, Source::History);
@@ -111,7 +111,7 @@ fn unchanged_files_are_skipped_on_the_next_scan() {
     assert_eq!(report.files_unchanged, 4);
     assert_eq!(report.files_parsed, 0);
     assert_eq!(db.list_sessions(&ListFilter::default()).unwrap().len(), 8, "history import is idempotent");
-    assert_eq!(db.messages(S1).unwrap().len(), 10);
+    assert_eq!(db.messages(S1).unwrap().len(), 12);
 }
 
 #[test]
@@ -142,6 +142,32 @@ fn appended_lines_are_parsed_incrementally() {
     assert_eq!(msgs.len(), 4);
     assert_eq!(msgs[2].byte_offset, before);
     assert_eq!(msgs[3].role, Role::Assistant);
+    let kinds: Vec<TextKind> = msgs.iter().map(|m| m.kind).collect();
+    assert_eq!(kinds, [TextKind::Prompt, TextKind::Reply, TextKind::Prompt, TextKind::Reply]);
+}
+
+#[test]
+fn an_appended_copy_of_an_indexed_prompt_opens_no_second_turn() {
+    // The detail panel skips a record whose uuid it has seen; an appending scan must agree
+    // without re-reading the indexed part of the file.
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    let path = sb.transcript(ALPHA, S2);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let prompt = text.lines().next().unwrap();
+    append(&path, &format!("{prompt}\n"));
+    append(&path, concat!(
+        r#"{"type":"user","message":{"role":"user","content":"And now in French"},"uuid":"u-new","timestamp":"2026-09-06T00:00:00.000Z","sessionId":"22222222-aaaa-4bbb-8ccc-000000000002"}"#, "\n",
+    ));
+    set_mtime(&path, MTIME_S2 + 60_000);
+    assert_eq!(scan(&sb, &mut db).files_appended, 1);
+    let kinds: Vec<TextKind> = db.messages(S2).unwrap().iter().map(|m| m.kind).collect();
+    assert_eq!(kinds, [TextKind::Prompt, TextKind::Reply, TextKind::Other, TextKind::Prompt]);
+
+    let mut fresh = Db::open(&sb.tmp.path().join("fresh.sqlite")).unwrap();
+    scan(&sb, &mut fresh);
+    assert_eq!(db.messages(S2).unwrap(), fresh.messages(S2).unwrap(), "appending == indexing the whole file");
 }
 
 #[test]
@@ -572,4 +598,35 @@ fn calls_with_a_prompt_over_100k_are_grouped_apart() {
     let long: Vec<_> = s1.model_usage.iter().filter(|g| g.long_prompt).collect();
     assert_eq!(long.len(), 1);
     assert_eq!((long[0].model.as_str(), long[0].responses, long[0].tokens.input), ("claude-sonnet-5", 1, 100_001));
+}
+
+/// Not a behavior test: on a real index, each session's `prompt` rows against the numbered turns
+/// the detail panel reads from its transcript. Prints the sessions that differ; a transcript that
+/// grew after the index was built is reported apart (it is still being written).
+/// `ASM_CHECK_DB=<index> cargo test -p agent-session-core --release --test index real_prompt_rows -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn real_prompt_rows_match_the_numbered_turns() {
+    use agent_session_core::claude::conversation::read_conversation;
+    use agent_session_core::model::ConvItem;
+    let db = Db::open_read_only(std::path::Path::new(&std::env::var("ASM_CHECK_DB").expect("ASM_CHECK_DB points to an index"))).unwrap();
+    let sessions = db.list_sessions(&ListFilter::default()).unwrap();
+    let (mut checked, mut prompts_total, mut differ, mut grown) = (0, 0, Vec::new(), Vec::new());
+    for s in sessions.iter().filter(|s| !s.history_only()) {
+        let Some(path) = s.file_path.as_deref() else { continue };
+        let Ok(meta) = std::fs::metadata(path) else { continue };
+        let prompts = db.messages(&s.id).unwrap().iter().filter(|m| m.kind == TextKind::Prompt).count();
+        let turns = read_conversation(path, None).unwrap().items.iter().filter(|i| matches!(i, ConvItem::Turn(t) if t.number.is_some())).count();
+        checked += 1;
+        prompts_total += prompts;
+        if prompts != turns {
+            let line = format!("{} prompts={prompts} turns={turns} {}", s.id, path.display());
+            if Some(meta.len()) != s.file_size { grown.push(line) } else { differ.push(line) }
+        }
+    }
+    println!("{checked} transcripts, {prompts_total} prompt rows; differ: {}, grew since indexing: {}", differ.len(), grown.len());
+    for line in differ.iter().chain(&grown) {
+        println!("  {line}");
+    }
+    assert!(differ.is_empty(), "prompt rows and turns differ in transcripts that did not change");
 }

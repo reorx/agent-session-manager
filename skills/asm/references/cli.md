@@ -96,7 +96,7 @@ snippet labels use these names.
 | `thinking` | The agent's thinking. Only about one block in ten still has its text; the rest kept only a signature |
 | `tool-input` | The input of a tool call, as `key: value` text (a Bash command as `$ command`) |
 | `tool-output` | The output of a tool call |
-| `other` | Text that showed up on the user side without being typed: compact summaries, background task notifications, local command output, and the like |
+| `other` | Text that showed up on the user side without being typed: compact summaries, background task notifications, interruption markers (`[Request interrupted by user]`), and the like. The output of a local slash command (`<local-command-stdout>`) is a `prompt`, since it starts a turn |
 
 `tool` stands for `tool-input,tool-output`, and `all` for every kind.
 
@@ -563,7 +563,7 @@ hit `asm search` reports can be found in its turn:
 - Every reply the agent wrote is an `<agent>` element in file order, commentary between tool
   calls included; the last one is the final reply (`<agent status="missing">` as before when
   there is none).
-- `other` text (compact summaries, task notifications, command output) is an `<other>` element.
+- `other` text (compact summaries, task notifications, interruption markers) is an `<other>` element.
 - `--thinking` adds `<thinking>` elements; blocks with no text left are skipped.
 - `--tools` adds a `<tool name="Bash">` element per call, holding `<input>` (as in the
   `tool-input` kind) and `<output>` (`<output status="error">` when the tool failed), and drops

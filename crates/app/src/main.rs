@@ -979,6 +979,9 @@ impl AppRoot {
         self.table.update(cx, |table, cx| {
             change(table.delegate_mut());
             table.refresh(cx);
+            // hiding the sorted column re-sorts the rows: the table observer moves the selection
+            // along with its session
+            cx.notify();
         });
         self.persist(cx);
         cx.notify();

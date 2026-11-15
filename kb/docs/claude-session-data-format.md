@@ -78,6 +78,8 @@ assistant 特有：`requestId`、`effort`、`message.model`、`message.id`、`me
 
 **判定"人类输入的消息"**（沿用 `human_prompt_text`）：`type == user` 且非 `isSidechain`，content 为 string 或含 text block 且**不含 tool_result**，且非 `isMeta`，且文本不以 `[Image: source:` 开头。再用 `clean_prompt` 去掉 `<system-reminder>`、`<command-message>`、`<ide_opened_file>`、`<ide_selection>` 包裹块，并把 `<command-name>/<command-args>` 还原为 `/cmd args`。
 
+这个口径只用于 prompt 计数（与脚本一致），它把 compact 摘要、后台任务通知（`origin.kind` 非 `human`）、中断标记也算进去。**回合编号**用另一个更严的口径（`transcript::opens_turn`，详情面板、导出和索引的 `messages.kind = 'prompt'` 共用）：再排除 `isCompactSummary`、`origin.kind` 非 `human`、中断标记（`interruptedMessageId` 或 `[Request interrupted by user`）、清理后为空的文本，同一 uuid 只算第一次；只贴了图片 / 文档、没有文字的记录也开一个回合。其余有文字的 user 记录在索引里是 `other`。2026-11-15 在本机 3,321 份记录上核对过：每个会话的 `prompt` 行数都等于详情面板的回合数。
+
 ### 2.2 Session 元数据记录（无 `message`，直接可用作表格列）
 
 | type | 出现于多少 session | 字段 | 用途 |

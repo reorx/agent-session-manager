@@ -8,8 +8,10 @@ use rusqlite::types::Value as SqlValue;
 
 use super::{Highlighted, Matcher};
 use crate::index::Db;
-use crate::model::Role;
+use crate::model::{Role, TextKind};
 
+/// The app's two scopes: User is every user-side text (`prompt` and `other`), Assistant the
+/// replies. Thinking is in the index for the CLI, not for these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FtsRoles {
     pub user: bool,
@@ -19,6 +21,17 @@ pub struct FtsRoles {
 impl FtsRoles {
     pub fn both() -> Self {
         FtsRoles { user: true, assistant: true }
+    }
+
+    fn kinds(self) -> Vec<TextKind> {
+        let mut kinds = Vec::new();
+        if self.user {
+            kinds.extend([TextKind::Prompt, TextKind::Other]);
+        }
+        if self.assistant {
+            kinds.push(TextKind::Reply);
+        }
+        kinds
     }
 }
 
@@ -107,9 +120,8 @@ pub fn search(db: &Db, q: &FtsQuery) -> Result<FtsOutcome> {
 /// Every session with hits (snippet still empty) and the id of its first matching message.
 fn count_per_session(db: &Db, q: &FtsQuery) -> Result<Vec<(SessionHit, i64)>> {
     let words: Vec<&str> = q.text.split_whitespace().collect();
-    let roles: Vec<&str> =
-        [(q.roles.user, "user"), (q.roles.assistant, "assistant")].iter().filter(|(on, _)| *on).map(|(_, r)| *r).collect();
-    if words.is_empty() || roles.is_empty() {
+    let kinds = q.roles.kinds();
+    if words.is_empty() || kinds.is_empty() {
         return Ok(Vec::new());
     }
     let like = needs_like(&q.text);
@@ -128,8 +140,8 @@ fn count_per_session(db: &Db, q: &FtsQuery) -> Result<Vec<(SessionHit, i64)>> {
         args.push(to_fts_query(&q.text).into());
         sql.push_str(&format!("messages_fts MATCH ?{}", args.len()));
     }
-    let marks: Vec<String> = roles.iter().map(|r| { args.push(r.to_string().into()); format!("?{}", args.len()) }).collect();
-    sql.push_str(&format!(" AND m.role IN ({})", marks.join(",")));
+    let marks: Vec<String> = kinds.iter().map(|k| { args.push(k.as_str().to_string().into()); format!("?{}", args.len()) }).collect();
+    sql.push_str(&format!(" AND m.kind IN ({})", marks.join(",")));
     if let Some(since) = q.since_ms {
         args.push(since.into());
         sql.push_str(&format!(" AND m.ts >= ?{}", args.len()));

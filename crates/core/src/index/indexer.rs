@@ -130,8 +130,19 @@ impl Indexer {
         emit(ScanEvent::Progress(Progress { done: report.files_unchanged, total: report.files_seen, phase: "scanning" }));
 
         let to_parse: Vec<(TranscriptFile, Plan)> = planned.into_iter().filter(|(_, p)| *p != Plan::Unchanged).collect();
+        // an appending parser has to know the user rows already indexed (see TranscriptParser)
+        let mut seen_user: HashMap<PathBuf, HashSet<String>> = HashMap::new();
+        for (f, _) in to_parse.iter().filter(|(f, p)| f.agent.is_empty() && matches!(p, Plan::Append(_))) {
+            seen_user.insert(f.path.clone(), db.user_uuids(&f.session_id)?);
+        }
         let t = Instant::now();
-        let parsed: Vec<Parsed> = to_parse.into_par_iter().map(|(f, plan)| parse_file(f, plan)).collect::<Result<Vec<_>>>()?;
+        let parsed: Vec<Parsed> = to_parse
+            .into_par_iter()
+            .map(|(f, plan)| {
+                let seen = seen_user.get(&f.path).cloned().unwrap_or_default();
+                parse_file(f, plan, seen)
+            })
+            .collect::<Result<Vec<_>>>()?;
         report.elapsed_parse = t.elapsed();
         let (sessions, subagents): (Vec<&Parsed>, Vec<&Parsed>) = parsed.iter().partition(|p| p.file.agent.is_empty());
 
@@ -231,7 +242,8 @@ fn plan_for(f: &TranscriptFile, state: Option<&IndexState>) -> Plan {
     Plan::Append(state.indexed_offset)
 }
 
-fn parse_file(file: TranscriptFile, plan: Plan) -> Result<Parsed> {
+/// `seen_user`: uuids of the user rows indexed from this file, used only when appending.
+fn parse_file(file: TranscriptFile, plan: Plan, seen_user: HashSet<String>) -> Result<Parsed> {
     let handle = File::open(&file.path)?;
     let len = handle.metadata()?.len().min(file.size);
     let bytes = map_file(&handle, len)?;
@@ -242,7 +254,11 @@ fn parse_file(file: TranscriptFile, plan: Plan) -> Result<Parsed> {
         other => (other, 0),
     };
     let is_session = file.agent.is_empty();
-    let mut parser = if is_session { TranscriptParser::new(&file.session_id) } else { TranscriptParser::usage_only() };
+    let mut parser = match (is_session, plan) {
+        (false, _) => TranscriptParser::usage_only(),
+        (true, Plan::Append(_)) => TranscriptParser::new(&file.session_id).seen_user_uuids(seen_user),
+        (true, _) => TranscriptParser::new(&file.session_id),
+    };
     let feed = parser.feed(&bytes[from as usize..], from);
     let subagents = if is_session { subagent_count(&file.path) } else { 0 };
     Ok(Parsed {

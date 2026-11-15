@@ -164,3 +164,31 @@ fn a_matcher_marks_words_or_a_regex_in_any_text() {
     assert_eq!(cut.text, format!("…{}⏎the parser{}…", "a".repeat(5), "b".repeat(14)));
     assert_eq!(&cut.text[cut.ranges[0].clone()], "parser");
 }
+
+fn kinds_matching(db: &Db, phrase: &str) -> Vec<String> {
+    let mut stmt = db.conn().prepare("SELECT kind FROM messages_fts WHERE messages_fts MATCH ?1 ORDER BY rowid").unwrap();
+    stmt.query_map([to_fts_query(phrase)], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+}
+
+#[test]
+fn thinking_is_indexed_with_its_kind_but_the_app_roles_leave_it_out() {
+    let sb = sandbox();
+    let db = indexed(&sb);
+    assert_eq!(kinds_matching(&db, "terminal window"), ["thinking"], "the FTS row carries the kind");
+    assert!(search_sessions(&db, &q("terminal window")).unwrap().is_empty(), "User + Assistant is prompts, other and replies");
+    let assistant = FtsQuery { roles: FtsRoles { user: false, assistant: true }, ..q("terminal") };
+    assert_eq!(search_sessions(&db, &assistant).unwrap()[0].count, 1, "only the reply, not the thinking of the same record");
+    assert!(search_sessions(&db, &q("核对")).unwrap().is_empty(), "the LIKE path leaves thinking out too");
+}
+
+#[test]
+fn text_on_the_user_side_that_opens_no_turn_still_counts_as_user_text() {
+    let sb = sandbox();
+    let db = indexed(&sb);
+    assert_eq!(kinds_matching(&db, "后台任务"), ["other"]);
+    let user = FtsQuery { roles: FtsRoles { user: true, assistant: false }, ..q("后台任务") };
+    assert_eq!(search_sessions(&db, &user).unwrap()[0].session_id, S3);
+    let assistant = FtsQuery { roles: FtsRoles { user: false, assistant: true }, ..q("延续自之前") };
+    assert!(search_sessions(&db, &assistant).unwrap().is_empty(), "a compact summary is user text");
+    assert_eq!(search_sessions(&db, &q("延续自之前")).unwrap()[0].count, 1);
+}

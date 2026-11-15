@@ -1,12 +1,13 @@
 //! Streaming transcript parser. Bytes go in (whole file or an appended tail), searchable
 //! `MessageRow`s, one `UsageRow` per API response and a `SessionDelta` (aggregate fields) come out.
 //!
-//! Only user / assistant text and a handful of metadata records are materialised; tool results,
-//! attachments and file-history records (98% of the bytes) are skipped after a byte-level look at
-//! the line prefix. Prompt-counting rules follow the reference script's `human_prompt_text`.
+//! Only user / assistant text (thinking included) and a handful of metadata records are
+//! materialised; tool results, attachments and file-history records (98% of the bytes) are skipped
+//! after a byte-level look at the line prefix. Prompt-counting rules follow the reference script's
+//! `human_prompt_text`; which user rows are `prompt`s follows the turn rule of the detail panel.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
 use std::path::Path;
 
@@ -19,9 +20,10 @@ use super::clean::clean_prompt;
 use crate::format::parse_ts;
 use crate::model::{
     MessageRow, Role, SessionSummary, TITLE_RANK_AGENT_NAME, TITLE_RANK_AI, TITLE_RANK_CUSTOM,
-    TITLE_RANK_SUMMARY, Tokens, UsageRow,
+    TITLE_RANK_SUMMARY, TextKind, Tokens, UsageRow,
 };
 use crate::pricing;
+use crate::transcript::{UserFlags, opens_turn};
 
 /// Model name Claude Code puts on records it writes itself (interrupts, API errors).
 pub(crate) const SYNTHETIC_MODEL: &str = "<synthetic>";
@@ -159,6 +161,9 @@ impl SessionDelta {
 pub struct TranscriptParser {
     delta: SessionDelta,
     usage_only: bool,
+    /// uuids of the user rows so far: a record written twice opens no second turn (the detail
+    /// panel skips a uuid it has seen), so its copy is `Other`.
+    seen_user: HashSet<String>,
 }
 
 impl TranscriptParser {
@@ -170,6 +175,13 @@ impl TranscriptParser {
     /// the parent session, nothing else of them is indexed).
     pub fn usage_only() -> Self {
         TranscriptParser { usage_only: true, ..Self::default() }
+    }
+
+    /// Continue a file whose user rows with these uuids are already indexed, so that appending
+    /// tells prompts apart exactly like parsing the whole file.
+    pub fn seen_user_uuids(mut self, uuids: HashSet<String>) -> Self {
+        self.seen_user = uuids;
+        self
     }
 
     pub fn delta(&self) -> &SessionDelta {
@@ -203,7 +215,7 @@ impl TranscriptParser {
     fn process_line(&mut self, line: &[u8], offset: u64, out: &mut Vec<MessageRow>, usage: &mut UsageSink) {
         match classify(line) {
             LineKind::Skip => return,
-            LineKind::User if self.usage_only || !user_line_may_have_text(line) => return,
+            LineKind::User if self.usage_only || !(user_line_may_have_text(line) || user_line_has_media_prompt(line)) => return,
             LineKind::Meta if self.usage_only => return,
             _ => {}
         }
@@ -277,11 +289,21 @@ impl TranscriptParser {
 
     fn on_user(&mut self, rec: &RawRecord, offset: u64, len: u64, out: &mut Vec<MessageRow>) {
         let Some(content) = rec.message.as_ref().and_then(|m| m.content).map(parse_content) else { return };
-        let Some(text) = user_text(&content) else { return };
+        let text = user_text(&content);
+        let uuid = rec.uuid.as_deref().unwrap_or("");
+        let new_uuid = uuid.is_empty() || !self.seen_user.contains(uuid);
+        // the detail panel leaves out sidechain records of the main file and repeated uuids
+        let kind = if !rec.is_sidechain && new_uuid && opens_turn(&rec.user_flags(), &content) { TextKind::Prompt } else { TextKind::Other };
+        // an image pasted without text still opens a turn: its row has no text but keeps the count
+        if text.is_none() && kind != TextKind::Prompt {
+            return;
+        }
         let ts = rec.timestamp.as_deref().and_then(parse_ts);
-        if is_human_prompt(rec, &text) {
+        if let Some(text) = &text
+            && is_human_prompt(rec, text)
+        {
             self.delta.user_msg_count += 1;
-            let cleaned = clean_prompt(&text);
+            let cleaned = clean_prompt(text);
             if !cleaned.is_empty() {
                 if self.delta.first_prompt.is_none() {
                     self.delta.first_prompt = Some((cleaned.clone(), ts));
@@ -289,12 +311,16 @@ impl TranscriptParser {
                 self.delta.last_prompt = Some(cleaned);
             }
         }
+        if !uuid.is_empty() {
+            self.seen_user.insert(uuid.to_string());
+        }
         out.push(MessageRow {
-            uuid: rec.uuid.as_deref().unwrap_or("").to_string(),
+            uuid: uuid.to_string(),
             parent_uuid: rec.parent_uuid.as_deref().map(str::to_string),
             role: Role::User,
+            kind,
             ts: ts.unwrap_or(0),
-            text,
+            text: text.unwrap_or_default(),
             is_meta: rec.is_meta,
             byte_offset: offset,
             byte_len: len,
@@ -321,11 +347,18 @@ impl TranscriptParser {
         let Some(msg) = rec.message.as_ref() else { return };
         if let Some(Content::Blocks(blocks)) = msg.content.map(parse_content) {
             let mut texts: Vec<String> = Vec::new();
+            let mut thoughts: Vec<&str> = Vec::new();
             for block in &blocks {
                 match block.kind.as_deref() {
                     Some("text") => {
                         if let Some(t) = &block.text {
                             texts.push(t.to_string());
+                        }
+                    }
+                    // most thinking blocks keep only their signature
+                    Some("thinking") => {
+                        if let Some(t) = block.thinking.as_deref().filter(|t| !t.trim().is_empty()) {
+                            thoughts.push(t);
                         }
                     }
                     Some("tool_use") => {
@@ -336,23 +369,28 @@ impl TranscriptParser {
                     _ => {}
                 }
             }
+            let row = |kind, text| MessageRow {
+                uuid: rec.uuid.as_deref().unwrap_or("").to_string(),
+                parent_uuid: rec.parent_uuid.as_deref().map(str::to_string),
+                role: Role::Assistant,
+                kind,
+                ts: rec.timestamp.as_deref().and_then(parse_ts).unwrap_or(0),
+                text,
+                is_meta: false,
+                byte_offset: offset,
+                byte_len: len,
+                model: msg.model.as_deref().map(str::to_string),
+                input_tokens: msg.usage.as_ref().and_then(|u| u.input_tokens),
+                output_tokens: msg.usage.as_ref().and_then(|u| u.output_tokens),
+            };
+            if !thoughts.is_empty() {
+                out.push(row(TextKind::Thinking, thoughts.join("\n")));
+            }
             if !texts.is_empty() {
                 let text = texts.join("\n");
                 self.delta.assistant_msg_count += 1;
                 self.delta.last_message = Some(text.clone());
-                out.push(MessageRow {
-                    uuid: rec.uuid.as_deref().unwrap_or("").to_string(),
-                    parent_uuid: rec.parent_uuid.as_deref().map(str::to_string),
-                    role: Role::Assistant,
-                    ts: rec.timestamp.as_deref().and_then(parse_ts).unwrap_or(0),
-                    text,
-                    is_meta: false,
-                    byte_offset: offset,
-                    byte_len: len,
-                    model: msg.model.as_deref().map(str::to_string),
-                    input_tokens: msg.usage.as_ref().and_then(|u| u.input_tokens),
-                    output_tokens: msg.usage.as_ref().and_then(|u| u.output_tokens),
-                });
+                out.push(row(TextKind::Reply, text));
             }
         }
         if let Some(model) = msg.model.as_deref().filter(|m| *m != SYNTHETIC_MODEL) {
@@ -551,6 +589,7 @@ fn json_string_after<'a>(hay: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
 
 /// A user record only matters when it carries text: string content, or an array with a text
 /// block. Tool-result-only records (the bulk of the corpus) are skipped without parsing.
+/// (An image or document pasted without text matters too, see `user_line_has_media_prompt`.)
 fn user_line_may_have_text(line: &[u8]) -> bool {
     let Some(at) = memmem::find(line, b"\"content\":") else { return false };
     let rest = &line[at + 10..];
@@ -560,6 +599,14 @@ fn user_line_may_have_text(line: &[u8]) -> bool {
         Some(b'[') => memmem::find(rest, b"\"type\":\"text\"").is_some() || memmem::find(rest, b"\"type\": \"text\"").is_some(),
         _ => false,
     }
+}
+
+/// An image or document pasted without any text opens a turn and needs its `prompt` row. Tool
+/// results carry images too (screenshots read back) but always name a `tool_use_id`, which comes
+/// before their content, so those lines are ruled out after a few bytes.
+fn user_line_has_media_prompt(line: &[u8]) -> bool {
+    memmem::find(line, b"\"tool_use_id\"").is_none()
+        && (memmem::find(line, b"\"type\":\"image\"").is_some() || memmem::find(line, b"\"type\":\"document\"").is_some())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -591,6 +638,12 @@ pub(crate) struct RawRecord<'a> {
     pub is_sidechain: bool,
     #[serde(rename = "isMeta", default)]
     pub is_meta: bool,
+    #[serde(rename = "isCompactSummary", default)]
+    pub is_compact_summary: bool,
+    #[serde(borrow)]
+    pub origin: Option<RawOrigin<'a>>,
+    #[serde(rename = "interruptedMessageId", borrow)]
+    pub interrupted_message_id: Option<Cow<'a, str>>,
     #[serde(rename = "sessionKind", borrow)]
     pub session_kind: Option<Cow<'a, str>>,
     #[serde(rename = "permissionMode", borrow)]
@@ -617,6 +670,23 @@ pub(crate) struct RawRecord<'a> {
     pub pr_url: Option<Cow<'a, str>>,
     #[serde(rename = "trackingPath", borrow)]
     pub tracking_path: Option<Cow<'a, str>>,
+}
+
+impl RawRecord<'_> {
+    pub(crate) fn user_flags(&self) -> UserFlags<'_> {
+        UserFlags {
+            is_meta: self.is_meta,
+            is_compact_summary: self.is_compact_summary,
+            origin: self.origin.as_ref().and_then(|o| o.kind.as_deref()),
+            interrupted: self.interrupted_message_id.is_some(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RawOrigin<'a> {
+    #[serde(borrow)]
+    pub kind: Option<Cow<'a, str>>,
 }
 
 #[derive(Deserialize)]
