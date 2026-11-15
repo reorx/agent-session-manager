@@ -9,6 +9,7 @@ pub mod index;
 pub mod model;
 pub mod pricing;
 pub mod search;
+pub mod session;
 pub mod transcript;
 
 pub mod config;

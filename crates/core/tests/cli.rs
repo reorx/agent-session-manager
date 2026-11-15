@@ -536,3 +536,562 @@ fn cost_model_keeps_the_sessions_whose_main_model_it_is() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("no price for model `opus-9`"));
 }
+
+// ---------------------------------------------------------------------------------------------
+// The commands for agents: `search`, `session`, `projects` (skills/asm/references/cli.md)
+
+/// stdout, stderr and the exit code of `asm ARGS`, with the environment `asm()` sets.
+fn run(cmd: &mut Command) -> (Option<i32>, String, String) {
+    let out = cmd.output().unwrap();
+    (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// The elapsed time is the only part of the output that changes from run to run.
+fn steady(text: &str) -> String {
+    regex::Regex::new(r"(?m) · \d+\.\d\ds$").unwrap().replace_all(text, " · 0.00s").into_owned()
+}
+
+fn json_out(cmd: &mut Command) -> serde_json::Value {
+    let (code, stdout, stderr) = run(cmd);
+    assert_eq!(code, Some(0), "{stderr}");
+    serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"))
+}
+
+/// A session written into the sandbox, whose working directory is `dir`; its transcript's
+/// mtime is `mtime` (unix ms), or now.
+fn add_session(sb: &Sandbox, dir: &std::path::Path, id: &str, prompt: &str, mtime: Option<i64>) -> std::path::PathBuf {
+    let key = agent_session_core::claude::paths::encode_project_path(&dir.to_string_lossy());
+    let path = sb.root().join("projects").join(key).join(format!("{id}.jsonl"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let record = |kind: &str, uuid: &str, message: serde_json::Value| {
+        serde_json::json!({"type": kind, "message": message, "uuid": uuid, "timestamp": "2026-09-20T00:00:00.000Z", "sessionId": id, "cwd": dir, "gitBranch": "main"})
+            .to_string()
+    };
+    let user = record("user", "u1", serde_json::json!({"role": "user", "content": prompt}));
+    let reply = record("assistant", "a1", serde_json::json!({"role": "assistant", "model": "claude-opus-5", "id": "m1", "content": [{"type": "text", "text": "On it."}]}));
+    std::fs::write(&path, format!("{user}\n{reply}\n")).unwrap();
+    if let Some(ms) = mtime {
+        set_mtime(&path, ms);
+    }
+    path
+}
+
+/// The keys of the JSON example in `### asm <command>` of cli.md, to compare with real output.
+fn spec_json_example(command: &str) -> serde_json::Value {
+    let spec = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/asm/references/cli.md")).unwrap();
+    let section = &spec[spec.find(&format!("\n### asm {command}\n")).unwrap_or_else(|| panic!("no section for {command}"))..];
+    let start = section.find("```json\n").expect("a JSON example") + "```json\n".len();
+    let end = start + section[start..].find("```").unwrap();
+    serde_json::from_str(&section[start..end]).unwrap_or_else(|e| panic!("the {command} example is not JSON: {e}"))
+}
+
+/// Where the keys of `spec` and `actual` differ, object by object; arrays compare their first
+/// elements, and `free` paths hold data as keys (a tool name per key).
+fn shape_diffs(spec: &serde_json::Value, actual: &serde_json::Value, path: &str, free: &[&str], diffs: &mut Vec<String>) {
+    use serde_json::Value;
+    match (spec, actual) {
+        (Value::Object(a), Value::Object(b)) if !free.contains(&path) => {
+            let (ka, kb): (std::collections::BTreeSet<&String>, std::collections::BTreeSet<&String>) = (a.keys().collect(), b.keys().collect());
+            if ka != kb {
+                diffs.push(format!("{path}: spec has {:?}, the output {:?}", ka.difference(&kb).collect::<Vec<_>>(), kb.difference(&ka).collect::<Vec<_>>()));
+            }
+            for k in ka.intersection(&kb) {
+                shape_diffs(&a[*k], &b[*k], &format!("{path}.{k}"), free, diffs);
+            }
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            if let (Some(x), Some(y)) = (a.first(), b.first()) {
+                shape_diffs(x, y, &format!("{path}[]"), free, diffs);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn assert_same_shape(command: &str, actual: &serde_json::Value, free: &[&str]) {
+    let mut diffs = Vec::new();
+    shape_diffs(&spec_json_example(command), actual, "", free, &mut diffs);
+    assert!(diffs.is_empty(), "cli.md's `asm {command}` JSON example and the output differ:\n{}\n{actual:#}", diffs.join("\n"));
+}
+
+#[test]
+fn search_lists_each_session_once_with_its_hits_snippets_turns_and_resume_command() {
+    let sb = sandbox();
+    let (code, stdout, stderr) = run(asm(&sb).args(["search", "parser"]));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(steady(&stdout), format!("\
+1 session · terms [parser] · in prompt,reply,thinking · all time · 0.00s
+
+{S1}
+  updated 2026-09-01 15:00 · started 2026-09-01 08:00 · alpha (feat/parser) · 4 turns · $0.13
+  title: Parser refactor
+  prompt: /init --force
+  hits: prompt 1 · reply 2 · thinking 0
+  [prompt · turn 2 · 09-01 09:30] …⏎remember to be nice⏎</system-reminder>⏎Please refactor the «parser» to handle nested arrays
+  [reply · turn 1 · 09-01 08:00] Here is the plan: refactor the «parser».
+  [reply · turn 4 · 09-02 11:00] Done. The «parser» now handles nested arrays; 14 tests pass.
+  resume: claude --resume {S1}
+"));
+}
+
+#[test]
+fn search_leaves_out_the_current_session_unless_asked() {
+    let sb = sandbox();
+    let (_, stdout, _) = run(asm(&sb).args(["search", "parser"]).env("CLAUDE_CODE_SESSION_ID", S1));
+    assert_eq!(steady(&stdout), "0 sessions · terms [parser] · in prompt,reply,thinking · all time · 0.00s\ntry: --in all for every kind\n");
+    let (_, stdout, _) = run(asm(&sb).args(["search", "parser", "--include-self"]).env("CLAUDE_CODE_SESSION_ID", S1));
+    assert!(stdout.starts_with("1 session · ") && stdout.contains(&format!("\n{S1}\n")), "{stdout}");
+
+    let meta = |args: &[&str]| json_out(asm(&sb).args(["search", "parser", "--json"]).args(args).env("CLAUDE_CODE_SESSION_ID", S1))["meta"].clone();
+    assert_eq!(meta(&[])["excluded_session"], S1);
+    assert_eq!(meta(&[])["total"], 0);
+    assert_eq!(meta(&["--include-self"])["excluded_session"], serde_json::Value::Null);
+    assert_eq!(meta(&["--include-self"])["total"], 1);
+}
+
+#[test]
+fn search_needs_every_term_somewhere_in_the_session_or_in_one_item_with_same_message() {
+    let sb = sandbox();
+    // `parser` is in prompts and replies, `screenshot` in another prompt and in thinking
+    let (_, stdout, _) = run(asm(&sb).args(["search", "parser", "screenshot", "--snippets", "2"]));
+    assert_eq!(steady(&stdout), format!("\
+1 session · terms [parser] [screenshot] · in prompt,reply,thinking · all time · 0.00s
+
+{S1}
+  updated 2026-09-01 15:00 · started 2026-09-01 08:00 · alpha (feat/parser) · 4 turns · $0.13
+  title: Parser refactor
+  prompt: /init --force
+  hits: prompt 2 · reply 2 · thinking 1
+  [prompt · turn 2 · 09-01 09:30] …⏎remember to be nice⏎</system-reminder>⏎Please refactor the «parser» to handle nested arrays
+  [prompt · turn 4 · 09-01 10:00] What is in this «screenshot»?
+  resume: claude --resume {S1}
+"));
+    let (_, stdout, _) = run(asm(&sb).args(["search", "parser", "screenshot", "--same-message"]));
+    assert_eq!(
+        steady(&stdout),
+        "0 sessions · terms [parser] [screenshot] · same message · in prompt,reply,thinking · all time · 0.00s\ntry: --in all for every kind · fewer terms · without --same-message\n"
+    );
+}
+
+#[test]
+fn search_cuts_the_list_at_the_limit_and_says_so() {
+    let sb = sandbox();
+    let (_, stdout, _) = run(asm(&sb).args(["search", "parser|解析器", "-n", "1", "--snippets", "0"]));
+    assert_eq!(steady(&stdout), format!("\
+2 sessions (showing 1) · terms [parser|解析器] · in prompt,reply,thinking · all time · 0.00s
+
+{S3}
+  updated 2026-09-10 08:00 · started 2026-09-10 02:00 · beta (master) · 2 turns · $0.00
+  title: parser-refactor
+  prompt: 帮我重构一下解析器，处理嵌套数组
+  hits: prompt 1 · reply 2 · thinking 0
+  resume: claude --resume {S3}
+
+showing 1 of 2 sessions, use -n for more
+"));
+    let meta = json_out(asm(&sb).args(["search", "parser|解析器", "-n", "1", "--json"]))["meta"].clone();
+    assert_eq!((meta["total"].as_u64(), meta["shown"].as_u64(), meta["truncated"].as_bool()), (Some(2), Some(1), Some(true)));
+    let ids = |args: &[&str]| -> Vec<String> {
+        let v = json_out(asm(&sb).args(["search", "--json", "-n", "0"]).args(args));
+        v["results"].as_array().unwrap().iter().map(|r| r["session_id"].as_str().unwrap().to_string()).collect()
+    };
+    // S3 is the newer one; S1 has more hits in tool calls
+    assert_eq!(ids(&["test|tests|检查", "--in", "all", "-d", "0"]), [S3, S1]);
+    assert_eq!(ids(&["test|tests|检查", "--in", "all", "-d", "0", "--sort", "hits"]), [S1, S3]);
+}
+
+#[test]
+fn search_scans_tool_calls_in_the_last_30_days_unless_given_a_range() {
+    let sb = sandbox();
+    let (_, stdout, _) = run(asm(&sb).args(["search", "cargo", "--in", "tool"]));
+    assert_eq!(
+        steady(&stdout),
+        "0 sessions · terms [cargo] · in tool-input,tool-output · last 30 days (default) · 0.00s\ntry: --days 0 for all time · --in all for every kind\n",
+        "the fixture's sessions are older than 30 days"
+    );
+    let (_, stdout, _) = run(asm(&sb).args(["search", "cargo", "--in", "tool", "-d", "0"]));
+    assert_eq!(steady(&stdout), format!("\
+1 session · terms [cargo] · in tool-input,tool-output · all time · 0.00s
+
+{S1}
+  updated 2026-09-01 15:00 · started 2026-09-01 08:00 · alpha (feat/parser) · 4 turns · $0.13
+  title: Parser refactor
+  prompt: /init --force
+  hits: tool-input 2 · tool-output 1
+  [tool-input Read · turn 1 · 09-01 08:00] file_path: /Users/me/Code/alpha/«Cargo».toml⏎limit: 40
+  [tool-input Bash · turn 4 · 09-01 10:00] # Run the tests⏎$ «cargo» test -p alpha 2>&1 | tail -5⏎timeout: 120000
+  [tool-output Bash · turn 1 · 09-01 08:00] total 0⏎src⏎«Cargo».toml
+  resume: claude --resume {S1}
+"));
+    // --tool alone searches only that tool's calls
+    let (_, stdout, _) = run(asm(&sb).args(["search", "cargo", "--tool", "bash", "-d", "0"]));
+    assert!(steady(&stdout).starts_with("1 session · terms [cargo] · in tool-input,tool-output · tools bash · all time · 0.00s\n"), "{stdout}");
+    assert!(stdout.contains("hits: tool-input 1 · tool-output 1\n") && !stdout.contains("tool-input Read"), "{stdout}");
+    let meta = json_out(asm(&sb).args(["search", "cargo", "--in", "tool", "-d", "0", "--json"]))["meta"].clone();
+    assert_eq!(meta["engine"], "scan");
+    assert_eq!(meta["scan"]["files"], 4);
+}
+
+#[test]
+fn search_names_the_range_it_used_in_the_first_line_and_in_json() {
+    let sb = sandbox();
+    let first = |args: &[&str]| {
+        let (code, stdout, stderr) = run(asm(&sb).args(["search", "hello|谢谢|parser", "--snippets", "0"]).args(args));
+        assert_eq!(code, Some(0), "{stderr}");
+        steady(stdout.lines().next().unwrap())
+    };
+    assert_eq!(first(&[]), "3 sessions · terms [hello|谢谢|parser] · in prompt,reply,thinking · all time · 0.00s");
+    assert_eq!(first(&["-d", "7"]), "0 sessions · terms [hello|谢谢|parser] · in prompt,reply,thinking · last 7 days · 0.00s");
+    assert_eq!(first(&["--days", "0.5"]), "0 sessions · terms [hello|谢谢|parser] · in prompt,reply,thinking · last 0.5 days · 0.00s");
+    assert_eq!(first(&["-d", "0"]), "3 sessions · terms [hello|谢谢|parser] · in prompt,reply,thinking · all time · 0.00s");
+    // S1 was last updated 09-01, S2 runs on 09-05, S3 on 09-10
+    assert_eq!(first(&["--since", "2026-09-05"]), "2 sessions · terms [hello|谢谢|parser] · in prompt,reply,thinking · since 2026-09-05 · 0.00s");
+    assert_eq!(first(&["--until", "2026-09-05"]), "2 sessions · terms [hello|谢谢|parser] · in prompt,reply,thinking · until 2026-09-05 · 0.00s");
+    assert_eq!(
+        first(&["--since", "2026-09-05", "--until", "2026-09-05"]),
+        "1 session · terms [hello|谢谢|parser] · in prompt,reply,thinking · 2026-09-05 to 2026-09-05 · 0.00s"
+    );
+    let range = json_out(asm(&sb).args(["search", "hello", "--json", "--since", "2026-09-05", "--until", "2026-09-10"]))["meta"]["range"].clone();
+    assert_eq!(
+        range,
+        serde_json::json!({"label": "2026-09-05 to 2026-09-10", "since": "2026-09-05T00:00:00+00:00", "until": "2026-09-11T00:00:00+00:00", "default": false})
+    );
+    let range = json_out(asm(&sb).args(["search", "hello", "--json", "--in", "tool"]))["meta"]["range"].clone();
+    assert_eq!((range["label"].as_str(), range["until"].is_null(), range["default"].as_bool()), (Some("last 30 days (default)"), true, Some(true)));
+}
+
+#[test]
+fn search_says_what_could_be_widened_when_nothing_is_found() {
+    let sb = sandbox();
+    let first_two = |args: &[&str]| {
+        let (code, stdout, stderr) = run(asm(&sb).arg("search").args(args));
+        assert_eq!(code, Some(0), "{stderr}");
+        steady(&stdout)
+    };
+    assert_eq!(
+        first_two(&["nothing here", "parser", "-d", "7", "--in", "prompt", "--same-message", "-p", "alpha", "--model", "opus-5", "--favorites"]),
+        "0 sessions · terms [nothing here] [parser] · same message · in prompt · project alpha · model opus-5 · favorites · last 7 days · 0.00s\n\
+         try: --days 0 for all time · --in all for every kind · fewer terms · without --same-message · without --project · without --model · without --favorites\n"
+    );
+    assert_eq!(
+        first_two(&["cargo", "--tool", "Bash", "-p", "nope", "-p", "beta", "-d", "0"]),
+        "0 sessions · terms [cargo] · in tool-input,tool-output · tools Bash · project nope,beta · all time · 0.00s\n\
+         try: --in all for every kind · without --project · without --tool\n"
+    );
+    assert_eq!(first_two(&["nothing here", "--in", "all", "-d", "0"]), "0 sessions · terms [nothing here] · in prompt,reply,thinking,tool-input,tool-output,other · all time · 0.00s\ntry: other ways of saying each TERM\n");
+    let meta = json_out(asm(&sb).args(["search", "nothing here", "-p", "nope", "--json"]))["meta"].clone();
+    assert_eq!(meta["hints"], serde_json::json!(["--in all for every kind", "without --project"]));
+}
+
+#[test]
+fn search_takes_projects_as_text_or_as_a_directory() {
+    let sb = sandbox();
+    let first = |args: &[&str]| steady(run(asm(&sb).args(["search", "parser|解析器", "--snippets", "0"]).args(args)).1.lines().next().unwrap());
+    assert_eq!(first(&["-p", "BETA"]), "1 session · terms [parser|解析器] · in prompt,reply,thinking · project BETA · all time · 0.00s");
+    assert_eq!(first(&["-p", "/Users/me/Code/"]), "2 sessions · terms [parser|解析器] · in prompt,reply,thinking · project /Users/me/Code/ · all time · 0.00s");
+    assert_eq!(first(&["-p", "/Users/me/Code/alpha/.."]).split(" · ").next(), Some("2 sessions"));
+    assert_eq!(first(&["-p", "/Users/me/Code/al"]).split(" · ").next(), Some("0 sessions"), "a directory is not text");
+}
+
+#[test]
+fn search_takes_a_term_that_starts_with_a_dash_after_a_double_dash() {
+    let sb = sandbox();
+    let (code, stdout, stderr) = run(asm(&sb).args(["search", "--snippets", "1", "--", "--force"]));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(steady(&stdout).starts_with("1 session · terms [--force] · "), "{stdout}");
+    assert!(stdout.contains("<command-args>«--force»</command-args>"), "{stdout}");
+    let (code, stdout, stderr) = run(asm(&sb).args(["search", "--force"]));
+    assert_eq!(code, Some(2), "{stderr}");
+    assert!(stderr.contains("unexpected argument '--force'") && stdout.is_empty(), "{stderr}");
+}
+
+#[test]
+fn search_rejects_invalid_arguments_with_exit_2_before_touching_the_index() {
+    let sb = sandbox();
+    for (args, message) in [
+        (&["search", ""][..], "error: term 1 has nothing to match\n"),
+        (&["search", "a", " | "], "error: term 2 has nothing to match\n"),
+        (&["search", "--regex", "x*"], "error: term 1 can match empty text, so it would match everything\n"),
+        (&["search", "x", "--in", "nope"], "error: unknown kind 'nope' in --in (kinds: prompt, reply, thinking, tool, tool-input, tool-output, other, all)\n"),
+        (&["search", "x", "--tool", "Bash", "--in", "prompt"], "error: --tool needs a tool kind in --in (tool, tool-input or tool-output)\n"),
+        (&["search", "x", "--since", "2026-09-10", "--until", "2026-09-01"], "error: --since 2026-09-10 is later than --until 2026-09-01\n"),
+        (&["search", "--regex", r"\w{200}", r"x\w{200}"], "error: the TERMs are too large to match together; use fewer or smaller ones\n"),
+    ] {
+        let (code, stdout, stderr) = run(asm(&sb).args(args));
+        assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(2), "", message), "{args:?}");
+    }
+    for args in [&["search", "x", "-d", "3", "--since", "2026-09-01"][..], &["search", "x", "--days", "1", "--until", "2026-09-01"], &["search", "x", "--sort", "best"]] {
+        let (code, _, stderr) = run(asm(&sb).args(args));
+        assert_eq!(code, Some(2), "{args:?}: {stderr}");
+        assert!(stderr.contains("cannot be used with") || stderr.contains("invalid value"), "{args:?}: {stderr}");
+    }
+    assert!(!sb.db_path().exists(), "invalid arguments never open the index");
+}
+
+#[test]
+fn search_says_which_regex_terms_it_matched_as_text() {
+    let sb = sandbox();
+    let (code, stdout, stderr) = run(asm(&sb).args(["search", "--regex", "pars(er|e)", "parse(r", "-d", "0"]));
+    assert_eq!(code, Some(0));
+    assert_eq!(stderr, "term 2 is not a valid regular expression, matched as literal text\n");
+    assert!(steady(&stdout).starts_with("0 sessions · terms [pars(er|e)] [parse(r] · regex · in prompt,reply,thinking · all time · 0.00s\n"), "{stdout}");
+    let meta = json_out(asm(&sb).args(["search", "--regex", "pars(er|e)", "parse(r", "-d", "0", "--json"]))["meta"].clone();
+    assert_eq!(meta["regex_fallback"], serde_json::json!([1]));
+    assert_eq!(meta["terms"], serde_json::json!([["pars(er|e)"], ["parse(r"]]));
+    assert_eq!(meta["engine"], "scan");
+}
+
+#[test]
+fn search_json_carries_the_fields_cli_md_lists() {
+    let sb = sandbox();
+    let v = json_out(asm(&sb).args(["search", "parser|解析器", "nested|嵌套", "--json", "--snippets", "1"]));
+    assert_same_shape("search", &v, &[]);
+    let meta = &v["meta"];
+    assert_eq!(meta["terms"], serde_json::json!([["parser", "解析器"], ["nested", "嵌套"]]));
+    assert_eq!(meta["kinds"], serde_json::json!(["prompt", "reply", "thinking"]));
+    assert_eq!((meta["engine"].as_str(), meta["index_refresh"].as_str(), meta["scan"].is_null()), (Some("index"), Some("done"), true));
+    let r = &v["results"][0];
+    assert_eq!(r["session_id"], S3);
+    assert_eq!((r["turns"].as_u64(), r["kind"].as_str(), r["main_model"].as_str()), (Some(2), Some("cli"), Some("claude-opus-5")));
+    assert_eq!(r["started_at"], "2026-09-10T02:00:00+00:00");
+    assert_eq!(r["resume"], format!("claude --resume {S3}"));
+    assert_eq!(r["hits"], serde_json::json!({"total": 3, "prompt": 1, "reply": 2, "thinking": 0, "tool_input": null, "tool_output": null, "other": null}));
+    assert_eq!(r["term_hits"], serde_json::json!([3, 2]));
+    assert_eq!(
+        r["snippets"],
+        serde_json::json!([{"kind": "prompt", "tool": null, "turn": 1, "time": "2026-09-10T02:00:00+00:00", "offset": 0, "terms": [0, 1], "text": "帮我重构一下«解析器»，处理«嵌套»数组"}])
+    );
+    let v = json_out(asm(&sb).args(["search", "cargo", "--in", "tool", "-d", "0", "--json"]));
+    assert_same_shape("search", &v, &[]);
+    let snippet = &v["results"][0]["snippets"][0];
+    assert_eq!((snippet["kind"].as_str(), snippet["tool"].as_str(), snippet["turn"].as_u64()), (Some("tool-input"), Some("Read"), Some(1)));
+    assert_eq!(v["results"][0]["hits"]["prompt"], serde_json::Value::Null, "a kind not searched");
+}
+
+#[test]
+fn a_failing_command_for_agents_answers_json_with_an_error_object() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = sandbox();
+    rusqlite::Connection::open(sb.db_path()).unwrap().execute_batch("CREATE TABLE other(x);").unwrap();
+    std::fs::set_permissions(sb.db_path(), std::fs::Permissions::from_mode(0o444)).unwrap();
+    for args in [&["search", "parser", "--json"][..], &["session", "1111", "--json"], &["projects", "--json"]] {
+        let (code, stdout, stderr) = run(asm(&sb).args(args));
+        let message = format!("open {}: attempt to write a readonly database", sb.db_path().display());
+        assert_eq!(code, Some(1), "{args:?}");
+        assert_eq!(stderr, format!("{message}\n"), "{args:?}");
+        let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(v, serde_json::json!({"error": {"code": "failed", "message": message}}), "{args:?}");
+    }
+}
+
+#[test]
+fn commands_for_agents_print_no_color_codes_into_a_pipe() {
+    let sb = sandbox();
+    for args in [&["search", "parser"][..], &["search", "cargo", "--in", "tool", "-d", "0"], &["session", "1111"], &["projects"]] {
+        let (code, stdout, stderr) = run(asm(&sb).args(args).env_remove("NO_COLOR"));
+        assert_eq!(code, Some(0), "{args:?}: {stderr}");
+        assert!(!stdout.contains('\x1b'), "{args:?} printed an escape code into a pipe: {stdout:?}");
+    }
+    let (_, stdout, _) = run(asm(&sb).args(["search", "parser", "--color", "always"]));
+    assert!(stdout.contains("«\x1b[1;31mparser\x1b[0m»"), "marks stay, colors are added: {stdout:?}");
+}
+
+#[test]
+fn commands_for_agents_say_whether_they_refreshed_the_index() {
+    let sb = sandbox();
+    let refresh = |args: &[&str]| {
+        let (code, stdout, stderr) = run(asm(&sb).args(args));
+        assert_eq!(code, Some(0), "{args:?}: {stderr}");
+        let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        (v["meta"]["index_refresh"].as_str().unwrap().to_string(), stderr)
+    };
+    for args in [&["search", "parser", "--json"][..], &["session", "1111", "--json"], &["projects", "--json"]] {
+        let no_scan: Vec<&str> = args.iter().copied().chain(["--no-scan"]).collect();
+        assert_eq!(refresh(args).0, "done", "{args:?}");
+        assert_eq!(refresh(&no_scan).0, "skipped", "{args:?}");
+        let app = hold_write_lock(&sb);
+        assert_eq!(refresh(args), ("busy".to_string(), "index busy, results may miss the last few minutes\n".to_string()), "{args:?}");
+        drop(app);
+    }
+}
+
+#[test]
+fn session_shows_a_card_for_a_unique_prefix() {
+    let sb = sandbox();
+    let (code, stdout, stderr) = run(asm(&sb).args(["session", "1111"]));
+    assert_eq!(code, Some(0), "{stderr}");
+    let path = sb.transcript(ALPHA, S1);
+    let kb = std::fs::metadata(&path).unwrap().len() as f64 / 1024.0;
+    assert_eq!(stdout, format!("\
+{S1}
+  title:        Parser refactor
+  first prompt: /init --force
+  last prompt:  What is in this screenshot?
+  project:      /Users/me/Code/alpha
+  cwd:          /Users/me/Code/alpha
+  branch:       feat/parser
+  kind:         cli
+  favorite:     no
+  started:      2026-09-01 08:00
+  updated:      2026-09-01 15:00
+  turns:        4 (3 prompts)
+  tools:        Bash 2 · Read 1
+  files:        1 changed: src/parse.rs
+  cost:         $0.13 (Claude Code recorded $1.23)
+  tokens:       in 62 · out 2k · cache read 89k · cache write 4k · hit 95.7%
+  context:      14k / 1M (1%) at the end · peak 40k
+  models:       claude-opus-5 (main), claude-sonnet-5
+  subagents:    1
+  transcript:   {} ({kb:.1} KB)
+  resume:       claude --resume {S1}
+", path.display()));
+    // the current session is shown like any other
+    let (code, stdout, _) = run(asm(&sb).args(["session", S1]).env("CLAUDE_CODE_SESSION_ID", S1));
+    assert!(code == Some(0) && stdout.starts_with(&format!("{S1}\n")), "{stdout}");
+}
+
+#[test]
+fn session_lists_the_candidates_of_an_ambiguous_prefix_and_fails() {
+    let sb = sandbox();
+    let other = "11111111-bbbb-4bbb-8ccc-000000000009";
+    add_session(&sb, std::path::Path::new("/Users/me/Code/delta"), other, "Fix the login page", Some(1789_862_400_000)); // 2026-09-20T00:00:00Z
+    let (code, stdout, stderr) = run(asm(&sb).args(["session", "1111"]));
+    assert_eq!((code, stdout.as_str()), (Some(1), ""));
+    assert_eq!(stderr, format!("prefix '1111' matches 2 sessions:\n  {other}  2026-09-20 00:00  Fix the login page\n  {S1}  2026-09-01 15:00  Parser refactor\n"));
+
+    let (code, stdout, stderr) = run(asm(&sb).args(["session", "1111", "--json"]));
+    assert_eq!((code, stderr.as_str()), (Some(1), "prefix '1111' matches 2 sessions:\n"));
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v, serde_json::json!({"error": {"code": "ambiguous", "message": "prefix '1111' matches 2 sessions:", "candidates": [
+        {"session_id": other, "updated_at": "2026-09-20T00:00:00+00:00", "title": "Fix the login page"},
+        {"session_id": S1, "updated_at": "2026-09-01T15:00:00+00:00", "title": "Parser refactor"},
+    ]}}));
+
+    let (code, stdout, stderr) = run(asm(&sb).args(["session", "11111111-b"]));
+    assert!(code == Some(0) && stdout.starts_with(&format!("{other}\n")), "a longer prefix is unique: {stderr}");
+}
+
+#[test]
+fn session_fails_when_nothing_matches() {
+    let sb = sandbox();
+    let (code, stdout, stderr) = run(asm(&sb).args(["session", "zzz"]));
+    assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(1), "", "no session matches 'zzz'\n"));
+    let (code, stdout, stderr) = run(asm(&sb).args(["session", "zzz", "--json"]));
+    assert_eq!((code, stderr.as_str()), (Some(1), "no session matches 'zzz'\n"));
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&stdout).unwrap(), serde_json::json!({"error": {"code": "not_found", "message": "no session matches 'zzz'"}}));
+}
+
+#[test]
+fn session_of_a_history_only_session_has_nothing_to_read_or_resume() {
+    let sb = sandbox();
+    let (_, stdout, _) = run(asm(&sb).args(["session", "4444"]));
+    assert!(stdout.contains("\n  kind:         history\n"), "{stdout}");
+    assert!(stdout.contains("\n  turns:        0 (4 prompts)\n"), "{stdout}");
+    assert!(stdout.ends_with("\n  transcript:   none (history only)\n  resume:       none (history only)\n"), "{stdout}");
+    let s = json_out(asm(&sb).args(["session", "4444", "--json"]))["session"].clone();
+    assert_eq!((s["transcript"].is_null(), s["transcript_bytes"].is_null(), s["resume"].is_null(), s["kind"].as_str()), (true, true, true, Some("history")));
+}
+
+#[test]
+fn a_session_whose_project_folder_exists_resumes_from_it() {
+    let sb = sandbox();
+    let dir = sb.tmp.path().join("My Code").join("O'Brien");
+    std::fs::create_dir_all(&dir).unwrap();
+    let id = "77777777-aaaa-4bbb-8ccc-000000000007";
+    add_session(&sb, &dir, id, "Fix the login page", None);
+    let resume = format!("cd '{}' && claude --resume {id}", dir.display().to_string().replace('\'', r"'\''"));
+    let (_, stdout, _) = run(asm(&sb).args(["session", id]));
+    assert!(stdout.ends_with(&format!("\n  resume:       {resume}\n")), "{stdout}");
+    let (_, stdout, _) = run(asm(&sb).args(["search", "login"]));
+    assert!(stdout.ends_with(&format!("\n  resume: {resume}\n")), "{stdout}");
+    assert_eq!(json_out(asm(&sb).args(["session", id, "--json"]))["session"]["resume"], resume);
+}
+
+#[test]
+fn a_favorite_whose_original_is_gone_shows_its_copy_and_cannot_be_resumed() {
+    let sb = sandbox();
+    asm(&sb).args(["favorite", "2222"]).assert().success();
+    std::fs::remove_file(sb.transcript(ALPHA, S2)).unwrap();
+    let (_, stdout, _) = run(asm(&sb).args(["session", "2222"]));
+    assert!(stdout.contains("\n  favorite:     yes\n"), "{stdout}");
+    let transcript = stdout.lines().find(|l| l.starts_with("  transcript:")).unwrap();
+    assert!(transcript.contains("/favorites/claude/projects/-Users-me-Code-alpha/") && transcript.ends_with(" KB) (favorite copy)"), "{transcript}");
+    assert!(stdout.ends_with("\n  resume:       none (only a favorite copy is left)\n"), "{stdout}");
+    let s = json_out(asm(&sb).args(["session", "2222", "--json"]))["session"].clone();
+    assert_eq!((s["favorite_copy"].as_bool(), s["resume"].is_null()), (Some(true), true));
+    let (_, stdout, _) = run(asm(&sb).args(["search", "hello"]));
+    assert!(stdout.ends_with("\n  resume: none (only a favorite copy is left)\n"), "{stdout}");
+}
+
+#[test]
+fn session_json_carries_the_fields_cli_md_lists() {
+    let sb = sandbox();
+    let v = json_out(asm(&sb).args(["session", "1111", "--json"]));
+    assert_same_shape("session", &v, &[".session.tools"]);
+    let s = &v["session"];
+    assert_eq!(v["meta"]["query"], "1111");
+    assert_eq!((s["turns"].as_u64(), s["prompts"].as_u64(), s["subagents"].as_u64()), (Some(4), Some(3), Some(1)));
+    assert_eq!(s["tools"], serde_json::json!({"Bash": 2, "Read": 1}));
+    assert_eq!(s["files"], serde_json::json!(["src/parse.rs"]));
+    assert_eq!(s["models"], serde_json::json!(["claude-opus-5", "claude-sonnet-5"]));
+    assert_eq!((s["main_model"].as_str(), s["recorded_cost_usd"].as_f64()), (Some("claude-opus-5"), Some(1.2345)));
+    assert_eq!(s["context"]["window"], 1_000_000);
+    let hit = s["tokens"]["hit_rate"].as_f64().unwrap();
+    assert!((0.957..0.958).contains(&hit), "{hit}");
+    assert_eq!(s["transcript_bytes"], std::fs::metadata(sb.transcript(ALPHA, S1)).unwrap().len());
+}
+
+#[test]
+fn projects_lists_projects_most_recently_active_first() {
+    let sb = sandbox();
+    let (code, stdout, stderr) = run(asm(&sb).arg("projects"));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(steady(&stdout), "\
+3 projects · all time · 0.00s
+2026-09-12 00:00    1 session   /Users/me/Code/gamma
+2026-09-10 08:00    3 sessions  /Users/me/Code/beta
+2026-09-05 17:00    4 sessions  /Users/me/Code/alpha
+");
+    let (_, stdout, _) = run(asm(&sb).args(["projects", "-n", "1"]));
+    assert_eq!(steady(&stdout), "3 projects (showing 1) · all time · 0.00s\n2026-09-12 00:00    1 session   /Users/me/Code/gamma\nshowing 1 of 3 projects, use -n for more\n");
+}
+
+#[test]
+fn projects_in_a_range_count_only_the_sessions_active_in_it() {
+    let sb = sandbox();
+    let (_, stdout, _) = run(asm(&sb).args(["projects", "--since", "2026-09-04"]));
+    assert_eq!(steady(&stdout), "\
+3 projects · since 2026-09-04 · 0.00s
+2026-09-12 00:00    1 session   /Users/me/Code/gamma
+2026-09-10 08:00    1 session   /Users/me/Code/beta
+2026-09-05 17:00    1 session   /Users/me/Code/alpha
+");
+    let (_, stdout, _) = run(asm(&sb).args(["projects", "--days", "30"]));
+    assert_eq!(steady(&stdout), "0 projects · last 30 days · 0.00s\n");
+    let id = "77777777-aaaa-4bbb-8ccc-000000000007";
+    add_session(&sb, std::path::Path::new("/Users/me/Code/delta"), id, "Fix the login page", None);
+    let (_, stdout, _) = run(asm(&sb).args(["projects", "--days", "30"]));
+    assert!(steady(&stdout).starts_with("1 project · last 30 days · 0.00s\n") && stdout.ends_with("    1 session   /Users/me/Code/delta\n"), "{stdout}");
+
+    // the current session neither counts nor keeps its project on the list
+    let (_, stdout, _) = run(asm(&sb).args(["projects", "--days", "30"]).env("CLAUDE_CODE_SESSION_ID", id));
+    assert_eq!(steady(&stdout), "0 projects · last 30 days · 0.00s\n");
+    let (_, stdout, _) = run(asm(&sb).args(["projects", "--days", "30", "--include-self"]).env("CLAUDE_CODE_SESSION_ID", id));
+    assert!(stdout.ends_with("/Users/me/Code/delta\n"), "{stdout}");
+    let meta = json_out(asm(&sb).args(["projects", "--days", "30", "--json"]).env("CLAUDE_CODE_SESSION_ID", id))["meta"].clone();
+    assert_eq!((meta["excluded_session"].as_str(), meta["total"].as_u64()), (Some(id), Some(0)));
+}
+
+#[test]
+fn projects_json_carries_the_fields_cli_md_lists() {
+    let sb = sandbox();
+    let v = json_out(asm(&sb).args(["projects", "--json", "--since", "2026-09-04", "-n", "1"]));
+    assert_same_shape("projects", &v, &[]);
+    assert_eq!(
+        v["results"],
+        serde_json::json!([{"project_path": "/Users/me/Code/gamma", "project": "gamma", "project_key": GAMMA, "sessions": 1, "updated_at": "2026-09-12T00:00:00+00:00"}])
+    );
+    let meta = &v["meta"];
+    assert_eq!((meta["total"].as_u64(), meta["shown"].as_u64(), meta["truncated"].as_bool()), (Some(3), Some(1), Some(true)));
+    assert_eq!(meta["range"]["since"], "2026-09-04T00:00:00+00:00");
+}

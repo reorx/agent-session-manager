@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use agent_session_core::claude::paths::{ClaudeDir, home_dir};
 use agent_session_core::favorites;
+pub use agent_session_core::session::resume_command;
 use gpui_kit::component::WindowExt;
 use gpui_kit::*;
 
@@ -75,24 +76,6 @@ pub fn check(row: &SessionRow, claude: &ClaudeDir) -> SessionActions {
     let dir_exists = dir.is_absolute() && dir.is_dir();
     let original_exists = !row.favorite || favorites::original_exists(claude, &row.project_key, &row.id);
     available(row, original_exists, dir_exists)
-}
-
-/// `cd '<project>' && claude --resume <id>`, or without the `cd` once the folder is gone (Claude
-/// Code looks the id up in every project). `None` for an id that is not a plain session id.
-pub fn resume_command(id: &str, project_path: &str, dir_exists: bool) -> Option<String> {
-    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-        return None;
-    }
-    Some(match dir_exists {
-        true => format!("cd {} && claude --resume {id}", shell_quote(project_path)),
-        false => format!("claude --resume {id}"),
-    })
-}
-
-/// Single quotes keep spaces, `$`, backticks and the like literal; a quote inside closes the
-/// quoting, adds an escaped quote and opens it again.
-fn shell_quote(text: &str) -> String {
-    format!("'{}'", text.replace('\'', r"'\''"))
 }
 
 /// `<project>-<first 8 of the id>.txt`.

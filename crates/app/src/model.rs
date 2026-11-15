@@ -10,6 +10,7 @@ use agent_session_core::claude::model_catalog::ModelCatalog;
 use agent_session_core::cost::primary_model;
 use agent_session_core::model::{ModelUsage, SessionSummary};
 use agent_session_core::pricing::{context_window, display_name};
+use agent_session_core::session::SessionKind;
 use chrono::{Datelike, Days, Local, Months, NaiveDate};
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
@@ -232,22 +233,9 @@ fn project_name(s: &SessionSummary) -> String {
     }
 }
 
-/// `files_touched` with the project's files relative to it, listed first. Claude Code records a
-/// file under the session's working directory relative to it already, and others absolute.
+/// `files_touched` with the project's files relative to it, listed first.
 fn files_touched(s: &SessionSummary) -> Vec<SharedString> {
-    let project = s.project_path.as_deref().or(s.cwd.as_deref()).map(|p| p.trim_end_matches('/')).filter(|p| !p.is_empty());
-    let (mut inside, mut outside): (Vec<&str>, Vec<&str>) = (Vec::new(), Vec::new());
-    for path in &s.files_touched {
-        match project.and_then(|p| path.strip_prefix(p)?.strip_prefix('/')) {
-            Some(rel) => inside.push(rel),
-            None if !path.starts_with('/') => inside.push(path),
-            None => outside.push(path),
-        }
-    }
-    // the others come sorted from the BTreeSet
-    inside.sort_unstable();
-    inside.dedup();
-    inside.into_iter().chain(outside).map(|p| SharedString::from(p.to_string())).collect()
+    agent_session_core::session::files_touched(s).into_iter().map(SharedString::from).collect()
 }
 
 fn files_fmt(n: usize) -> SharedString {
@@ -267,14 +255,11 @@ fn top_tools(s: &SessionSummary) -> SharedString {
 
 impl Kind {
     pub fn of(s: &SessionSummary) -> Kind {
-        if s.history_only() {
-            Kind::History
-        } else if s.is_background {
-            Kind::Background
-        } else if s.entrypoint.as_deref() == Some("sdk-cli") {
-            Kind::Sdk
-        } else {
-            Kind::Cli
+        match SessionKind::of(s) {
+            SessionKind::History => Kind::History,
+            SessionKind::Background => Kind::Background,
+            SessionKind::Sdk => Kind::Sdk,
+            SessionKind::Cli => Kind::Cli,
         }
     }
 }

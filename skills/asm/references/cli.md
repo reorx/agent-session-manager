@@ -93,7 +93,7 @@ failure to open the index (a read-only file, a full disk) fails the command with
 
 | Option | Values | Meaning |
 |---|---|---|
-| `-d, --days N` | number, decimals allowed | Activity within the last N days (N × 24 hours before now). `--days 0` removes the limit |
+| `-d, --days N` | number ≥ 0, decimals allowed | Activity within the last N days (N × 24 hours before now). `--days 0` removes the limit |
 | `--since DATE` | `YYYY-MM-DD` | Activity on or after local midnight of DATE |
 | `--until DATE` | `YYYY-MM-DD` | Activity on or before the end of local day DATE; can be used without `--since` |
 
@@ -108,7 +108,7 @@ The first line of the output names the range actually used:
 
 | Range | Label |
 |---|---|
-| `--days 7` | `last 7 days` |
+| `--days 7` | `last 7 days` (`last 1 day`, `last 0.5 days`) |
 | a default of 30 days | `last 30 days (default)` |
 | `--since 2026-11-01` | `since 2026-11-01` |
 | `--since 2026-11-01 --until 2026-11-14` | `2026-11-01 to 2026-11-14` |
@@ -172,6 +172,9 @@ asm search '连不上|无法连接|offline' 'healthz|健康检查'
 - At most 64 TERMs (exit 2).
 - Literal TERMs cannot contain `|` itself; to search for a vertical bar, use `--regex` and write
   it as `\|`, e.g. `--regex 'a \| b'`.
+- A TERM that starts with `-` would be read as an option. In `search`, put `--` before the TERMs
+  and every option before it: `asm search --in tool -- '--force' 'push'`. In `transcript --grep`,
+  attach it with `=`: `--grep=-rf`.
 - With `--regex`, each TERM is one regular expression (Rust `regex` syntax, case-insensitive
   unless it starts with `(?-i)`), and `|` is the regular expression's own alternation; spaces
   are part of the expression. A TERM that can match the empty string, an empty match at a
@@ -213,7 +216,8 @@ when unknown.
 With `--json` a command prints one pretty-printed JSON object on stdout and nothing else there.
 Keys are `snake_case` (`tool_output` in `hits`) and always present (`null` when there is no value).
 String values that name a text kind keep the command-line spelling (`"kind": "tool-output"`). The
-same thing has the same key in every command (`main_model`, `project_path`, `turns`). `meta`
+same thing has the same key in every command (`main_model`, `project`, `project_path`,
+`updated_at`, `turns`). `meta`
 repeats the options under the option's own name: `meta.model` is the `--model` value, while a
 session's model is its `main_model`. Lists of results look like:
 
@@ -324,24 +328,25 @@ Text output:
 
 - First line: `N sessions`, then `(showing M)` when the limit cut the list, the terms (one `[...]`
   each), ` · regex` and ` · same message` when given, `in` with the kinds (and ` · tools Bash,Read`
-  with `--tool`), the filters given (` · project cw-edge`, ` · model opus-5-5`, ` · favorites`),
-  the range label, and the elapsed time.
+  with `--tool`), the filters given (` · project cw-edge`, several joined with `,`;
+  ` · model opus-5-5`; ` · favorites`), the range label, and the elapsed time.
 - Per session, separated by a blank line: the full session ID; a line with last update, start
   (left out when unknown), project name (last path component) with the git branch in
   parentheses when known, the number of turns, and the cost (left out when unknown); `title:`,
   the session's title or else the first line of its first prompt (one line, at most 120
-  characters); `prompt:`, the first prompt as one line of at most 160 characters, only when the
+  characters; `(no prompt)` when there is neither); `prompt:`, the first prompt as one line of at most 160 characters, only when the
   session has a title of its own; `hits:`, every kind searched with its count (zeros included);
   the snippets, each as `[KIND · turn N · MM-DD HH:MM] text`, where a tool kind is followed by
-  the tool name (`[tool-output Bash · turn 6 · 11-13 08:06]`) and `turn N` is left out for text
-  before the first prompt; `resume:`, the command that resumes the session, or `resume: none (…)`
+  the tool name (`[tool-output Bash · turn 6 · 11-13 08:06]`), `turn N` is left out for text
+  before the first prompt and the time when the item has none; `resume:`, the command that resumes the session, or `resume: none (…)`
   with the reason when it cannot be resumed (see `asm session`).
 - When the limit cut the list, the last line is `showing 20 of 57 sessions, use -n for more`.
 - With no result the output is the first line (`0 sessions · …`) and a line starting with
   `try: ` that lists, separated by ` · `, what can be widened, in this order and only those that
   apply: `--days 0 for all time` (a time limit was in effect), `--in all for every kind` (not every
   kind was searched), `fewer terms` (more than one TERM), `without --same-message`,
-  `without --project` / `--tool` / `--model` / `--favorites` (each one given).
+  `without --project` / `--tool` / `--model` / `--favorites` (each one given). When none of
+  these applies (all time, every kind, one TERM, no filter), it is `other ways of saying each TERM`.
 
 JSON output (`--json`):
 
@@ -362,6 +367,7 @@ JSON output (`--json`):
     "excluded_session": "5d0c2a4e-1111-4c4c-9a9a-0123456789ab",
     "sort": "recent",
     "engine": "index",
+    "scan": null,
     "index_refresh": "done",
     "elapsed_ms": 31,
     "total": 2,
@@ -413,20 +419,21 @@ JSON output (`--json`):
 | `meta.tools` | `--tool` values |
 | `meta.range` | `label` as in the first line; `since` and `until` the instants it covers (`until` exclusive), `null` when open; `default` is true when no range option was given |
 | `meta.projects`, `meta.model`, `meta.favorites` | The filters as given |
-| `meta.excluded_session` | The current session's ID when it was left out, else `null` |
+| `meta.excluded_session` | The current session's ID when it is left out (`CLAUDE_CODE_SESSION_ID` set, no `--include-self`), whether or not it would have matched; else `null` |
 | `meta.engine` | `index` or `scan` (see How it searches) |
+| `meta.scan` | With the `scan` engine, what it read: `files` (transcripts in range), `skipped_files` (skipped whole because a TERM is missing from their bytes), `bytes`, `skipped_bytes`; `null` with the index |
 | `meta.total`, `meta.shown`, `meta.truncated` | Sessions found, sessions in `results`, whether the limit cut the list |
 | `meta.hints` | The `try:` suggestions of an empty result, each as a string; empty otherwise |
-| `title` | The session's title, else the first line of its first prompt |
+| `title` | The session's title, else the first line of its first prompt, cut as in the text output (one line, at most 120 characters); `null` when there is neither |
 | `first_prompt` | The first prompt, cleaned of injected tags, at most 2,000 characters (`…` when cut) |
-| `project` | Last component of `project_path` |
+| `project` | Last component of `project_path` (else of `cwd`, else the encoded directory name under `projects/`) |
 | `project_path`, `cwd` | The project directory and the working directory the session started in |
 | `turns` | Number of turns, counted where the snippets' turn numbers come from (the index, or the transcript as the scan read it), so no snippet's turn is above it |
 | `cost_usd` | Cost priced from token usage, subagents included; `null` when no call could be priced |
 | `main_model` | Main model (the one that cost the most), `null` without API calls |
 | `kind` | `cli`, `sdk`, `background` or `history` (the app's Kind column) |
 | `transcript` | Path of the record file that was searched |
-| `resume` | The resume command, `null` when the session cannot be resumed |
+| `resume` | The resume command, `null` when the session cannot be resumed (see `asm session`) |
 | `hits` | `total`, then every kind with its count: `prompt`, `reply`, `thinking`, `tool_input`, `tool_output`, `other`; `null` for a kind not searched |
 | `term_hits` | Per TERM, how many items contain it |
 | `snippets[].kind`, `.tool` | Text kind; the tool name for tool kinds, else `null` |
@@ -481,8 +488,9 @@ Text output:
 ```
 
 - Prompts are one line of at most 300 characters. A missing value is `—`.
-- `turns`: turns as defined above, then the Prompts count of the app's table and of `asm list`,
-  which also counts slash commands and other user-side lines.
+- `turns`: turns as defined above, then in parentheses the Prompts count of the app's table and
+  of `asm list`, which counts user-side lines the reference script's way (task notifications and
+  compact summaries included, images pasted without text not), so the two differ either way.
 - `tools`: calls per tool, most used first, at most 8 named. `files`: files the session wrote or
   edited, relative to the project when inside it, at most 10 named, then `(+N more)`.
 - `cost`: priced from token usage, subagents included; the cost Claude Code recorded itself in
@@ -495,10 +503,13 @@ Text output:
   `history.jsonl`, so there is nothing to read or resume.
 - `resume`: the command to continue the session in Claude Code: `cd 'PROJECT' && claude --resume ID`
   when the project directory exists, else `claude --resume ID`. `none (history only)` or
-  `none (only a favorite copy is left)` when Claude Code no longer has the transcript.
+  `none (only a favorite copy is left)` when Claude Code no longer has the transcript, and
+  `none (no plain session id)` for an ID that is not letters, digits and `-` (never put on a
+  command line).
 
 When the prefix matches several sessions, nothing goes to stdout; stderr lists them (ID, last
-update, title as in `asm search`), most recently updated first, at most 20, and the exit code is 1:
+update, title as in `asm search`), most recently updated first, at most 20 and then a line
+`  … N more`, and the exit code is 1:
 
 ```
 prefix '1b2b' matches 3 sessions:
@@ -559,7 +570,8 @@ JSON output:
 | `favorite_copy` | True when `transcript` is the copy kept by favoriting because the original is gone |
 | `resume` | `null` when the session cannot be resumed |
 
-The other fields are as in `asm search`. With an ambiguous prefix, stdout carries
+The other fields are as in `asm search`. With an ambiguous prefix, stderr has only the first line
+(`prefix '1b2b' matches 3 sessions:`), and stdout carries
 `{ "error": { "code": "ambiguous", "message": "...", "candidates": [{ "session_id": "...", "updated_at": "...", "title": "..." }] } }`
 (all candidates, not only 20); with no match, `code` is `not_found`.
 
@@ -607,17 +619,18 @@ JSON output:
   "meta": { "command": "projects", "range": { "label": "last 30 days", "since": "2026-10-16T17:10:00+08:00", "until": null, "default": false },
             "excluded_session": null, "index_refresh": "done", "elapsed_ms": 9, "total": 3, "shown": 3, "truncated": false },
   "results": [
-    { "path": "/Users/reorx/Code/cw-edge", "name": "cw-edge", "key": "-Users-reorx-Code-cw-edge", "sessions": 21, "last_active": "2026-11-14T17:09:55+08:00" }
+    { "project_path": "/Users/reorx/Code/cw-edge", "project": "cw-edge", "project_key": "-Users-reorx-Code-cw-edge", "sessions": 21, "updated_at": "2026-11-14T17:09:55+08:00" }
   ]
 }
 ```
 
 | Field | Meaning |
 |---|---|
-| `path` | Project directory, `null` when unknown |
-| `name` | Last component of `path`, else `key` |
-| `key` | Encoded directory name under `projects/` |
-| `sessions`, `last_active` | As in the text line |
+| `project_path` | Project directory, `null` when unknown |
+| `project` | Last component of `project_path`, else `project_key` |
+| `project_key` | Encoded directory name under `projects/` |
+| `sessions` | As in the text line |
+| `updated_at` | Last activity: the latest last update of the sessions counted |
 
 Exit codes: 0; 1 on an index error; 2 for invalid arguments.
 

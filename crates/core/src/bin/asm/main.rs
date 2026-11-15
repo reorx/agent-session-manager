@@ -14,9 +14,13 @@ use agent_session_core::search::Highlighted;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 
+mod agent;
 mod cost;
 mod manage;
 mod old;
+mod projects;
+mod search;
+mod session;
 #[cfg(test)]
 mod spec;
 #[path = "../support/transcript.rs"]
@@ -58,6 +62,12 @@ enum ColorWhen {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Find sessions by their content: every TERM somewhere in the session (for agents)
+    Search(search::SearchArgs),
+    /// One session's metadata and how to resume it (for agents)
+    Session(session::SessionArgs),
+    /// Projects that have sessions, most recently active first (for agents)
+    Projects(projects::ProjectsArgs),
     Favorite { id: String },
     Unfavorite { id: String, #[arg(long)] yes: bool },
     FavoritesDir { path: Option<PathBuf>, #[arg(long, conflicts_with = "path")] reset: bool },
@@ -146,6 +156,9 @@ fn main() -> ExitCode {
     let db_path = cli.db.clone().unwrap_or_else(default_db_path);
     let mut app = App { claude, db_path, pal: Palette::new(color), out: std::io::BufWriter::new(std::io::stdout()) };
     let result = match cli.cmd {
+        Cmd::Search(args) => app.find_sessions(args),
+        Cmd::Session(args) => app.session_card(args),
+        Cmd::Projects(args) => app.list_projects(args),
         Cmd::Transcript(args) => transcript::run(args, &app.claude, &app.db_path, &mut app.out),
         Cmd::Index { rebuild } => app.index(rebuild),
         Cmd::List(args) => app.list(args),
@@ -160,9 +173,35 @@ fn main() -> ExitCode {
     let _ = app.out.flush();
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        // invalid arguments found after parsing: exit 2, worded like clap's own
+        Err(e) if e.is::<agent::UsageError>() => {
+            eprintln!("error: {e}");
+            ExitCode::from(2)
+        }
         Err(e) => {
             eprintln!("{e}");
             ExitCode::from(1)
+        }
+    }
+}
+
+/// What happened to the index before a command answered (`meta.index_refresh`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Refresh {
+    /// Brought up to date with the files on disk.
+    Done,
+    /// The write lock was taken: answered from the index as it was.
+    Busy,
+    /// `--no-scan` on an index scanned before.
+    Skipped,
+}
+
+impl Refresh {
+    fn as_str(self) -> &'static str {
+        match self {
+            Refresh::Done => "done",
+            Refresh::Busy => "busy",
+            Refresh::Skipped => "skipped",
         }
     }
 }
@@ -189,14 +228,20 @@ impl App {
     /// The index, first brought up to date with the files on disk. `scan` is false for `--no-scan`,
     /// which skips that, except on an index no scan has gone through: it has nothing to answer from.
     fn open_db(&self, scan: bool) -> Result<Db> {
-        let mut db = self.open_index()?;
-        if scan || !Indexer::has_scanned(&db)? {
-            self.refresh_with(&self.indexer()?, &mut db)?;
-        }
-        Ok(db)
+        Ok(self.open_db_refreshed(scan)?.0)
     }
 
-    fn refresh_with(&self, indexer: &Indexer, db: &mut Db) -> Result<()> {
+    /// `open_db`, telling whether the refresh happened.
+    fn open_db_refreshed(&self, scan: bool) -> Result<(Db, Refresh)> {
+        let mut db = self.open_index()?;
+        let refresh = match scan || !Indexer::has_scanned(&db)? {
+            true => self.refresh_with(&self.indexer()?, &mut db)?,
+            false => Refresh::Skipped,
+        };
+        Ok((db, refresh))
+    }
+
+    fn refresh_with(&self, indexer: &Indexer, db: &mut Db) -> Result<Refresh> {
         refresh(indexer, db, &self.db_path, BUILD_TIMEOUT)
     }
 }
@@ -239,12 +284,12 @@ fn scan_after_any_build(indexer: &Indexer, db: &mut Db, db_path: &Path, build_ti
 /// Bring the index up to date before answering. When another process (the app, or another `asm`)
 /// keeps the write lock on an index scanned before, the scan is dropped (its transaction rolls
 /// back) and the command answers from the index as it is.
-fn refresh(indexer: &Indexer, db: &mut Db, db_path: &Path, build_timeout: Duration) -> Result<()> {
+fn refresh(indexer: &Indexer, db: &mut Db, db_path: &Path, build_timeout: Duration) -> Result<Refresh> {
     match scan_after_any_build(indexer, db, db_path, build_timeout, &mut |_| {}) {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(Refresh::Done),
         Err(e) if is_busy(&e) => {
             eprintln!("{BUSY_NOTICE}");
-            Ok(())
+            Ok(Refresh::Busy)
         }
         Err(e) => Err(e),
     }
