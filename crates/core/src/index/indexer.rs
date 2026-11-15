@@ -110,9 +110,7 @@ impl Indexer {
         let mut report = ScanReport::default();
         let claude_root = crate::config::canonical_root(self.claude.root())?.to_string_lossy().into_owned();
         let favorites_root = self.favorites.as_ref().map(|f| crate::config::canonical_root(f.root())).transpose()?.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-        for (key, value) in [("claude_root", &claude_root), ("favorites_root", &favorites_root)] {
-            if db.meta(key)?.is_some_and(|previous| previous != *value) { return Err(RootsChanged.into()); }
-        }
+        check_roots(db, &claude_root, &favorites_root)?;
         let discovered = discover_all(&self.claude, self.favorites.as_ref())?;
         let files = discovered.sessions; let subagents = discovered.subagents;
         let live_ids: HashSet<String> = files.iter().map(|f| f.session_id.clone()).collect();
@@ -157,6 +155,8 @@ impl Indexer {
         let mut done = report.files_unchanged;
         let t = Instant::now();
         db.transaction(|db| {
+            // another process may have built the index from other roots while this one waited
+            check_roots(db, &claude_root, &favorites_root)?;
             db.set_meta("claude_root", &claude_root)?;
             db.set_meta("favorites_root", &favorites_root)?;
             for (path, state) in &gone.sessions {
@@ -409,6 +409,15 @@ fn forget_subagents(db: &Db, gone: &[(&PathBuf, &IndexState)], live_ids: &HashSe
         db.delete_index_state(path)?;
     }
     Ok(touched)
+}
+
+/// The index must hold the sessions of one Claude directory and one favorites directory: the
+/// ones it was built from.
+fn check_roots(db: &Db, claude_root: &str, favorites_root: &str) -> Result<()> {
+    for (key, value) in [("claude_root", claude_root), ("favorites_root", favorites_root)] {
+        if db.meta(key)?.is_some_and(|previous| previous != value) { return Err(RootsChanged.into()); }
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

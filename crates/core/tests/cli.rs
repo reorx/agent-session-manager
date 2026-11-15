@@ -225,11 +225,11 @@ fn a_busy_index_skips_the_refresh_and_answers_from_what_is_indexed() {
     assert!(String::from_utf8_lossy(&out.stdout).contains(new_id), "the next refresh catches up");
 }
 
-/// What `asm list alpha` answers while another process (the app, or another `asm`) builds the
-/// index from nothing: a new index when `rebuild` is false, one the other process empties and
-/// rebuilds when it is true. That process holds the write lock for 4 s, longer than a refresh
-/// waits for the app before answering from the index as it is.
-fn list_while_another_process_builds(sb: &Sandbox, rebuild: bool) -> std::process::Output {
+/// What `asm ARGS` answers while another process (the app, or another `asm`) builds the index
+/// from nothing: a new index when `rebuild` is false, one the other process empties and rebuilds
+/// when it is true. That process holds the write lock for 4 s, longer than a refresh waits for
+/// the app before answering from the index as it is.
+fn while_another_process_builds(sb: &Sandbox, rebuild: bool, args: &[&str]) -> std::process::Output {
     use agent_session_core::claude::paths::ClaudeDir;
     use agent_session_core::index::{Db, Indexer};
     if rebuild {
@@ -254,7 +254,7 @@ fn list_while_another_process_builds(sb: &Sandbox, rebuild: bool) -> std::proces
         };
     });
     held.recv().unwrap();
-    let out = asm(sb).args(["list", "alpha"]).output().unwrap();
+    let out = asm(sb).args(args).output().unwrap();
     builder.join().unwrap();
     out
 }
@@ -271,13 +271,44 @@ fn assert_waited_for_the_build(out: &std::process::Output) {
 #[test]
 fn a_command_on_a_new_index_another_process_is_building_waits_for_the_build() {
     let sb = sandbox();
-    assert_waited_for_the_build(&list_while_another_process_builds(&sb, false));
+    assert_waited_for_the_build(&while_another_process_builds(&sb, false, &["list", "alpha"]));
 }
 
 #[test]
 fn a_command_on_an_index_another_process_is_rebuilding_waits_for_the_rebuild() {
     let sb = sandbox();
-    assert_waited_for_the_build(&list_while_another_process_builds(&sb, true));
+    assert_waited_for_the_build(&while_another_process_builds(&sb, true, &["list", "alpha"]));
+}
+
+/// `asm index` (to warm up a new index, say) waits for another process's build like a refresh
+/// does, and reports the files that process indexed.
+#[test]
+fn asm_index_on_a_new_index_another_process_is_building_waits_for_the_build() {
+    let sb = sandbox();
+    let out = while_another_process_builds(&sb, false, &["index"]);
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success() && stdout.starts_with("4 files (0 new, 0 appended, 0 rebuilt, 0 unchanged, 0 missing, 4 indexed meanwhile by another process), "),
+        "got {:?}, stderr {stderr:?}, stdout {stdout:?}",
+        out.status.code()
+    );
+}
+
+/// `--no-scan` answers from the index as it is, which an index no scan has gone through cannot
+/// do: there it is ignored.
+#[test]
+fn no_scan_is_ignored_on_an_index_no_scan_has_gone_through() {
+    let sb = sandbox();
+    let out = asm(&sb).args(["list", "alpha", "--no-scan"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success() && stdout.starts_with("-Users-me-Code-alpha (4 sessions, 3 with transcript)\n"), "got {:?}, stdout {stdout:?}", out.status.code());
+
+    let new_id = "77777777-aaaa-4bbb-8ccc-000000000007";
+    std::fs::write(sb.transcript(ALPHA, new_id), format!(
+        "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"brand new\"}},\"uuid\":\"u7\",\"timestamp\":\"2026-09-15T00:00:00.000Z\",\"sessionId\":\"{new_id}\",\"cwd\":\"/Users/me/Code/alpha\"}}\n"
+    )).unwrap();
+    let out = asm(&sb).args(["list", "alpha", "--no-scan"]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&out.stdout).contains(new_id), "once scanned, --no-scan skips the refresh");
 }
 
 /// The CLI prints only the outermost message of most errors; for an index it cannot open, that
@@ -291,7 +322,7 @@ fn an_index_file_that_cannot_be_written_is_reported_as_such_not_as_locked() {
     let out = asm(&sb).args(["list", "alpha"]).output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "{stderr}");
-    assert!(stderr.contains("readonly") && stderr.contains(&sb.db_path().display().to_string()) && !stderr.contains("locked"), "{stderr}");
+    assert_eq!(stderr, format!("open {}: attempt to write a readonly database\n", sb.db_path().display()), "the reason, once");
     assert!(out.stdout.is_empty());
 }
 

@@ -274,9 +274,12 @@ impl Db {
         self.path.as_deref()
     }
 
-    /// Run `f` inside one transaction.
+    /// Run `f` inside one write transaction. It takes the write lock up front (`BEGIN IMMEDIATE`),
+    /// waiting for it as long as the busy timeout. A deferred transaction would wait only if its
+    /// first statement wrote: one that read first holds a snapshot, and SQLite fails its first
+    /// write at once as busy instead of waiting.
     pub fn transaction<T>(&self, f: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let out = f(self)?;
         tx.commit()?;
         Ok(out)

@@ -43,8 +43,8 @@ adds commands, it names the one to check here.
 ### The index and the write lock
 
 A command that reads the index first brings it up to date with the files on disk (an incremental
-scan, usually under 0.2 s); `--no-scan` skips that step where the command offers it. `stats` never
-refreshes. `transcript`, `search-old` without `--index` and `session-old --conversation` read the
+scan, usually under 0.2 s); `--no-scan` skips that step where the command offers it, except on an
+index no scan has gone through yet (see below). `stats` never refreshes. `transcript`, `search-old` without `--index` and `session-old --conversation` read the
 record files and do not touch the index at all.
 
 The app may be writing the same index. When the scan cannot get the write lock within 2 seconds,
@@ -64,7 +64,14 @@ on such an index the command waits for the lock up to 60 seconds instead, then a
 finished index, without the stderr line. A first scan of a large `~/.claude` writes for several
 seconds. If the lock is still held after 60 seconds, the command fails (exit 1) and says the
 index is being built by another process; run it again later, or point `--db` / `ASM_DB` at
-another file.
+another file. On such an index `--no-scan` is ignored (there is nothing to answer from without
+the scan), and `asm index` waits the same way, then counts the files the other process wrote as
+`indexed meanwhile by another process`. `asm index --rebuild` does not wait: it fails after 2
+seconds, as on any index whose lock is taken.
+
+An index holds the sessions of one Claude directory and one favorites directory, the ones it was
+built from. A command run with others fails (exit 1) and suggests `--db` or `asm index --rebuild`,
+also when the other directory's build was written while it waited for the lock.
 
 Several `asm` commands may run at once (an agent often starts them in parallel) next to the app:
 each refresh writes a file only if no other one indexed it since it looked, so nothing is indexed
@@ -215,7 +222,7 @@ session's model is its `main_model`. Lists of results look like:
 
 `meta.index_refresh` is `"done"` (the index was brought up to date), `"busy"` (the write lock
 was taken and the command answered from the index as it was, see above) or `"skipped"`
-(`--no-scan`).
+(`--no-scan` on an index scanned before; on one never scanned it is `"done"`).
 
 When a command fails (exit 1) with `--json`, stdout carries
 `{ "error": { "code": "...", "message": "..." } }` and stderr the same message. `code` is
@@ -855,8 +862,10 @@ asm index [--rebuild]
 | `--rebuild` | — | off | Drop everything and index all files again |
 
 Output: one line of scan counts and timings, one line of index totals. Fails (exit 1) when the
-app holds the write lock, or when the Claude directory or favorites directory differs from the
-one the index was built from (run `asm index --rebuild`).
+app holds the write lock (on an index no scan has gone through yet, it first waits up to 60
+seconds for the process building it, unless `--rebuild` is given; see "The index and the write
+lock"), or when the Claude directory or favorites directory differs from the one the index was
+built from (run `asm index --rebuild`).
 
 ### asm favorite
 

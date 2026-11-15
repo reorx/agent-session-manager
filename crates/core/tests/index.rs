@@ -264,6 +264,29 @@ fn two_cold_scans_of_a_new_index_at_once_leave_it_as_one_scan_would() {
     }
 }
 
+/// The root guard holds for a scan that waited for the lock: if another writer built the index
+/// from another Claude directory meanwhile, the scan stops as the guard does before planning,
+/// instead of writing its directory's sessions next to the other one's.
+#[test]
+fn a_scan_another_claude_directorys_build_got_ahead_of_does_not_mix_the_two() {
+    let (sb, other) = (sandbox(), sandbox());
+    let mut a = Db::open(&sb.db_path()).unwrap();
+    let mut b = Db::open(&sb.db_path()).unwrap();
+    let result = Indexer::new(sb.claude.clone(), None).scan(&mut a, &mut |p| {
+        if p.phase == "scanning" {
+            scan(&other, &mut b);
+        }
+    });
+    let states = a.all_index_states().unwrap();
+    let mixed: Vec<_> = states.keys().filter(|p| !p.starts_with(other.root())).collect();
+    assert!(
+        result.as_ref().is_err_and(|e| e.is::<agent_session_core::index::RootsChanged>()) && mixed.is_empty(),
+        "scan: {:?}; files of the waiting scan's directory in the index: {mixed:?}",
+        result.as_ref().map(|r| r.files_parsed).map_err(|e| e.to_string())
+    );
+    assert!(!states.is_empty(), "the other directory's build stays");
+}
+
 /// A writer that finds no index state plans every file in full (`planned_from` is none). If
 /// another writer indexes the files first, after they grew, it leaves them further along than
 /// the first writer read them: session files and subagent files alike must be left as they are.

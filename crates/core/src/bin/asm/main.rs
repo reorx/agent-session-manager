@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use agent_session_core::claude::paths::{ClaudeDir, default_db_path};
-use agent_session_core::index::{Db, Indexer, is_busy};
+use agent_session_core::index::{Db, Indexer, Progress, ScanReport, is_busy};
 use agent_session_core::search::Highlighted;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -173,19 +173,24 @@ impl App {
         Ok(Indexer::new(self.claude.clone(), Some(ClaudeDir::new(favorites))))
     }
 
-    /// The index, first brought up to date with the files on disk when `scan` is set. An index
-    /// that needs building while another process writes it cannot be used at all: that is an
-    /// error, which says why it needs building. `main` prints only the outermost message, so any
+    /// The index. Opening fails when the index needs building while another process writes it:
+    /// the error says why it needs building. `main` prints only the outermost message, so any
     /// other failure to open is printed with its causes (a read-only file, a full disk).
-    fn open_db(&self, scan: bool) -> Result<Db> {
-        let mut db = Db::open_with(&self.db_path, BUSY_TIMEOUT).map_err(|e| match is_busy(&e) {
+    fn open_index(&self) -> Result<Db> {
+        Db::open_with(&self.db_path, BUSY_TIMEOUT).map_err(|e| match is_busy(&e) {
             true => {
                 let why = e.to_string();
                 e.context(format!("{why} (the app, or another asm); wait for it, quit it, or use another index with --db / ASM_DB"))
             }
-            false => anyhow::anyhow!("{e:#}"),
-        })?;
-        if scan {
+            false => anyhow::anyhow!("{}", with_causes(&e)),
+        })
+    }
+
+    /// The index, first brought up to date with the files on disk. `scan` is false for `--no-scan`,
+    /// which skips that, except on an index no scan has gone through: it has nothing to answer from.
+    fn open_db(&self, scan: bool) -> Result<Db> {
+        let mut db = self.open_index()?;
+        if scan || !Indexer::has_scanned(&db)? {
             self.refresh_with(&self.indexer()?, &mut db)?;
         }
         Ok(db)
@@ -196,30 +201,51 @@ impl App {
     }
 }
 
-/// Scan with `indexer`. When another process (the app, or another `asm`) holds the write lock,
-/// the scan is dropped (its transaction rolls back) and the command answers from the index as it
-/// is. Unless no scan has gone through on the index yet (a new index, or one being rebuilt):
-/// that process is building it, and answering now would answer from nothing, so the scan waits
-/// for the lock up to `build_timeout` (it then finds the build's files written and skips them),
-/// and fails if the build takes longer.
-fn refresh(indexer: &Indexer, db: &mut Db, db_path: &Path, build_timeout: Duration) -> Result<()> {
+/// `error` and its causes on one line, like `{:#}`, but stopping at the first SQLite error: its
+/// own cause is SQLite's error code, which only says the same again.
+fn with_causes(error: &anyhow::Error) -> String {
+    let mut parts = Vec::new();
+    for cause in error.chain() {
+        parts.push(cause.to_string());
+        if cause.is::<rusqlite::Error>() {
+            break;
+        }
+    }
+    parts.join(": ")
+}
+
+/// Scan with `indexer`, after any build another process is doing. On an index no scan has gone
+/// through yet (a new one, or one being rebuilt), the process holding the write lock is building
+/// it, so the scan waits for the lock up to `build_timeout` instead of the usual 2 s (it then finds
+/// the build's files written and skips them), and fails, not as busy, if the build takes longer.
+/// On an index scanned before, a scan that cannot get the lock fails as busy.
+fn scan_after_any_build(indexer: &Indexer, db: &mut Db, db_path: &Path, build_timeout: Duration, progress: &mut dyn FnMut(&Progress)) -> Result<ScanReport> {
     let scanned = Indexer::has_scanned(db)?;
     if !scanned {
         db.conn().busy_timeout(build_timeout)?;
     }
-    let result = indexer.scan(db, &mut |_| {});
+    let result = indexer.scan(db, progress);
     db.conn().busy_timeout(BUSY_TIMEOUT)?;
     match result {
-        Ok(_) => Ok(()),
-        Err(e) if is_busy(&e) && scanned => {
-            eprintln!("{BUSY_NOTICE}");
-            Ok(())
-        }
-        Err(e) if is_busy(&e) => Err(e.context(format!(
+        Err(e) if !scanned && is_busy(&e) => Err(anyhow::anyhow!(
             "{} is being built by another process (the app, or another asm), which still held it after {} s; run again when it is done, or use another index with --db / ASM_DB",
             db_path.display(),
             build_timeout.as_secs_f64()
-        ))),
+        )),
+        result => result,
+    }
+}
+
+/// Bring the index up to date before answering. When another process (the app, or another `asm`)
+/// keeps the write lock on an index scanned before, the scan is dropped (its transaction rolls
+/// back) and the command answers from the index as it is.
+fn refresh(indexer: &Indexer, db: &mut Db, db_path: &Path, build_timeout: Duration) -> Result<()> {
+    match scan_after_any_build(indexer, db, db_path, build_timeout, &mut |_| {}) {
+        Ok(_) => Ok(()),
+        Err(e) if is_busy(&e) => {
+            eprintln!("{BUSY_NOTICE}");
+            Ok(())
+        }
         Err(e) => Err(e),
     }
 }
@@ -263,9 +289,15 @@ mod tests {
             format!("{} is being built by another process (the app, or another asm), which still held it after 0.3 s; run again when it is done, or use another index with --db / ASM_DB", path.display())
         );
         assert!(!Indexer::has_scanned(&db).unwrap());
+        assert_eq!(busy_timeout_ms(&db), 2000, "the longer wait was for the scan only");
 
         builder.execute_batch("COMMIT").unwrap();
         refresh(&indexer, &mut db, &path, wait).unwrap();
         assert!(Indexer::has_scanned(&db).unwrap(), "the next command builds it");
+        assert_eq!(busy_timeout_ms(&db), 2000, "the longer wait was for the scan only");
+    }
+
+    fn busy_timeout_ms(db: &Db) -> i64 {
+        db.conn().query_row("PRAGMA busy_timeout", [], |r| r.get(0)).unwrap()
     }
 }

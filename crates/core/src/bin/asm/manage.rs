@@ -44,9 +44,10 @@ impl App {
     }
 
     /// Unlike the other commands, `index` fails when the app holds the write lock: writing the
-    /// index is all it is for.
+    /// index is all it is for. It waits for another process's build like they do, though, except
+    /// with `--rebuild`, which would drop that build.
     pub(crate) fn index(&mut self, rebuild: bool) -> Result<()> {
-        let mut db = self.open_db(false)?;
+        let mut db = self.open_index()?;
         let indexer = self.indexer()?;
         let stderr_tty = std::io::stderr().is_terminal();
         let mut progress = |p: &Progress| {
@@ -57,7 +58,10 @@ impl App {
                 }
             }
         };
-        let report = if rebuild { indexer.rebuild(&mut db, &mut progress)? } else { indexer.scan(&mut db, &mut progress)? };
+        let report = match rebuild {
+            true => indexer.rebuild(&mut db, &mut progress)?,
+            false => crate::scan_after_any_build(&indexer, &mut db, &self.db_path, crate::BUILD_TIMEOUT, &mut progress)?,
+        };
         let stats = db.stats()?;
         let stale = match report.files_stale {
             0 => String::new(),
@@ -85,7 +89,7 @@ impl App {
     }
 
     pub(crate) fn stats(&mut self) -> Result<()> {
-        let db = self.open_db(false)?;
+        let db = self.open_index()?;
         let s = db.stats()?;
         writeln!(self.out, "db: {}", self.db_path.display())?;
         writeln!(self.out, "sessions: {}", s.sessions)?;
