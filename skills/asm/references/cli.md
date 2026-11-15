@@ -61,9 +61,13 @@ Several `asm` commands may run at once (an agent often starts them in parallel) 
 each refresh writes a file only if no other one indexed it since it looked, so nothing is indexed
 twice.
 
-An index built by another version of `asm` or the app is rebuilt from scratch on first use. When
-that is needed while another process writes the index, the command fails (exit 1) and leaves the
-file alone; quit the app, or point `--db` / `ASM_DB` at another file.
+A new index (a new `--db` / `ASM_DB` path) is built by the first command that opens it, and an
+index built by another version of `asm` or the app is rebuilt from scratch on first use. Commands
+started at the same moment build it once: the others wait for that build and use it. When a build
+is needed while another process keeps the index locked for more than about 2 seconds, the command
+fails (exit 1), says why the index needs building, and leaves the file alone; wait for that
+process, quit the app, or point `--db` / `ASM_DB` at another file. Only a file that is not an
+index at all (not an SQLite database, or a damaged one) is deleted and built again.
 
 ### Time range
 

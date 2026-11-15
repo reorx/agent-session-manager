@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, TransactionBehavior, params};
 
 use crate::model::{MessageRow, ModelUsage, Role, SessionSummary, Source, TextKind, Tokens, UsageRow};
 
@@ -23,12 +23,22 @@ pub struct Db {
 /// True when `error` comes from SQLite finding the database locked by another connection
 /// (`SQLITE_BUSY` / `SQLITE_LOCKED`), e.g. the CLI scanning while the app writes the index.
 pub fn is_busy(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<rusqlite::Error>()
-            .and_then(rusqlite::Error::sqlite_error_code)
-            .is_some_and(|code| matches!(code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked))
-    })
+    has_sqlite_code(error, busy_code)
+}
+
+fn busy_code(code: ErrorCode) -> bool {
+    matches!(code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+}
+
+/// The file is not an SQLite database, or a damaged one.
+fn is_corrupt(error: &anyhow::Error) -> bool {
+    has_sqlite_code(error, |code| matches!(code, ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt))
+}
+
+fn has_sqlite_code(error: &anyhow::Error, matches: impl Fn(ErrorCode) -> bool) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<rusqlite::Error>().and_then(rusqlite::Error::sqlite_error_code).is_some_and(&matches))
 }
 
 /// Per-file bookkeeping for incremental scans.
@@ -84,6 +94,15 @@ pub struct ListFilter {
     pub order: Order,
 }
 
+/// What `stats` counts as messages: no thinking rows, no user rows without text (records with only
+/// images), as before text kinds were indexed. The expression is the one the index
+/// `messages_counted` (schema.sql) stores, written the same way, so counting searches that index
+/// only: `stats` runs before the app reports a finished scan, and user rows can carry long text in
+/// overflow pages. A partial index with this condition is not enough: SQLite would still read the
+/// rows to test it again.
+const COUNT_MESSAGES: &str =
+    "SELECT count(*) FROM messages WHERE (kind <> 'thinking' AND NOT (role = 'user' AND text = '')) = 1";
+
 const SESSION_COLUMNS: &str = "s.id, s.id_known, p.encoded_dir, p.path, s.file_path, s.source, s.transcript_missing, \
      s.title, s.title_rank, s.first_prompt, s.last_prompt, s.last_message, s.started_at, s.updated_at, \
      s.git_branch, s.cwd, s.cc_version, s.entrypoint, s.permission_mode, s.is_background, \
@@ -93,9 +112,11 @@ const SESSION_COLUMNS: &str = "s.id, s.id_known, p.encoded_dir, p.path, s.file_p
      s.context_tokens, s.context_peak, s.context_model, s.favorite";
 
 impl Db {
-    /// Open (or create) the index at `path`. Unreadable files are deleted and recreated; an old
-    /// schema version is dropped, so callers must rescan afterwards. A file that needs either
-    /// while another connection holds its lock is left alone: the open fails as busy.
+    /// Open (or create) the index at `path`. A file that is not an SQLite database, or a damaged
+    /// one, is deleted and recreated; an index of another schema version is emptied and rebuilt,
+    /// so callers must rescan afterwards. Connections that open an index needing a build at the
+    /// same time build it once: the first to take the write lock builds it, the others wait and
+    /// find it built. One that waits longer than the busy timeout fails as busy and changes nothing.
     pub fn open(path: &Path) -> Result<Db> {
         Self::open_with(path, DEFAULT_BUSY_TIMEOUT)
     }
@@ -107,17 +128,13 @@ impl Db {
             std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
         match Self::open_checked(path, busy_timeout) {
-            Ok(db) => Ok(db),
-            // Another process has the file open and is writing it (the app, another `asm`):
-            // deleting it would pull it out from under that process.
-            Err(e) if is_busy(&e) => Err(e.context(format!(
-                "{} needs rebuilding, but another connection is writing it",
-                path.display()
-            ))),
-            Err(_) => {
+            // Nobody can use such a file. Every other failure (another process holding the lock,
+            // a full disk, permissions) leaves the file alone: another process may be using it.
+            Err(e) if is_corrupt(&e) => {
                 remove_db_files(path);
                 Self::open_checked(path, busy_timeout)
             }
+            result => result,
         }
     }
 
@@ -150,15 +167,30 @@ impl Db {
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         conn.busy_timeout(busy_timeout)?;
         let mut db = Db { conn, path: Some(path.to_path_buf()) };
+        db.use_wal(busy_timeout).with_context(|| format!("{}: another connection kept it locked", path.display()))?;
         db.configure()?;
         db.ensure_schema()?;
         Ok(db)
     }
 
+    /// Switch the file to WAL (nothing to do once it is). Connections opening a new file at the
+    /// same moment all try to; SQLite fails those that lose as busy at once instead of waiting
+    /// (they would deadlock), so they wait here, as long as the busy timeout.
+    fn use_wal(&self, busy_timeout: std::time::Duration) -> Result<()> {
+        let started = std::time::Instant::now();
+        loop {
+            match self.conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0)) {
+                Err(e) if e.sqlite_error_code().is_some_and(busy_code) && started.elapsed() < busy_timeout => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                result => return Ok(result.map(drop)?),
+            }
+        }
+    }
+
     fn configure(&mut self) -> Result<()> {
         self.conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = NORMAL;
+            "PRAGMA synchronous = NORMAL;
              PRAGMA temp_store = MEMORY;
              PRAGMA mmap_size = 268435456;
              PRAGMA cache_size = -65536;
@@ -170,36 +202,26 @@ impl Db {
     /// Keep the index only if both its version and its schema are this build's. The version covers
     /// what the schema can't show (prices, parsing); comparing the schema catches a development
     /// build that stamped the current version on an older one.
+    ///
+    /// Several connections may find the index needs building at once (two `asm` started together
+    /// on a new index, or the app and `asm` after a schema change). The build happens in one
+    /// write transaction that looks again once it holds the lock, so the first one builds and the
+    /// others find its build instead of dropping it halfway.
     fn ensure_schema(&mut self) -> Result<()> {
-        let version: i32 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version == SCHEMA_VERSION && schema_of(&self.conn)? == expected_schema()? {
-            return Ok(());
-        }
-        self.reset_schema()
-    }
-
-    /// Drop every table and recreate the schema (used for version bumps and `rebuild`).
-    pub fn reset_schema(&mut self) -> Result<()> {
-        let names: Vec<(String, String)> = self
+        let Some(why) = schema_mismatch(&self.conn)? else { return Ok(()) };
+        let path = self.path.as_deref().map_or_else(|| ":memory:".into(), |p| p.display().to_string());
+        // dropping tables with foreign keys on deletes their rows one by one; the pragma is a
+        // no-op inside a transaction
+        self.conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+        let tx = self
             .conn
-            .prepare("SELECT type, name FROM sqlite_master WHERE type IN ('table', 'view', 'trigger') AND name NOT LIKE 'sqlite_%'")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<std::result::Result<_, _>>()?;
-        let mut drop = String::from("PRAGMA foreign_keys = OFF;");
-        for (kind, name) in names.iter().filter(|(k, _)| k == "trigger") {
-            drop.push_str(&format!("DROP {kind} IF EXISTS \"{name}\";"));
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .with_context(|| format!("{path} {why}, but another connection is writing it"))?;
+        if schema_mismatch(&tx)?.is_some() {
+            reset_schema(&tx)?;
         }
-        // the FTS virtual table must go before its content table
-        for (kind, name) in names.iter().filter(|(k, n)| k != "trigger" && n == "messages_fts") {
-            drop.push_str(&format!("DROP {kind} IF EXISTS \"{name}\";"));
-        }
-        for (kind, name) in names.iter().filter(|(k, n)| k != "trigger" && n != "messages_fts" && !n.starts_with("messages_fts_")) {
-            drop.push_str(&format!("DROP {kind} IF EXISTS \"{name}\";"));
-        }
-        drop.push_str("PRAGMA foreign_keys = ON;");
-        self.conn.execute_batch(&drop)?;
-        self.conn.execute_batch(SCHEMA)?;
-        self.conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+        tx.commit()?;
+        self.conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(())
     }
 
@@ -701,7 +723,7 @@ impl Db {
         Ok(IndexStats {
             sessions: count("SELECT count(*) FROM sessions")?,
             history_only: count("SELECT count(*) FROM sessions WHERE source = 'history' OR transcript_missing = 1")?,
-            messages: count("SELECT count(*) FROM messages WHERE kind <> 'thinking' AND NOT (role = 'user' AND text = '')")?,
+            messages: count(COUNT_MESSAGES)?,
             projects: count("SELECT count(*) FROM projects")?,
             files: count("SELECT count(*) FROM index_state")?,
             db_bytes,
@@ -710,6 +732,45 @@ impl Db {
 }
 
 type SchemaEntry = (String, String, Option<String>);
+
+/// Why the index has to be built or rebuilt, or `None` when it is this build's.
+fn schema_mismatch(conn: &Connection) -> Result<Option<String>> {
+    let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    let schema = schema_of(conn)?;
+    Ok(if version == SCHEMA_VERSION && schema == expected_schema()? {
+        None
+    } else if version == 0 && schema.is_empty() {
+        Some("is a new index and needs building".into())
+    } else if version != SCHEMA_VERSION {
+        Some(format!("was built with schema version {version} (this build uses {SCHEMA_VERSION}) and needs rebuilding"))
+    } else {
+        Some("has another schema than this build and needs rebuilding".into())
+    })
+}
+
+/// Drop every table and create this build's schema, stamped with its version. Run inside a
+/// write transaction with foreign keys off (see `ensure_schema`).
+fn reset_schema(conn: &Connection) -> Result<()> {
+    let names: Vec<(String, String)> = conn
+        .prepare("SELECT type, name FROM sqlite_master WHERE type IN ('table', 'view', 'trigger') AND name NOT LIKE 'sqlite_%'")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    let mut drop = String::new();
+    for (kind, name) in names.iter().filter(|(k, _)| k == "trigger") {
+        drop.push_str(&format!("DROP {kind} IF EXISTS \"{name}\";"));
+    }
+    // the FTS virtual table must go before its content table
+    for (kind, name) in names.iter().filter(|(k, n)| k != "trigger" && n == "messages_fts") {
+        drop.push_str(&format!("DROP {kind} IF EXISTS \"{name}\";"));
+    }
+    for (kind, name) in names.iter().filter(|(k, n)| k != "trigger" && n != "messages_fts" && !n.starts_with("messages_fts_")) {
+        drop.push_str(&format!("DROP {kind} IF EXISTS \"{name}\";"));
+    }
+    conn.execute_batch(&drop)?;
+    conn.execute_batch(SCHEMA)?;
+    conn.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
+    Ok(())
+}
 
 /// Every table, index and trigger with the statement SQLite kept for it.
 fn schema_of(conn: &Connection) -> Result<Vec<SchemaEntry>> {
@@ -816,5 +877,24 @@ fn remove_db_files(path: &Path) {
         let mut p = path.as_os_str().to_owned();
         p.push(suffix);
         let _ = std::fs::remove_file(PathBuf::from(p));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_message_count_reads_its_own_index_and_never_the_rows() {
+        let db = Db::open_in_memory().unwrap();
+        let plan: Vec<String> = db
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {COUNT_MESSAGES}"))
+            .unwrap()
+            .query_map([], |r| r.get(3))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(plan, ["SEARCH messages USING COVERING INDEX messages_counted (<expr>=?)"]);
     }
 }

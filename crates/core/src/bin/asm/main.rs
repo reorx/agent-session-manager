@@ -170,13 +170,14 @@ impl App {
     }
 
     /// The index, first brought up to date with the files on disk when `scan` is set. An index
-    /// that needs rebuilding while the app writes it cannot be used at all: that is an error.
+    /// that needs building while another process writes it cannot be used at all: that is an
+    /// error, which says why it needs building (only the outermost message is printed).
     fn open_db(&self, scan: bool) -> Result<Db> {
         let mut db = Db::open_with(&self.db_path, BUSY_TIMEOUT).map_err(|e| match is_busy(&e) {
-            true => e.context(format!(
-                "{} was built by another version and needs rebuilding, but another process (the app?) is writing it; quit it, or use another index with --db / ASM_DB",
-                self.db_path.display()
-            )),
+            true => {
+                let why = e.to_string();
+                e.context(format!("{why} (the app, or another asm); wait for it, quit it, or use another index with --db / ASM_DB"))
+            }
             false => e,
         })?;
         if scan {

@@ -173,6 +173,138 @@ fn an_index_that_needs_rebuilding_while_another_connection_writes_it_is_left_alo
     assert!(db.list_sessions(&ListFilter::default()).unwrap().is_empty(), "once free, it is rebuilt (empty, to be rescanned)");
 }
 
+/// Open `path` from `n` threads at the same moment; each one leaves a mark in `meta` through
+/// its own connection. Returns each thread's error, if any.
+fn open_at_once(path: &std::path::Path, n: usize) -> Vec<Result<(), String>> {
+    let barrier = std::sync::Barrier::new(n);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = (0..n)
+            .map(|i| {
+                let barrier = &barrier;
+                s.spawn(move || {
+                    barrier.wait();
+                    let db = Db::open(path).map_err(|e| format!("{e:#}"))?;
+                    db.set_meta(&format!("opened-{i}"), "yes").map_err(|e| format!("{e:#}"))
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    })
+}
+
+/// Several processes open an index that has to be built at the same time: an agent running
+/// `asm` in parallel against a new `ASM_DB`, or the app and `asm` after a schema change. One of
+/// them builds it, the others wait and use what it built. None may drop another's tables or
+/// delete the file under it, which leaves that one writing into a file nobody reads.
+#[test]
+fn connections_opening_an_index_that_needs_building_at_once_all_use_one_build() {
+    const ROUNDS: usize = 30;
+    const CONNECTIONS: usize = 4;
+    for round in 0..ROUNDS {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("index.sqlite");
+        let outdated = round % 2 == 1;
+        if outdated {
+            Db::open(&path).unwrap().set_user_version_for_test(SCHEMA_VERSION - 1);
+        }
+        let results = open_at_once(&path, CONNECTIONS);
+        let what = if outdated { "an outdated index" } else { "a new index" };
+        for (i, result) in results.iter().enumerate() {
+            assert!(result.is_ok(), "round {round}, {what}: connection {i} failed: {result:?}");
+        }
+        let look = Db::open(&path).unwrap();
+        for i in 0..CONNECTIONS {
+            assert_eq!(look.meta(&format!("opened-{i}")).unwrap().as_deref(), Some("yes"), "round {round}, {what}: connection {i} wrote into the index everyone else uses");
+        }
+        let version: i32 = rusqlite::Connection::open(&path).unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+}
+
+/// Two `asm` started at once against a new index: both build, scan and write it. Between them
+/// every file is written once, and the index ends up as one scan would leave it.
+#[test]
+fn two_cold_scans_of_a_new_index_at_once_leave_it_as_one_scan_would() {
+    const ROUNDS: usize = 10;
+    let sb = sandbox();
+    let mut fresh = Db::open(&sb.tmp.path().join("fresh.sqlite")).unwrap();
+    scan(&sb, &mut fresh);
+    for round in 0..ROUNDS {
+        let path = sb.tmp.path().join(format!("cold-{round}.sqlite"));
+        let barrier = std::sync::Barrier::new(2);
+        let results: Vec<Result<agent_session_core::index::ScanReport, String>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..2)
+                .map(|i| {
+                    let (barrier, path, claude) = (&barrier, &path, sb.claude.clone());
+                    s.spawn(move || {
+                        barrier.wait();
+                        let mut db = Db::open(path).map_err(|e| format!("{e:#}"))?;
+                        let report = Indexer::new(claude, None).scan(&mut db, &mut |_| {}).map_err(|e| format!("{e:#}"))?;
+                        db.set_meta(&format!("scanned-{i}"), "yes").map_err(|e| format!("{e:#}"))?;
+                        Ok(report)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let reports: Vec<_> = results.into_iter().enumerate().map(|(i, r)| r.unwrap_or_else(|e| panic!("round {round}: scan {i} failed: {e}"))).collect();
+        let written: usize = reports.iter().map(|r| r.files_parsed + r.files_appended + r.files_rebuilt).sum();
+        assert_eq!(written, 4, "round {round}: each file written by one of them: {reports:?}");
+
+        let look = Db::open(&path).unwrap();
+        for i in 0..2 {
+            assert_eq!(look.meta(&format!("scanned-{i}")).unwrap().as_deref(), Some("yes"), "round {round}: scan {i} wrote into the index everyone else uses");
+        }
+        assert_eq!(look.list_sessions(&ListFilter::default()).unwrap().len(), fresh.list_sessions(&ListFilter::default()).unwrap().len());
+        for sid in [S1, S2, S3, S5] {
+            assert_eq!(look.messages(sid).unwrap(), fresh.messages(sid).unwrap(), "round {round}: {sid} indexed once");
+            let (got, want) = (look.session(sid).unwrap().unwrap(), fresh.session(sid).unwrap().unwrap());
+            assert_eq!((got.user_msg_count, got.cost_usd), (want.user_msg_count, want.cost_usd), "round {round}: {sid}");
+        }
+    }
+}
+
+/// A writer that finds no index state plans every file in full (`planned_from` is none). If
+/// another writer indexes the files first, after they grew, it leaves them further along than
+/// the first writer read them: session files and subagent files alike must be left as they are.
+#[test]
+fn new_files_and_subagents_another_writer_indexed_first_are_not_written_again() {
+    let sb = sandbox();
+    let mut a = Db::open(&sb.db_path()).unwrap();
+    let transcript = sb.transcript(ALPHA, S2);
+    let subagent = subagent_path(&sb);
+    let indexer = Indexer::new(sb.claude.clone(), None);
+    let mut b = Db::open(&sb.db_path()).unwrap();
+    let mut b_scanned = false;
+    let report = indexer.scan(&mut a, &mut |p| {
+        if p.phase == "scanning" && !b_scanned {
+            b_scanned = true;
+            // the files grow after `a` looked at them, and `b` reads them in full
+            append(&transcript, concat!(
+                r#"{"type":"user","message":{"role":"user","content":"And now in French"},"uuid":"u-new","timestamp":"2026-09-06T00:00:00.000Z","sessionId":"22222222-aaaa-4bbb-8ccc-000000000002"}"#, "\n",
+            ));
+            set_mtime(&transcript, MTIME_S2 + 60_000);
+            append(&subagent, &reply("msg-late", "claude-opus-5", 1_000_000, 0, true));
+            let by_b = indexer.scan(&mut b, &mut |_| {}).unwrap();
+            assert_eq!((by_b.files_parsed, by_b.subagents_parsed), (4, 1));
+        }
+    }).unwrap();
+    assert!(b_scanned);
+    assert_eq!((report.files_parsed, report.files_stale, report.subagents_parsed), (0, 4, 0), "`b` had indexed them all");
+
+    let mut fresh = Db::open(&sb.tmp.path().join("fresh.sqlite")).unwrap();
+    scan(&sb, &mut fresh);
+    for sid in [S1, S2, S3, S5] {
+        assert_eq!(a.messages(sid).unwrap(), fresh.messages(sid).unwrap(), "{sid}");
+        let (got, want) = (a.session(sid).unwrap().unwrap(), fresh.session(sid).unwrap().unwrap());
+        assert_eq!((got.user_msg_count, got.cost_usd), (want.user_msg_count, want.cost_usd), "{sid}, the subagent's late reply counted in");
+    }
+    assert_eq!(a.index_state(&transcript).unwrap(), fresh.index_state(&transcript).unwrap());
+    assert_eq!(a.index_state(&subagent).unwrap(), fresh.index_state(&subagent).unwrap());
+    let again = scan(&sb, &mut a);
+    assert_eq!((again.files_unchanged, again.subagents_parsed), (4, 0), "nothing left over for the next scan");
+}
+
 /// Two processes refresh the same index at once (the app and `asm`, or two `asm` run in
 /// parallel by an agent) while a transcript grows. `b` scans and commits after `a` has made its
 /// plan but before `a` writes: `a` must not write the same appended lines a second time.

@@ -87,6 +87,9 @@ CREATE TABLE messages (
   output_tokens INTEGER
 );
 CREATE INDEX messages_session_ts ON messages(session_id, byte_offset);
+-- whether `Db::stats` counts the row as a message (its COUNT_MESSAGES asks for the same
+-- expression = 1): counting reads this index only, not the rows and their text
+CREATE INDEX messages_counted ON messages((kind <> 'thinking' AND NOT (role = 'user' AND text = '')));
 
 CREATE VIRTUAL TABLE messages_fts USING fts5(
   text,
