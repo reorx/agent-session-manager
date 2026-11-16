@@ -35,9 +35,15 @@ impl SessionKind {
     pub fn of(s: &SessionSummary) -> SessionKind {
         if s.history_only() {
             SessionKind::History
-        } else if s.is_background {
+        } else {
+            Self::from_metadata(s.is_background, s.entrypoint.as_deref())
+        }
+    }
+
+    pub fn from_metadata(is_background: bool, entrypoint: Option<&str>) -> Self {
+        if is_background {
             SessionKind::Background
-        } else if s.entrypoint.as_deref() == Some("sdk-cli") {
+        } else if entrypoint == Some("sdk-cli") {
             SessionKind::Sdk
         } else {
             SessionKind::Cli

@@ -64,3 +64,140 @@ impl UsageData {
         total
     }
 }
+
+const HOUR: i64 = 3_600_000;
+use chrono::Datelike;
+use serde::{Serialize, Deserialize};
+use crate::{model::LedgerSession, session::SessionKind};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum UsageRange { #[default] Today, Yesterday, Days7, Days30, ThisMonth, LastMonth, Custom, Day }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Metric { #[default] Cost, In, Out, HitRate }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Span { pub from_ms: i64, pub until_ms: i64 }
+impl Span {
+    fn contains_hour(self, hour: i64) -> bool {
+        (self.from_ms.div_euclid(HOUR)..self.until_ms.div_euclid(HOUR)).contains(&hour)
+    }
+}
+
+pub fn range_span<T: TimeZone>(range: UsageRange, today: NaiveDate, custom: Option<(NaiveDate,NaiveDate)>, day: Option<NaiveDate>, tz: &T) -> Span {
+    let month=today.with_day(1).unwrap();
+    let (a,b)=match range {
+        UsageRange::Today => (today,today),
+        UsageRange::Yesterday => (today-Duration::days(1),today-Duration::days(1)),
+        UsageRange::Days7 => (today-Duration::days(6),today),
+        UsageRange::Days30 => (today-Duration::days(29),today),
+        UsageRange::ThisMonth => (month,today),
+        UsageRange::LastMonth => ((month-Duration::days(1)).with_day(1).unwrap(),month-Duration::days(1)),
+        UsageRange::Custom => custom.unwrap_or((month,today)),
+        UsageRange::Day => (day.unwrap_or(today),day.unwrap_or(today)),
+    };
+    Span{from_ms:day_start_ms(a.min(b),tz),until_ms:day_start_ms(a.max(b)+Duration::days(1),tz)}
+}
+
+pub fn previous_span<T: TimeZone>(range: UsageRange, span: Span, now_ms: i64, tz: &T) -> Option<Span> {
+    if span.until_ms<=span.from_ms { return None; }
+    let first=usage_day(span.from_ms,tz);
+    let end=usage_day(span.until_ms,tz);
+    let days=(end-first).num_days();
+    let previous_end=first;
+    let previous_first=if matches!(range,UsageRange::ThisMonth|UsageRange::LastMonth) {
+        (first.with_day(1).unwrap()-Duration::days(1)).with_day(1).unwrap()
+    } else { first-Duration::days(days) };
+    let today=usage_day(now_ms,tz);
+    let partial=range!=UsageRange::Day && first<=today && today<end;
+    let until_ms=if partial {
+        let last=(previous_first+Duration::days(days-1)).min(previous_end-Duration::days(1));
+        let elapsed=now_ms-day_start_ms(today,tz);
+        let boundary=day_start_ms(last,tz)+elapsed;
+        ((boundary.div_euclid(HOUR)+i64::from(boundary.rem_euclid(HOUR)!=0))*HOUR).min(day_start_ms(last+Duration::days(1),tz))
+    } else { day_start_ms(previous_end,tz) };
+    Some(Span{from_ms:day_start_ms(previous_first,tz),until_ms})
+}
+
+pub fn hour_slots<T: TimeZone>(day: NaiveDate,tz: &T) -> Vec<Span> {
+    let end=day_start_ms(day+Duration::days(1),tz);
+    (day_start_ms(day,tz)..end).step_by(HOUR as usize).map(|start|Span{from_ms:start,until_ms:(start+HOUR).min(end)}).collect()
+}
+pub fn day_slots<T: TimeZone>(span: Span,tz: &T) -> Vec<(NaiveDate,Span)> {
+    let mut result=Vec::new(); let mut day=usage_day(span.from_ms,tz);
+    while day_start_ms(day,tz)<span.until_ms {
+        let next=day+Duration::days(1);
+        result.push((day,Span{from_ms:day_start_ms(day,tz).max(span.from_ms),until_ms:day_start_ms(next,tz).min(span.until_ms)})); day=next;
+    }
+    result
+}
+pub fn moving_average(values: &[f64],window: usize) -> Vec<f64> {
+    if window==0 {return Vec::new();}
+    let mut sum=0.; values.iter().enumerate().map(|(i,v)| {sum+=v; if i>=window {sum-=values[i-window];} sum/((i+1).min(window) as f64)}).collect()
+}
+pub fn model_slot(model: &str) -> usize {
+    match pricing::normalize(model) { "claude-opus-5-5"=>0,"claude-sonnet-5-5"=>1,"claude-fable-5-2"=>2,"claude-haiku-5-5"=>3,_=>4 }
+}
+#[derive(Clone, Debug)]
+pub struct UsageFilter { pub project: Option<String>, pub cli: bool, pub sdk: bool, pub bg: bool, pub model: Option<String> }
+impl Default for UsageFilter { fn default()->Self {Self{project:None,cli:true,sdk:true,bg:true,model:None}} }
+impl UsageFilter {
+    fn accepts(&self,s: &LedgerSession)->bool {
+        self.project.as_ref().is_none_or(|p|p==&s.project_key) && match SessionKind::from_metadata(s.is_background,s.entrypoint.as_deref()) {SessionKind::Cli=>self.cli,SessionKind::Sdk=>self.sdk,SessionKind::Background=>self.bg,SessionKind::History=>false}
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct Summary {pub totals:Totals,pub by_model:Vec<(String,Totals)>,pub by_project:Vec<ProjectUsage>,pub by_session:Vec<SessionTotal>,pub sessions:usize,pub projects:usize}
+#[derive(Clone, Debug)]
+pub struct ProjectUsage {pub key:String,pub name:String,pub totals:Totals,pub sessions:usize}
+#[derive(Clone, Debug)]
+pub struct SessionTotal {pub id:String,pub title:String,pub project_name:String,pub totals:Totals}
+#[derive(Clone, Debug, Default)]
+pub struct SlotTotals {pub totals:Totals,pub by_model:[Totals;5]}
+#[derive(Clone, Debug)]
+pub struct ProjectEntry {pub key:String,pub name:String,pub sessions:usize}
+impl Totals {
+    pub fn add(&mut self,other:&Self) {self.responses+=other.responses;self.tokens.add(&other.tokens);self.cost.add(&other.cost);self.unpriced_responses+=other.unpriced_responses;}
+}
+fn project_name(s:&LedgerSession)->String {
+    s.project_path.as_deref().and_then(|p|std::path::Path::new(p).file_name()).and_then(|p|p.to_str()).unwrap_or(&s.project_key).to_string()
+}
+impl UsageData {
+    fn visit(&self,filter:&UsageFilter,price:impl Fn(&str)->Option<ModelPrice>,mut visit:impl FnMut(&LedgerSession,&crate::model::HourlyUsage,Totals)) {
+        for s in self.sessions.values().filter(|s|filter.accepts(&s.session)) {
+            for h in &s.hours {
+                if filter.model.as_deref().is_some_and(|m|pricing::normalize(m)!=pricing::normalize(&h.model)) {continue;}
+                let p=price(&h.model);
+                let t=Totals{responses:h.responses,tokens:h.tokens,cost:p.map(|p|pricing::price_tokens(&p,&h.tokens,h.fast,h.long_prompt)).unwrap_or_default(),unpriced_responses:if p.is_none(){h.responses}else{0}};
+                visit(&s.session,h,t);
+            }
+        }
+    }
+    pub fn summary(&self,span:Span,filter:&UsageFilter)->Summary {self.summary_with(span,filter,pricing::price)}
+    pub fn summary_with(&self,span:Span,filter:&UsageFilter,price:impl Fn(&str)->Option<ModelPrice>)->Summary {
+        let mut result=Summary::default(); let mut models=BTreeMap::<String,Totals>::new(); let mut projects=BTreeMap::<String,ProjectUsage>::new(); let mut sessions=BTreeMap::<String,SessionTotal>::new();
+        self.visit(filter,price,|s,h,t| {
+            if !span.contains_hour(h.hour) || h.responses==0 {return;}
+            result.totals.add(&t); models.entry(pricing::normalize(&h.model).into()).or_default().add(&t);
+            let fresh=!sessions.contains_key(&s.id);
+            sessions.entry(s.id.clone()).or_insert_with(||SessionTotal{id:s.id.clone(),title:s.title.clone(),project_name:project_name(s),totals:Totals::default()}).totals.add(&t);
+            let p=projects.entry(s.project_key.clone()).or_insert_with(||ProjectUsage{key:s.project_key.clone(),name:project_name(s),totals:Totals::default(),sessions:0}); p.totals.add(&t); p.sessions+=usize::from(fresh);
+        });
+        result.by_model=models.into_iter().collect();result.by_project=projects.into_values().collect();result.by_session=sessions.into_values().collect();
+        result.by_model.sort_by(|a,b|b.1.cost.total().total_cmp(&a.1.cost.total()));
+        result.by_project.sort_by(|a,b|b.totals.cost.total().total_cmp(&a.totals.cost.total()));
+        result.by_session.sort_by(|a,b|b.totals.cost.total().total_cmp(&a.totals.cost.total()));
+        result.sessions=result.by_session.len();result.projects=result.by_project.len();result
+    }
+    pub fn series(&self,slots:&[Span],filter:&UsageFilter)->Vec<SlotTotals> {self.series_with(slots,filter,pricing::price)}
+    pub fn series_with(&self,slots:&[Span],filter:&UsageFilter,price:impl Fn(&str)->Option<ModelPrice>)->Vec<SlotTotals> {
+        let mut result=vec![SlotTotals::default();slots.len()];
+        self.visit(filter,price,|_,h,t| {for (s,r) in slots.iter().zip(&mut result) {if s.contains_hour(h.hour) {r.totals.add(&t);r.by_model[model_slot(&h.model)].add(&t);}}});result
+    }
+    pub fn project_entries(&self)->Vec<ProjectEntry> {
+        let mut entries=BTreeMap::<String,ProjectEntry>::new();
+        for s in self.sessions.values().filter(|s|s.hours.iter().any(|h|h.responses>0)) {entries.entry(s.session.project_key.clone()).or_insert_with(||ProjectEntry{key:s.session.project_key.clone(),name:project_name(&s.session),sessions:0}).sessions+=1;}
+        entries.into_values().collect()
+    }
+    pub fn model_entries(&self)->Vec<(String,u64)> {
+        let mut entries=BTreeMap::new(); for h in self.sessions.values().flat_map(|s|&s.hours).filter(|h|h.responses>0) {*entries.entry(pricing::normalize(&h.model).to_string()).or_default()+=h.responses;} entries.into_iter().collect()
+    }
+}
