@@ -107,8 +107,8 @@ usage-ledger ──┬── menubar-resident
 - [x] 1. [usage-ledger](usage-ledger.md)
 - [x] 2. [menubar-resident](menubar-resident.md)
 - [x] 3. [usage-view](usage-view.md)
-- [ ] 4. [usage-drilldown](usage-drilldown.md)
-- [ ] 5. 跨期验收（上面 PRD 的验收标准），证据归档到 `tmp/2026-11-12-usage-stats/`
+- [x] 4. [usage-drilldown](usage-drilldown.md)
+- [x] 5. 跨期验收（上面 PRD 的验收标准），证据归档到 `tmp/2026-11-12-usage-stats/`
 
 ### 各期都要更新的文档
 

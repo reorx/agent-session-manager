@@ -6,7 +6,9 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格列出本机所有 Cla
 
 M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监听、subagent 查看、设置页；打包和图标已随 1.0 做完），定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3（开发任务的总入口，需求 R1–R13 也在里面；§2 架构未随实现更新）。各功能的实现状态在 `kb/docs/product-prd.md` §2，未解决的问题在 `kb/known-issues.md`。
 
-用量统计（`kb/plans/2026-11-16-usage-stats/`，四期）进行中：第 1 期用量账本（含状态栏 Today、4:00 分日、自动扫描，真实账本已从索引备份导入）、第 2 期常驻菜单栏、第 3 期 Usage 视图已完成（2026-11-16），第 4 期从 Usage 下钻进行中。
+用量统计（`kb/plans/2026-11-16-usage-stats/`，四期）已完成（2026-11-17）：用量账本（含状态栏 Today、4:00 分日、自动扫描，真实账本已从索引备份导入）、常驻菜单栏、Usage 视图、从 Usage 下钻回会话表。
+
+接下来：asm skill 与 CLI（`kb/plans/2026-11-15-asm-skill-and-cli/`，P1 代码已完成，暂停在 skill 文档与验收，记录在 `tmp/2026-11-14-asm-skill-cli/`）和缓存失效判定（`kb/plans/2026-11-16-cache-break-accuracy.md`，第 1 步参考脚本已完成，记录在 `tmp/2026-11-16-cache-break-accuracy/`），顺序见 asm 记录的 `status.md`。
 
 ## 结构
 
@@ -23,6 +25,7 @@ M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监�
 - 自动扫描：应用开着时窗口激活和每 10 分钟（Usage 视图开着时 60 秒）各触发一次安静的增量扫描（30 秒节流）。安静的扫描不发进度，写过的行等事务提交后才发，遇到索引或账本被锁只发 `ScanSkipped`；菜单发起的扫描照旧流式更新
 - 常驻菜单栏（`resident.rs`，NSStatusItem + NSMenu）：关窗（`⌘W`、红色按钮）只隐藏窗口并切到 Accessory，Dock 图标消失，应用留在菜单栏；第一次关窗弹说明框（`state.json` 的 `resident_notice_shown`）。`⌘Q` 或菜单 Quit 才退出，Open Sessions / Open Usage、Finder 重开把窗口带回前台。macOS 26 上用户把状态项拖出菜单栏，系统会关掉「系统设置 › 菜单栏 › 允许在菜单栏中显示」里的本应用，之后启动也不显示
 - Usage 视图：`usage_view.rs`（`UsageSnapshot::build` 在主线程按范围、过滤、用量日现算，`render` 只取预格式化内容）、`usage_chart.rs`（自定义 `Plot`，绘制、悬停、点击共用 `slot_at`）。`⌃1` / `⌃2`、View 菜单、状态栏 Today 切换视图；Usage 下不重跑搜索，切回 Sessions 时按 `search_stale` 重搜。Project / Kind / Model 过滤两个视图共用，Model 存 `pricing::normalize` 之后的名字（Usage 按调用比，Sessions 按 session 的主模型比）
+- 下钻（`drilldown.rs`）：在 Usage 里点 session 回会话表并选中，被过滤挡住时只放宽挡住它的那几项（`Filter::relaxed_for`）；项目行或 Sessions 卡的 `↗` 加 Active 过滤，即这段时间有调用的 session。这个集合放在表格 delegate 上，不进 `state.json`；Active 下 Model 按调用比（`active_ids_for`）。跳转时搜索结果还没确定、或有待重跑的搜索（`search_stale`），就清空搜索（`keeps_search`）。Usage 里的行内按钮要 `stop_propagation`。通知在窗口右下角
 - 会话操作（复制 resume 命令 / ID、Finder、导出 TXT、收藏等）都在 `actions.rs`，可用性由纯函数按行的事实算出；标题行按钮、右键菜单、`⌘C` / `⇧⌘C` 派发同一组 action
 - History 行读 `history.jsonl` 显示 prompt 卡片，不参与搜索（与 Python 脚本一致）
 - 费用由 core 按 `message.usage` × `pricing.rs` 价格表自算，按 `message.id` 去重，subagent 计入父 session；Claude Code 记录的 `cost-state` 只作对照
@@ -41,7 +44,7 @@ M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监�
 - 测试：`cargo test -p agent-session-core`、`cargo test -p agent-session-manager`（纯逻辑，加上无界面窗口里的键盘测试）、`make test` 全跑
 - `make asm ARGS="…"` 跑 `asm` CLI，`make transcript-reader ARGS="SESSION_ID -o session.txt"` 导出精简 TXT；子命令和参数看 `--help`。改价格表或用量解析后跑一次 `asm cost --compare`（自算费用与 `cost-state` 的偏差）
 - `make parity`：在真实 `~/.claude` 上把 `asm` 与 Python 脚本（`~/Code/scripts/claude_session_search.py`，本项目的行为基准）逐字比对；改解析器、清理逻辑、`regex.rs` 或输出格式后必须跑。两边的列表顺序一致（开始时间降序，并列时按更新时间降序、再按 id），改排序要两边一起改（脚本的测试在它旁边的 `tests/test_claude_session_search.py`）。比对期间有 session 正在写入时 search 组偶尔失败，重跑即过
-- 截图：`make screenshot`、`screenshot-search`、`screenshot-detail`、`screenshot-cost` 由 app 的 autoplay 自己走流程；`screenshot-clicks` 用 cliclick 真点击，坐标写在 `scripts/screenshot-clicks.sh`，改布局后要校对。都跑在真实索引上，输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）。各脚本截哪些图、怎么用 `ASM_AUTOPLAY_*` 指定 session 和查询，见 `kb/docs/gpui-kit-guide.md`「脚本化交互与截图」。`make screenshot-usage`（状态栏 Today、文件驱动的扫描 / 重建）例外：必须设 `ASM_DB`、`ASM_CLAUDE_DIR` 指向副本。`make screenshot-usage-view`（Usage 视图导览：范围、按小时 / 按天、悬停、点进某天、窄窗口、空状态）要设 `ASM_DB`，账本放在它旁边。`make screenshot-resident`（菜单栏常驻：关窗、重开、菜单；`RESIDENT_CLICK=1` 改用真点击）和它的行为测试 `make test-screenshot-resident`：验收以退出码为准，不看日志里的 passed
+- 截图：`make screenshot`、`screenshot-search`、`screenshot-detail`、`screenshot-cost` 由 app 的 autoplay 自己走流程；`screenshot-clicks` 用 cliclick 真点击，坐标写在 `scripts/screenshot-clicks.sh`，改布局后要校对。都跑在真实索引上，输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）。各脚本截哪些图、怎么用 `ASM_AUTOPLAY_*` 指定 session 和查询，见 `kb/docs/gpui-kit-guide.md`「脚本化交互与截图」。`make screenshot-usage`（状态栏 Today、文件驱动的扫描 / 重建）例外：必须设 `ASM_DB`、`ASM_CLAUDE_DIR` 指向副本。`make screenshot-usage-view`（Usage 视图导览，18 张：范围、按小时 / 按天、悬停、点进某天、窄窗口、空状态、两步下钻、会话表窄窗口）要设 `ASM_DB`，账本放在它旁边。`make screenshot-resident`（菜单栏常驻：关窗、重开、菜单；`RESIDENT_CLICK=1` 改用真点击）和它的行为测试 `make test-screenshot-resident`：验收以退出码为准，不看日志里的 passed
 - 量耗时：搜索用 `ASM_BENCH_DB=<索引副本> cargo test -p agent-session-manager real_index_timings -- --ignored --nocapture`（`ASM_BENCH_QUERIES`、`ASM_BENCH_REGEX` 可换查询）；详情打开速度看 app 日志的 `detail:` 行（read / build / first frame），量的时候要停在 Conversation tab，停在 Metadata 上首帧要等切回来才打点。不要用截图脚本日志里的耗时，刚唤醒屏幕后的数字可以偏高 4–8 倍
 - 构建产物在 `~/Library/Caches/cargo-target`（全局 cargo 配置），不在 `./target`；`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒
 - 环境变量：`ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（默认 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`）、`ASM_STATE`（仅 app，默认为索引同目录的 `state.json`）、`ASM_FAVORITES_DIR`（覆盖共享配置中的收藏目录）、`ASM_TRASH_DIR`（取消收藏改用此目录，测试必设）、`ASM_USAGE_AUTOPLAY`（gate 目录，用文件驱动扫描 / 重建，见 gpui-kit-guide）、`ASM_USAGE_VIEW_AUTOPLAY`（Usage 视图导览）、`ASM_RESIDENT_AUTOPLAY`（菜单栏常驻流程）。验收时把 `ASM_DB` / `ASM_STATE` 指到 `tmp/`，可反复测冷启动而不动真实索引；账本跟着 `ASM_DB` 在同一目录，所以也不会动真实账本

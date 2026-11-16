@@ -148,13 +148,13 @@ Usage 视图告诉用户「这一天花了 $300，大头在某个项目的某几
 
 ### 实施步骤
 
-- [ ] 1. core `active_sessions`：先写测试，再实现
-- [ ] 2. app `model.rs`：`ActiveRange`、`Filter::relaxed_for` 的测试与实现
-- [ ] 3. app `table.rs`：`active_ids`、`shows`、`row_by_id` 的测试与实现
-- [ ] 4. `keyboard_tests.rs`：跳转、焦点、清除的用例；再实现 `reveal_session`、`show_active_sessions`、`clear_active`、`sync_active_ids`
-- [ ] 5. Usage 视图里的点击、`↗`、灰色的行；工具栏的标签
-- [ ] 6. autoplay 加步骤，截图验收
-- [ ] 7. 文档（`app-architecture.md`：搜索何时重跑的表加「活动集合变化」，焦点表加「从 Usage 跳转 → 表格」；`product-prd.md`）、commit
+- [x] 1. core `active_sessions`：先写测试，再实现
+- [x] 2. app `model.rs`：`ActiveRange`、`Filter::relaxed_for` 的测试与实现
+- [x] 3. app `table.rs`：`active_ids`、`shows`、`row_by_id` 的测试与实现
+- [x] 4. `keyboard_tests.rs`：跳转、焦点、清除的用例；再实现 `reveal_session`、`show_active_sessions`、`clear_active`、`sync_active_ids`
+- [x] 5. Usage 视图里的点击、`↗`、灰色的行；工具栏的标签
+- [x] 6. autoplay 加步骤，截图验收
+- [x] 7. 文档（`app-architecture.md`：搜索何时重跑的表加「活动集合变化」，焦点表加「从 Usage 跳转 → 表格」；`product-prd.md`）、commit
 
 ### 测试与验证
 
