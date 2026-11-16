@@ -1729,6 +1729,122 @@ fn the_usage_toolbar_wraps_in_a_narrow_window_instead_of_running_off_it(cx: &mut
     }
 }
 
+/// A wrapped Usage toolbar never ends a row with the line before Project (usage-p4-accept,
+/// problem 2: at 700 pt it stood alone after `Custom…`): it shows only between two controls on
+/// one row, and is not hidden where it has them.
+#[gpui_kit::test]
+fn the_usage_toolbar_s_separator_never_ends_a_row(cx: &mut TestAppContext) {
+    use agent_session_core::usage::UsageRange;
+    use gpui_kit::{VisualTestContext, px, size};
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    press(cx, &h, "ctrl-2");
+    let mut window = VisualTestContext::from_window(h.window, cx);
+    for (range, before) in [(UsageRange::Today, "toolbar-usage-custom"), (UsageRange::Custom, "toolbar-date-picker-usage")] {
+        h.app.update(&mut window, |app, cx| app.set_usage_range(range, cx));
+        let mut seen = (false, false);
+        for width in (700..=1500).step_by(10) {
+            window.simulate_resize(size(px(width as f32), px(800.)));
+            window.run_until_parked();
+            window.update(|window, _| window.refresh());
+            window.run_until_parked();
+            let row = |window: &mut VisualTestContext, selector: &'static str| window.debug_bounds(selector).unwrap_or_else(|| panic!("{selector}")).center().y;
+            let (sep, prev, project) = (row(&mut window, crate::toolbar::USAGE_SEPARATOR_SELECTOR), row(&mut window, before), row(&mut window, "toolbar-usage-project"));
+            let shown = h.app.read_with(&window, |app, _| app.usage_view.separator_shown.get());
+            let between = sep == prev && sep == project;
+            assert_eq!(shown, between, "{range:?} at {width} px: shown {shown}, rows {prev} | {sep} | {project}");
+            seen = (seen.0 || shown, seen.1 || !shown);
+        }
+        assert_eq!(seen, (true, true), "{range:?}: one row in a wide window, wrapped in a narrow one");
+    }
+}
+
+/// The cards' numbers stay on one line inside their cards (usage-p4-accept, problem 2: at
+/// 700 pt `$5,913.96` broke after `$5,913`); below 960 px the cards take two rows.
+#[gpui_kit::test]
+fn the_cards_numbers_keep_to_one_line_in_a_narrow_window(cx: &mut TestAppContext) {
+    use gpui_kit::{VisualTestContext, px, size};
+    let at = "2026-10-20T03:00:00Z";
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    // a five-figure day: ten characters, wider than a card of a 700 px window
+    let mut session = h.app.read_with(cx, |app, _| app.usage.sessions[S1].clone());
+    let hour = chrono::DateTime::parse_from_rfc3339(at).unwrap().timestamp_millis() / 3_600_000;
+    session.hours.push(agent_session_core::model::HourlyUsage {
+        hour,
+        model: "claude-opus-5".into(),
+        responses: 1,
+        tokens: agent_session_core::model::Tokens { output: 500_000_000, ..Default::default() },
+        ..Default::default()
+    });
+    let app = h.app.clone();
+    in_window(cx, &h, |window, cx| app.update(cx, |app, cx| app.on_store_events(vec![crate::store::StoreEvent::Usage { sessions: vec![session], full: false }], window, cx)));
+    let day = local_day(at);
+    usage_on(cx, &h, (day, day));
+    let cost = h.app.read_with(cx, |app, _| app.usage_view.snapshot.cards[0].value.to_string());
+    assert!(cost.len() >= 10, "{cost}");
+    let mut window = VisualTestContext::from_window(h.window, cx);
+    for width in [1440., 900., 700.] {
+        window.simulate_resize(size(px(width), px(800.)));
+        window.run_until_parked();
+        for ix in 0..5 {
+            let card = window.debug_bounds(crate::usage_view::CARD_SELECTORS[ix]).unwrap();
+            let value = window.debug_bounds(crate::usage_view::CARD_VALUE_SELECTORS[ix]).unwrap();
+            assert_eq!(value.size.height, px(30.), "at {width} px card {ix}'s number takes one line: {value:?}");
+            assert!(value.right() <= card.right() && card.right() <= px(width), "at {width} px card {ix}'s number {value:?} is inside it {card:?}");
+        }
+    }
+}
+
+/// The session table's toolbar wraps onto more rows in a narrow window instead of pushing the
+/// search box and Preview out of it (usage-p4-accept, problem 1: at 900 pt Preview was cut, at
+/// 700 the search box and Preview were out of reach), also with the Active tag, the Custom
+/// range's date picker and the regex toggles. At the default width it stays one row.
+#[gpui_kit::test]
+fn the_session_toolbar_wraps_in_a_narrow_window_instead_of_running_off_it(cx: &mut TestAppContext) {
+    use crate::toolbar::{SEARCH_BOX_SELECTOR, TOOLBAR_H, TOOLBAR_SELECTOR};
+    use gpui_kit::{VisualTestContext, px, size};
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    let mut controls = vec!["toolbar-project", "toolbar-scope", "toolbar-range", "toolbar-kind", "toolbar-model", SEARCH_BOX_SELECTOR, "toolbar-regex", "toolbar-preview"];
+    // (rows of controls, toolbar height)
+    let check = |cx: &mut TestAppContext, controls: &[&'static str], what: &str, width: f32| -> (usize, f32) {
+        let mut window = VisualTestContext::from_window(h.window, cx);
+        window.simulate_resize(size(px(width), px(800.)));
+        window.run_until_parked();
+        let bar = window.debug_bounds(TOOLBAR_SELECTOR).expect("the toolbar");
+        let mut rows = Vec::new();
+        for selector in controls {
+            let b = window.debug_bounds(selector).unwrap_or_else(|| panic!("{what} at {width} px: {selector} on screen"));
+            assert!(b.origin.x >= px(0.) && b.right() <= px(width) && b.bottom() <= bar.bottom(), "{what} at {width} px: {selector} at {b:?}, the toolbar {bar:?}");
+            if !rows.contains(&b.center().y) {
+                rows.push(b.center().y);
+            }
+        }
+        let search = window.debug_bounds(SEARCH_BOX_SELECTOR).unwrap();
+        assert!(search.size.width >= px(160.), "{what} at {width} px: the search box is {search:?}");
+        // what the Usage tour reports of it
+        assert_eq!(h.app.read_with(&window, |app, _| app.session_toolbar.get()), (rows.len(), true), "{what} at {width} px");
+        (rows.len(), bar.size.height.as_f32())
+    };
+    assert_eq!(check(cx, &controls, "default", 1440.), (1, TOOLBAR_H), "one row at the default width");
+    for width in [900., 700.] {
+        check(cx, &controls, "default", width);
+    }
+    // everything the toolbar can have: the Active tag, the Custom range's picker, regex's toggles
+    usage_on(cx, &h, september());
+    jump(cx, &h, None);
+    h.app.update(cx, |app, cx| {
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+        app.set_custom_range(day, day, cx);
+        app.toggle_regex(cx);
+    });
+    controls.extend([crate::toolbar::ACTIVE_TAG_SELECTOR, "toolbar-date-picker", "toolbar-case", "toolbar-labels"]);
+    for width in [1440., 900., 700.] {
+        check(cx, &controls, "everything", width);
+    }
+}
+
 /// The tooltip box stays in the plot area, under the chart's title row and legend, wherever the
 /// mouse is on the bar (acceptance, 04-hover-bar.png: it covered the legend).
 #[gpui_kit::test]
@@ -1923,6 +2039,123 @@ fn revealing_a_session_hidden_by_a_search_clears_the_search(cx: &mut TestAppCont
     assert_eq!(notices(cx, &h).len(), 1, "nothing new to say");
 }
 
+/// The answer of the search `seq` comes: hits on these sessions, then the end.
+fn search_answers(cx: &mut TestAppContext, h: &Harness, seq: u64, ids: &[&str]) {
+    use crate::search::{RowHit, SearchEvent, SearchSummary};
+    let hit = || std::sync::Arc::new(RowHit { count: 1, label: "user".into(), snippet: "…".into(), ranges: Vec::new() });
+    let hits = ids.iter().map(|id| (gpui_kit::SharedString::from(id.to_string()), hit())).collect();
+    let summary = SearchSummary { sessions: ids.len(), total_sessions: Some(ids.len()), matches: ids.len(), truncated: false, elapsed: Duration::ZERO };
+    h.app.update(cx, |app, cx| app.on_search_events(vec![SearchEvent::Hits { seq, hits }, SearchEvent::Done { seq, summary }], cx));
+    cx.run_until_parked();
+}
+
+/// Where a reveal must leave things: on the session table, the session selected and in the
+/// detail panel, the keys on the table.
+fn assert_revealed(cx: &mut TestAppContext, h: &Harness, id: &str) {
+    use crate::model::MainView;
+    assert_eq!(view(cx, h), MainView::Sessions);
+    h.app.read_with(cx, |app, cx| {
+        assert_eq!(app.selected.as_ref().map(|r| r.id.to_string()).as_deref(), Some(id), "the session stays selected");
+        let table = app.table.read(cx);
+        assert_eq!(table.selected_row(), table.delegate().position_of(id), "the table's own selection is on it");
+        assert!(app.detail_visible);
+    });
+    assert_eq!(view_focus(cx, h), (false, true), "the keys go to the table");
+}
+
+/// usage-p4-rv R1: the table keeps the hits of the last search until the first results of the
+/// next one come. S1 was among the old hits ("parser"); "hello" (S2 only) is on its way when
+/// S1 is clicked in Usage. Its results must not take S1 away: the reveal ends that search.
+#[gpui_kit::test]
+fn revealing_a_session_while_another_search_is_on_its_way_ends_that_search(cx: &mut TestAppContext) {
+    use crate::model::MainView;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    press(cx, &h, "cmd-f");
+    type_text(cx, &h, "parser");
+    press(cx, &h, "enter");
+    wait_until(cx, &h, "the search", |app, cx| search_done(app, cx) && !app.search_pending);
+    assert_eq!(h.app.read_with(cx, listed), [S1]);
+
+    // one update: nothing the search thread sends is applied before the click
+    let app = h.app.clone();
+    let hello = in_window(cx, &h, |window, cx| {
+        app.update(cx, |app, cx| {
+            app.set_query("hello", window, cx);
+            assert!(app.search_pending && app.table.read(cx).delegate().hit(S1).is_some(), "the old hits are still on screen");
+            let seq = app.search_seq;
+            app.set_view(MainView::Usage, window, cx);
+            app.reveal_session(S1, window, cx);
+            seq
+        })
+    });
+    // then the answer to "hello" comes, as the search thread would send it
+    search_answers(cx, &h, hello, &[S2]);
+    for _ in 0..20 {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_revealed(cx, &h, S1);
+    assert_eq!(search_box(cx, &h), "", "the search box is emptied");
+    assert!(h.app.read_with(cx, |app, cx| !app.searching() && !app.table.read(cx).delegate().search_active()));
+    assert_eq!(notices(cx, &h), ["已清除过滤：Search"]);
+}
+
+/// The same with a query still typed but not searched (the debounce has not run out): the old
+/// hits are not those of the box.
+#[gpui_kit::test]
+fn revealing_a_session_while_a_typed_query_waits_ends_the_search(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    press(cx, &h, "cmd-f");
+    type_text(cx, &h, "parser");
+    press(cx, &h, "enter");
+    wait_until(cx, &h, "the search", |app, cx| search_done(app, cx) && !app.search_pending);
+    press(cx, &h, "cmd-f");
+    press(cx, &h, "cmd-a");
+    type_text(cx, &h, "hello");
+    assert_eq!(search_box(cx, &h), "hello");
+    assert_eq!(h.app.read_with(cx, |app, _| app.query.to_string()), "parser", "not searched yet");
+    usage_on(cx, &h, september());
+
+    reveal(cx, &h, S1);
+    cx.executor().advance_clock(SEARCH_DEBOUNCE + Duration::from_millis(10));
+    for _ in 0..20 {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_revealed(cx, &h, S1);
+    assert_eq!(search_box(cx, &h), "");
+    assert!(h.app.read_with(cx, |app, _| !app.searching()), "the waiting query never runs");
+    assert_eq!(notices(cx, &h), ["已清除过滤：Search"]);
+}
+
+/// A search that is over and has the session among its hits stays, also when a filter has to
+/// give way: the same search runs again over the wider filter, and the session stays selected.
+#[gpui_kit::test]
+fn a_finished_search_with_the_session_among_its_hits_stays_when_a_filter_gives_way(cx: &mut TestAppContext) {
+    use crate::model::Kind;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    press(cx, &h, "cmd-f");
+    type_text(cx, &h, "parser");
+    press(cx, &h, "enter");
+    wait_until(cx, &h, "the search", |app, cx| search_done(app, cx) && !app.search_pending);
+    usage_on(cx, &h, september());
+    // Kind is the Usage view's filter too: turned off there, S1 (CLI) leaves the table
+    h.app.update(cx, |app, cx| app.toggle_kind(Kind::Cli, cx));
+    assert!(h.app.read_with(cx, |app, cx| app.table.read(cx).delegate().position_of(S1).is_none()));
+
+    reveal(cx, &h, S1);
+    wait_until(cx, &h, "the search again", |app, cx| search_done(app, cx) && !app.search_pending);
+    assert_revealed(cx, &h, S1);
+    assert_eq!(search_box(cx, &h), "parser", "the search stays");
+    assert_eq!(h.app.read_with(cx, listed), [S1]);
+    assert_eq!(notices(cx, &h), ["已清除过滤：Kind"]);
+}
+
 #[gpui_kit::test]
 fn a_session_without_a_row_stays_in_usage_and_explains(cx: &mut TestAppContext) {
     use crate::model::MainView;
@@ -2044,6 +2277,85 @@ fn the_notice_counts_the_sessions_the_table_cannot_list(cx: &mut TestAppContext)
     assert_eq!(notices(cx, &h).len(), 1);
 }
 
+/// The ledger hands over `id` again with these calls added (time, model), its metadata as it was.
+fn more_calls(cx: &mut TestAppContext, h: &Harness, id: &str, calls: &[(&str, &str)]) {
+    use agent_session_core::model::{HourlyUsage, Tokens};
+    let mut session = h.app.read_with(cx, |app, _| app.usage.sessions[id].clone());
+    for (at, model) in calls {
+        let hour = chrono::DateTime::parse_from_rfc3339(at).unwrap().timestamp_millis() / 3_600_000;
+        session.hours.push(HourlyUsage { hour, model: model.to_string(), responses: 1, tokens: Tokens { input: 10, output: 10, ..Default::default() }, ..Default::default() });
+    }
+    let app = h.app.clone();
+    in_window(cx, h, |window, cx| app.update(cx, |app, cx| app.on_store_events(vec![crate::store::StoreEvent::Usage { sessions: vec![session], full: false }], window, cx)));
+    cx.run_until_parked();
+}
+
+/// usage-p4-rv D1, decided as decision 20: under the Active filter Model means "called that
+/// model in those days", as Usage counts. On one day, with Opus picked: A (S1) is mostly Opus
+/// but called only Haiku that day, B (S2) is mostly Haiku but called Opus that day, C called
+/// Opus that day and its records are gone. Usage counts B and C; the jump lists B and says C.
+#[gpui_kit::test]
+fn under_the_active_filter_the_model_is_the_one_called_in_those_days(cx: &mut TestAppContext) {
+    const OPUS: &str = "claude-opus-5";
+    const HAIKU: &str = "claude-haiku-4-5";
+    let at = "2026-10-20T03:00:00Z";
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    let main_models = h.app.read_with(cx, |app, cx| {
+        let d = app.table.read(cx).delegate();
+        [S1, S2].map(|id| d.row_by_id(id).unwrap().primary_model.clone().unwrap().to_string())
+    });
+    assert_eq!(main_models, [OPUS, HAIKU]);
+    more_calls(cx, &h, S1, &[(at, "claude-haiku-4-5-20251001")]);
+    more_calls(cx, &h, S2, &[(at, OPUS)]);
+    ledger_only(cx, &h, GONE, "alpha", at);
+    let day = local_day(at);
+    usage_on(cx, &h, (day, day));
+    let counted = h.app.update(cx, |app, cx| {
+        app.set_model_filter(Some(OPUS.into()), cx);
+        app.usage_view.snapshot.cards[4].value.to_string()
+    });
+    assert_eq!(counted, "2", "Usage counts B and C");
+
+    jump(cx, &h, None);
+    assert_eq!(h.app.read_with(cx, listed), [S2], "B, not A");
+    assert_eq!(notices(cx, &h), ["这段时间还有 1 个 session 的记录已被清理，未列出"], "2 counted − 1 listed: C");
+
+    // another model under Active: the sessions that called it then
+    h.app.update(cx, |app, cx| app.set_model_filter(Some(HAIKU.into()), cx));
+    assert_eq!(h.app.read_with(cx, listed), [S1]);
+    // Active gone: the main model again
+    clear_active(cx, &h);
+    let listed_now = h.app.read_with(cx, listed);
+    assert!(listed_now.contains(&S2.to_string()) && !listed_now.contains(&S1.to_string()), "{listed_now:?}");
+}
+
+/// A click on a session that called other models in the Active days than the one picked lifts
+/// the Model pick, not the Active filter.
+#[gpui_kit::test]
+fn revealing_a_session_that_called_other_models_then_lifts_only_the_model(cx: &mut TestAppContext) {
+    let at = "2026-10-20T03:00:00Z";
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    more_calls(cx, &h, S1, &[(at, "claude-haiku-4-5-20251001")]);
+    more_calls(cx, &h, S2, &[(at, "claude-opus-5")]);
+    let day = local_day(at);
+    usage_on(cx, &h, (day, day));
+    h.app.update(cx, |app, cx| app.set_model_filter(Some("claude-opus-5".into()), cx));
+    jump(cx, &h, None);
+    assert_eq!(h.app.read_with(cx, listed), [S2]);
+    usage_on(cx, &h, (day, day));
+
+    reveal(cx, &h, S1);
+    assert_revealed(cx, &h, S1);
+    h.app.read_with(cx, |app, cx| {
+        let filter = app.current_filter(cx);
+        assert_eq!((filter.model, filter.active.map(|r| (r.first, r.last))), (None, Some((day, day))), "Active stays");
+    });
+    assert_eq!(h.app.read_with(cx, listed), [S1, S2]);
+    assert_eq!(notices(cx, &h).last().map(String::as_str), Some("已清除过滤：Model"));
+}
+
 #[gpui_kit::test]
 fn clearing_the_active_tag_keeps_the_other_filters_and_the_focus(cx: &mut TestAppContext) {
     let h = launch(cx);
@@ -2139,6 +2451,40 @@ fn click_on(cx: &mut TestAppContext, h: &Harness, selector: &'static str) {
     let b = window.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} on screen"));
     window.simulate_click(b.center(), Modifiers::none());
     window.run_until_parked();
+}
+
+/// Frames over a little more real time than a notification's slide-in (GPUI animations run on
+/// the real clock, the test executor's does not move them), at the size `click_on` uses.
+fn settle_animations(cx: &mut TestAppContext, h: &Harness) {
+    use gpui_kit::{VisualTestContext, px, size};
+    let mut window = VisualTestContext::from_window(h.window, cx);
+    window.simulate_resize(size(px(1440.), px(1600.)));
+    for _ in 0..60 {
+        window.run_until_parked();
+        window.update(|window, _| window.refresh());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    window.run_until_parked();
+}
+
+/// A notice stays up for a few seconds and must not sit on what is clicked next: here the
+/// Sessions card's `↗` right after a click on a session without a row (usage-p4-accept,
+/// problem 4: a real click landed on the notice).
+#[gpui_kit::test]
+fn a_notice_on_screen_does_not_cover_the_sessions_card_s_arrow(cx: &mut TestAppContext) {
+    use crate::model::MainView;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    usage_on(cx, &h, september());
+    ledger_only(cx, &h, GONE, "alpha", "2026-09-03T08:00:00Z");
+    reveal(cx, &h, GONE);
+    assert_eq!(notices(cx, &h), [crate::drilldown::GONE_NOTICE]);
+    assert_eq!(view(cx, &h), MainView::Usage);
+
+    // the toast slides in on the real clock: let it settle where it stays for its 5 seconds
+    settle_animations(cx, &h);
+    click_on(cx, &h, crate::usage_view::SESSIONS_JUMP_SELECTOR);
+    assert_eq!(view(cx, &h), MainView::Sessions, "the click reached the arrow");
 }
 
 #[gpui_kit::test]

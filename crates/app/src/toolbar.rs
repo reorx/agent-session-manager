@@ -25,6 +25,10 @@ pub const TOOLBAR_H: f32 = 36.;
 const CONTROL_H: f32 = 22.;
 const MENU_ITEM_H: f32 = 24.;
 const DATE_PICKER_W: f32 = 190.;
+/// The session table's search box: its width when there is room, and what it shrinks to
+/// before the toolbar wraps.
+const SEARCH_W: f32 = 220.;
+const SEARCH_MIN_W: f32 = 160.;
 /// Typing pause before a search starts.
 pub(crate) const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
 
@@ -36,6 +40,7 @@ pub(crate) fn trigger(id: &'static str, label: &'static str, value: SharedString
         .hover(style::control_hover())
         .active(style::control_hover());
     Button::new(id)
+        .debug_selector(move || format!("toolbar-{id}"))
         .custom(variant)
         .small()
         .h(px(CONTROL_H))
@@ -87,6 +92,7 @@ fn tool_button(id: &'static str, on: bool, cx: &App) -> Button {
     let (bg, fg) = if on { (style::toggle_on_bg(), style::toggle_on_fg()) } else { (style::white(), style::text()) };
     let hover = if on { bg } else { style::control_hover() };
     Button::new(id)
+        .debug_selector(move || format!("toolbar-{id}"))
         .custom(ButtonCustomVariant::new(cx).color(bg).foreground(fg).hover(hover).active(hover))
         .small()
         .h(px(CONTROL_H))
@@ -101,6 +107,7 @@ fn toggle(id: &'static str, glyph: &'static str, on: bool, tooltip: &'static str
     let (bg, fg) = if on { (style::toggle_on_bg(), style::toggle_on_fg()) } else { (style::white(), style::label()) };
     let hover = if on { bg } else { style::control_hover() };
     Button::new(id)
+        .debug_selector(move || format!("toolbar-{id}"))
         .custom(ButtonCustomVariant::new(cx).color(bg).foreground(fg).hover(hover).active(hover))
         .small()
         .h(px(CONTROL_H))
@@ -192,8 +199,9 @@ impl AppRoot {
         self.apply_filter(filter, cx);
     }
 
-    /// Only sessions whose main model is `model` (a model id), or all of them. Kept without its
-    /// date or `[1m]`: the session table and Usage share it, and Usage names models that way.
+    /// Only sessions whose main model is `model` (a model id), or all of them; under the Active
+    /// filter, those that called it in its days. Kept without its date or `[1m]`: the session
+    /// table and Usage share it, and Usage names models that way.
     pub fn set_model_filter(&mut self, model: Option<SharedString>, cx: &mut Context<Self>) {
         let mut filter = self.current_filter(cx);
         filter.model = model.map(|m| normalize(&m).to_string().into());
@@ -209,9 +217,10 @@ impl AppRoot {
     pub(crate) fn apply_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
         // Project, Kind and Model are the Usage view's filters too
         let usage_changed = !crate::usage_view::same_filter(&crate::usage_view::usage_filter(&filter), &crate::usage_view::usage_filter(&self.current_filter(cx)));
-        // the sessions of the Active filter's days come from the usage data, ready before the
-        // filter asks for them
-        let active_ids = (filter.active != self.current_filter(cx).active).then(|| filter.active.map(|range| self.active_ids_in(range)));
+        // the sessions of the Active filter's days (and its model) come from the usage data,
+        // ready before the filter asks for them
+        let current = self.current_filter(cx);
+        let active_ids = ((filter.active, &filter.model) != (current.active, &current.model)).then(|| self.active_ids_for(&filter));
         let (changed, ms, shown) = self.table.update(cx, |table, cx| {
             if let Some(ids) = active_ids {
                 table.delegate_mut().set_active_ids(ids);
@@ -615,6 +624,7 @@ impl AppRoot {
     /// `Sessions | Usage`, then the controls of the view on screen.
     pub fn render_toolbar(&self, cx: &mut Context<Self>) -> Div {
         let bar = h_flex()
+            .debug_selector(|| TOOLBAR_SELECTOR.into())
             .w_full()
             .h(px(TOOLBAR_H))
             .flex_none()
@@ -639,6 +649,10 @@ impl AppRoot {
         segmented().child(item("view-sessions", "Sessions", MainView::Sessions)).child(item("view-usage", "Usage", MainView::Usage))
     }
 
+    /// The session table's toolbar. Too narrow a window for one row wraps it (as the Usage
+    /// toolbar does) instead of pushing the search box and Preview out of the window: rows
+    /// break between controls, Preview stays right-aligned on whichever row it lands, and the
+    /// search box gives up some width (down to 160 px) before anything wraps.
     fn render_session_controls(&self, bar: Div, cx: &mut Context<Self>) -> Div {
         let filter = self.current_filter(cx);
         let project_label: SharedString = match (&filter.project, filter.hidden_projects.len()) {
@@ -651,12 +665,24 @@ impl AppRoot {
         let this = cx.entity().downgrade();
         let on_regex = this.clone();
 
-        bar.child(trigger("project", "Project", project_label, cx).dropdown_menu(self.project_menu(cx)))
+        let layout = self.session_toolbar.clone();
+        let measure = move |bounds: Vec<Bounds<Pixels>>, window: &mut Window, _: &mut App| {
+            let mut rows: Vec<Pixels> = bounds.iter().map(|b| b.center().y).collect();
+            rows.dedup();
+            let width = window.viewport_size().width;
+            layout.set((rows.len(), bounds.iter().all(|b| b.origin.x >= px(0.) && b.right() <= width)));
+        };
+        bar.h_auto()
+            .min_h(px(TOOLBAR_H))
+            .py(px(4.))
+            .flex_wrap()
+            .on_children_prepainted(measure)
+            .child(trigger("project", "Project", project_label, cx).dropdown_menu(self.project_menu(cx)))
             .child(trigger("scope", "Scope", self.search_opts.scope.label().into(), cx).dropdown_menu(self.scope_menu(cx)))
             .child(trigger("range", "Updated", self.range.label().into(), cx).dropdown_menu(self.range_menu(cx)))
             .when(self.range == RangePreset::Custom, |el| {
                 el.child(
-                    div().w(px(DATE_PICKER_W)).child(
+                    div().debug_selector(|| "toolbar-date-picker".into()).w(px(DATE_PICKER_W)).child(
                         DatePicker::new(&self.date_picker).small().number_of_months(2).presets(date_presets(self.usage_day)),
                     ),
                 )
@@ -665,7 +691,7 @@ impl AppRoot {
             .child(trigger("kind", "Kind", format!("{}{}", filter.kinds.label(), if filter.favorites_only { " · ★" } else { "" }).into(), cx).dropdown_menu(self.kind_menu(cx)))
             .child(trigger("model", "Model", filter.model.as_ref().map_or_else(|| "All".into(), |m| display_name(m).into()), cx).dropdown_menu(self.model_menu(cx)))
             .child(
-                div().ml(px(4.)).w(px(220.)).child(
+                div().debug_selector(|| SEARCH_BOX_SELECTOR.into()).ml(px(4.)).flex_basis(px(SEARCH_MIN_W)).flex_grow(1.).max_w(px(SEARCH_W)).child(
                     Input::new(&self.search)
                         .small()
                         .h(px(CONTROL_H))
@@ -688,16 +714,21 @@ impl AppRoot {
                 }))
                 .child(trigger("labels", "Labels", self.search_opts.labels_label().into(), cx).dropdown_menu(self.label_menu(cx)))
             })
-            .child(div().flex_1())
             .child(
-                trigger("preview", "Preview", mode.label().into(), cx)
-                    .dropdown_menu_with_anchor(Anchor::TopRight, self.preview_menu(cx)),
+                div().ml_auto().child(
+                    trigger("preview", "Preview", mode.label().into(), cx)
+                        .dropdown_menu_with_anchor(Anchor::TopRight, self.preview_menu(cx)),
+                ),
             )
     }
 }
 
 /// The toolbar's `Active …` tag (tests click it).
 pub const ACTIVE_TAG_SELECTOR: &str = "toolbar-active-tag";
+/// The toolbar, and the session table's search box in it (tests). Its dropdowns and toggles
+/// are `toolbar-<id>`: `toolbar-project`, `toolbar-preview`, `toolbar-regex`, ….
+pub const TOOLBAR_SELECTOR: &str = "toolbar";
+pub const SEARCH_BOX_SELECTOR: &str = "toolbar-search";
 
 impl AppRoot {
     /// `Active 11-12 ✕` after Updated while a jump from Usage keeps only the sessions active in
@@ -745,15 +776,31 @@ fn date_presets(today: NaiveDate) -> Vec<DateRangePreset> {
 
 /// The Usage toolbar's Model button, and its `as of` with the refresh button (tests).
 pub const USAGE_MODEL_SELECTOR: &str = "usage-toolbar-model";
+/// The line between the Usage toolbar's ranges and its Project / Kind / Model (tests).
+pub const USAGE_SEPARATOR_SELECTOR: &str = "usage-toolbar-separator";
 pub const USAGE_END_SELECTOR: &str = "usage-toolbar-end";
 
 impl AppRoot {
     /// The Usage view's toolbar: ranges, `Custom…` (and its picker), Project / Kind / Model, and
     /// on the right when the data is from and a button that scans now. Too narrow a window for
     /// one row (1,140 px, 1,330 with the date picker) wraps it onto a second;
-    /// `as of` and the refresh button stay right-aligned on whichever row they land.
+    /// `as of` and the refresh button stay right-aligned on whichever row they land. The line
+    /// before Project is painted only between two controls on one row: laid out always (so
+    /// hiding it cannot change where the rows break), measured after each layout.
     fn render_usage_controls(&self, bar: Div, cx: &mut Context<Self>) -> Div {
         let u = &self.usage_view;
+        // the bar's children: view switch, line, ranges, Custom…, the picker while Custom is on,
+        // then this line
+        let separator_ix = 4 + usize::from(u.range == UsageRange::Custom);
+        let shown = u.separator_shown.clone();
+        let this = cx.entity().downgrade();
+        let measure = move |bounds: Vec<Bounds<Pixels>>, _: &mut Window, cx: &mut App| {
+            let row = |ix: usize| bounds.get(ix).map(|b| b.center().y);
+            let between = row(separator_ix - 1).is_some() && row(separator_ix - 1) == row(separator_ix) && row(separator_ix) == row(separator_ix + 1);
+            if shown.replace(between) != between {
+                this.update(cx, |_, cx| cx.notify()).ok();
+            }
+        };
         let filter = self.current_filter(cx);
         let mut ranges = segmented();
         for (ix, (range, label)) in RANGE_BUTTONS.iter().copied().enumerate() {
@@ -781,6 +828,7 @@ impl AppRoot {
             .min_h(px(TOOLBAR_H))
             .py(px(4.))
             .flex_wrap()
+            .on_children_prepainted(measure)
             .child(ranges)
             .child(
                 tool_button("usage-custom", custom, cx)
@@ -789,9 +837,9 @@ impl AppRoot {
                     .on_click(cx.listener(|this, _, _, cx| this.set_usage_range(UsageRange::Custom, cx))),
             )
             .when(custom, |el| {
-                el.child(div().w(px(DATE_PICKER_W)).child(DatePicker::new(&u.date_picker).small().number_of_months(2).presets(date_presets(self.usage_day))))
+                el.child(div().debug_selector(|| "toolbar-date-picker-usage".into()).w(px(DATE_PICKER_W)).child(DatePicker::new(&u.date_picker).small().number_of_months(2).presets(date_presets(self.usage_day))))
             })
-            .child(separator())
+            .child(separator().debug_selector(|| USAGE_SEPARATOR_SELECTOR.into()).when(!u.separator_shown.get(), |el| el.invisible()))
             .child(trigger("usage-project", "Project", project, cx).dropdown_menu(self.usage_project_menu(cx)))
             .child(trigger("usage-kind", "Kind", usage_kind_label(&filter).into(), cx).dropdown_menu(self.usage_kind_menu(cx)))
             .child(div().debug_selector(|| USAGE_MODEL_SELECTOR.into()).child(trigger("usage-model", "Model", filter.model.as_ref().map_or_else(|| "All".into(), |m| display_name(m).into()), cx).dropdown_menu(self.usage_model_menu(cx))))

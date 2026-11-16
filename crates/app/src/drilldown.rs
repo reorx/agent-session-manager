@@ -14,7 +14,7 @@ use chrono::{Days, Local};
 use gpui_kit::*;
 
 use crate::AppRoot;
-use crate::model::{ActiveRange, MainView, RangePreset};
+use crate::model::{ActiveRange, CallsInRange, Filter, MainView, RangePreset};
 use crate::usage_view::usage_filter;
 
 /// A click on a session the table has no row for: its transcript and its history are gone.
@@ -31,6 +31,16 @@ pub fn unlisted_notice(unlisted: usize, gone: usize) -> Option<String> {
         (n, 0) => Some(format!("这段时间还有 {n} 个 session 被会话表的其他过滤挡住，未列出")),
         (n, gone) => Some(format!("这段时间还有 {n} 个 session 未列出：{gone} 个的记录已被清理，其余被会话表的其他过滤挡住")),
     }
+}
+
+/// Whether a reveal keeps the search on screen. Its results are the box's only when `settled`
+/// (the query typed is the one searched, and all its results are in): results still on their
+/// way, or a query still waiting for the typing to pause, may not have the session and would
+/// take it away when they come (usage-p4-rv R1). The session must be among them (`hit`), and
+/// when a filter gives way (`widened`) the same search runs again over more sessions: results
+/// cut to the newest (`truncated`) may then leave it out.
+pub fn keeps_search(settled: bool, hit: bool, truncated: bool, widened: bool) -> bool {
+    settled && hit && !(truncated && widened)
 }
 
 /// `[from, until)` of the Active filter's days (each from 4:00 local).
@@ -50,16 +60,20 @@ impl AppRoot {
         window.push_notification(message, cx);
     }
 
-    /// The sessions with a call in `range`, by the usage data.
-    pub(crate) fn active_ids_in(&self, range: ActiveRange) -> Arc<HashSet<SharedString>> {
-        Arc::new(self.usage.active_sessions(span_of(range)).into_iter().map(|id| SharedString::from(id.to_string())).collect())
+    /// The sessions with a call in `range`, of `model` when one is given, by the usage data.
+    pub(crate) fn active_ids_in(&self, range: ActiveRange, model: Option<&str>) -> Arc<HashSet<SharedString>> {
+        Arc::new(self.usage.active_sessions(span_of(range), model).into_iter().map(|id| SharedString::from(id.to_string())).collect())
+    }
+
+    /// The Active set `filter` asks for: its days, its model.
+    pub(crate) fn active_ids_for(&self, filter: &Filter) -> Option<Arc<HashSet<SharedString>>> {
+        filter.active.map(|range| self.active_ids_in(range, filter.model.as_deref()))
     }
 
     /// New usage came in: the sessions active in the Active filter's days again. True when they
     /// changed (the table then lists others).
     pub(crate) fn sync_active_ids(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(range) = self.current_filter(cx).active else { return false };
-        let ids = self.active_ids_in(range);
+        let Some(ids) = self.active_ids_for(&self.current_filter(cx)) else { return false };
         if self.table.read(cx).delegate().active_ids().is_some_and(|old| *old == ids) {
             return false;
         }
@@ -85,15 +99,22 @@ impl AppRoot {
             return;
         }
         println!("reveal: {}", row.short_id);
+        let calls = self.calls_in_active_days(&filter, id, cx);
+        let (filter, names) = filter.relaxed_for(&row, calls);
         let mut relaxed = Vec::new();
-        if self.searching() && self.table.read(cx).delegate().hit(id).is_none() {
-            // empty the box and end the search, the focus stays where it is (unlike Escape)
-            self.search.update(cx, |input, cx| input.set_value("", window, cx));
-            self.run_search(cx);
-            relaxed.push("Search");
+        let typed = self.search.read(cx).value().trim().to_string();
+        if self.searching() || !typed.is_empty() {
+            let settled = typed == self.query.as_ref() && !self.search_pending;
+            let delegate = self.table.read(cx).delegate();
+            let truncated = self.search_summary.as_ref().is_some_and(|s| s.truncated);
+            if !keeps_search(settled, delegate.hit(id).is_some(), truncated, !names.is_empty()) {
+                // empty the box and end the search (a query still waiting for the typing to
+                // pause then finds the box empty), the focus stays where it is (unlike Escape)
+                self.search.update(cx, |input, cx| input.set_value("", window, cx));
+                self.run_search(cx);
+                relaxed.push("Search");
+            }
         }
-        let active_ok = self.table.read(cx).delegate().is_active(id);
-        let (filter, names) = filter.relaxed_for(&row, active_ok);
         if names.contains(&"Updated") {
             self.range = RangePreset::Any;
         }
@@ -122,6 +143,18 @@ impl AppRoot {
         self.focus_table(window, cx);
         self.persist(cx);
         cx.notify();
+    }
+
+    /// What `id` called in the days of `filter.active` (`Picked` without that filter).
+    fn calls_in_active_days(&self, filter: &Filter, id: &str, cx: &App) -> CallsInRange {
+        let Some(range) = filter.active else { return CallsInRange::Picked };
+        if self.table.read(cx).delegate().is_active(id) {
+            CallsInRange::Picked
+        } else if filter.model.is_some() && self.active_ids_in(range, None).contains(id) {
+            CallsInRange::OtherModels
+        } else {
+            CallsInRange::None
+        }
     }
 
     /// A project's `↗` (`Some(key)`) or the Sessions card's: the session table with only the
@@ -183,6 +216,17 @@ mod tests {
         assert_eq!(unlisted_notice(3, 3).as_deref(), Some("这段时间还有 3 个 session 的记录已被清理，未列出"));
         assert_eq!(unlisted_notice(2, 0).as_deref(), Some("这段时间还有 2 个 session 被会话表的其他过滤挡住，未列出"));
         assert_eq!(unlisted_notice(5, 2).as_deref(), Some("这段时间还有 5 个 session 未列出：2 个的记录已被清理，其余被会话表的其他过滤挡住"));
+    }
+
+    #[test]
+    fn a_reveal_keeps_only_a_search_that_is_sure_to_still_show_the_session() {
+        // (settled, hit, truncated, widened)
+        assert!(keeps_search(true, true, false, false));
+        assert!(keeps_search(true, true, false, true), "all its results are in: the session is found again over more");
+        assert!(keeps_search(true, true, true, false), "nothing runs again");
+        assert!(!keeps_search(true, true, true, true), "the newest results over more sessions may not have it");
+        assert!(!keeps_search(true, false, false, false));
+        assert!(!keeps_search(false, true, false, false), "old hits: the results on their way decide");
     }
 
     #[test]

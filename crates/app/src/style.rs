@@ -243,6 +243,11 @@ pub fn install_theme(cx: &mut App) {
         theme.mono_font_size = px(11.);
         theme.radius = px(5.);
         theme.radius_lg = px(6.);
+        // Notices stay up for seconds: at the top right they covered the toolbar's right end,
+        // the Usage view's Sessions card `↗` and the detail panel's buttons, all likely the next
+        // click. Bottom right, above the status bar, they sit on content.
+        theme.notification.placement = Anchor::BottomRight;
+        theme.notification.margins.bottom = px(STATUS_BAR_H + 12.);
 
         let transparent = theme.transparent;
         let c = &mut theme.colors;
@@ -281,6 +286,9 @@ pub fn install_theme(cx: &mut App) {
     }
     Theme::sync_base(cx);
 }
+
+/// The status bar's height.
+pub const STATUS_BAR_H: f32 = 22.;
 
 /// `FluentBuilder` re-export so callers only need `use crate::style::*`.
 pub use gpui_kit::prelude::FluentBuilder;

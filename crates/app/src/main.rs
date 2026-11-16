@@ -251,6 +251,9 @@ pub struct AppRoot {
     _autoplay: Option<Task<()>>,
     _auto_scan: Task<()>,
     _menu_commands: Option<Task<()>>,
+    /// How the session table's toolbar was last laid out: rows of controls, all of them inside
+    /// the window (the Usage tour reports it).
+    session_toolbar: std::rc::Rc<std::cell::Cell<(usize, bool)>>,
     #[cfg(test)]
     selection_event_count: Option<usize>,
     /// Every notification `say` pushed, in order.
@@ -489,6 +492,7 @@ impl AppRoot {
             _autoplay: None,
             _auto_scan: auto_scan,
             _menu_commands: None,
+            session_toolbar: Default::default(),
             #[cfg(test)]
             selection_event_count: None,
             #[cfg(test)]
@@ -1676,7 +1680,7 @@ impl AppRoot {
             IndexStatus::Idle(summary) => summary.clone(),
             IndexStatus::Failed(message) => format!("index error: {message}").into(),
         };
-        let bar = StatusBar::new().h(px(22.)).py_0().px(px(10.)).font_family(style::mono(cx)).text_size(px(11.)).text_color(style::head_fg());
+        let bar = StatusBar::new().h(px(style::STATUS_BAR_H)).py_0().px(px(10.)).font_family(style::mono(cx)).text_size(px(11.)).text_color(style::head_fg());
         // `Today $…` opens today's usage, from either view
         let today = (!self.today_label.is_empty()).then(|| {
             div()

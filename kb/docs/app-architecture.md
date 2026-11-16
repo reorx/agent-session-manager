@@ -130,9 +130,10 @@ Rebuild
 
 `drilldown.rs` 有三个入口（spec 在 `kb/plans/2026-11-16-usage-stats/usage-drilldown.md`）：
 
-- **`reveal_session(id)`**：点「Most expensive sessions」的一行。表格的全部行里没有它（`row_by_id`，记录和历史都没了）或它的项目被隐藏，就留在 Usage 弹通知。否则只放宽挡住它的：搜索里没命中它就清空搜索框并结束搜索（名字记作 `Search`），其余由纯函数 `Filter::relaxed_for` 逐项算（Updated、Project、Kind、Model、Favorites、Empty sessions、Active），放宽了什么就通知什么。先把 `wanted_id` 设成它，过滤变化途中选中别的行、或启动时还在等的选中，都让给它；搜索中放宽过滤引起的重搜记成 `Refresh`（结果攒齐再换，它一直选着）。然后切到会话表、选中、`scroll_to_row`（已经选中的行 `select_row` 不滚）、焦点给表格
+- **`reveal_session(id)`**：点「Most expensive sessions」的一行。表格的全部行里没有它（`row_by_id`，记录和历史都没了）或它的项目被隐藏，就留在 Usage 弹通知。否则只放宽挡住它的：过滤由纯函数 `Filter::relaxed_for` 逐项算（Updated、Project、Kind、Model、Favorites、Empty sessions、Active；Active 开着时还要知道它在那些天里调用了什么，`CallsInRange`：一次都没有放宽 Active，只调用过别的模型放宽 Model）。搜索只在 `keeps_search` 说结果确定还会显示它时保留：搜索已结束（`!search_pending`）、搜索框里的词就是搜过的 `query`、它在命中里，而且结果没被截到最新 200 个时才允许同一个搜索在放宽后的过滤上重跑；否则清空搜索框并结束搜索（名字记作 `Search`）。表格在新搜索的第一批结果到达前一直留着旧命中，只看 `hit(id)` 会被旧命中骗过：新结果到达后把刚选中的它换掉（usage-p4-rv R1）。放宽了什么就通知什么。先把 `wanted_id` 设成它，过滤变化途中选中别的行、或启动时还在等的选中，都让给它；搜索中放宽过滤引起的重搜记成 `Refresh`（结果攒齐再换，它一直选着）。然后切到会话表、选中、`scroll_to_row`（已经选中的行 `select_row` 不滚）、焦点给表格
 - **`show_active_sessions(project)`**：项目行的 `↗`（`Some(key)`）或 Sessions 卡的 `↗`（`None`，Project / Kind / Model 不动）。把 Usage 当前范围换成具体的起止用量日（`ActiveRange`）存进 `Filter.active`，Updated 改成 Any time，清空搜索，切到会话表，焦点给表格。Usage 按同样的 Project / Kind / Model 算到、表格却没列出的 session 数大于 0 就通知，并分开说多少个记录已被清理（没有行）、多少个被会话表的其他过滤挡住
 - **`clear_active`**：工具栏 `Active … ✕` 标签，只清 `active`，焦点给表格
+- **Active 下的 Model 按调用比**：`Filter.active` 为 `Some` 时 `Filter::matches` 不看主模型，Model 的选择并进活动集合：`active_ids_for(filter)` = `UsageData::active_sessions(span, filter.model)`，也就是这段时间里调用过这个模型的 session，和 Usage 按调用过滤算到的是同一批。`apply_filter` 在 `active` 或 `model` 变了时重算集合，所以跳转后再换模型也按调用比；清掉 Active 后回到主模型。通知因此只剩三种原因：记录已清理、被其他过滤挡住、项目被隐藏
 
 **「这段时间里有活动」的集合不在 `Filter` 里。** `Filter` 只存起止日；集合（`Arc<HashSet<SharedString>>`）由 `AppRoot` 用 core `UsageData::active_sessions(span)` 算好，交给表格 delegate（`set_active_ids`），`passes_filters` 多查一次哈希。`active` 为 `Some` 而集合还没给时一行都不列。集合在两处更新：`apply_filter` 发现 `active` 变了（先给集合再 `set_filter`，过滤只重算一次）；`on_store_events` 收到用量之后（`sync_active_ids`，集合真变了才动），这时按扫描刷新的规矩走 `relocate_selection(false)`，搜索中走 `refresh_search`。行内的 `↗` 在自己的点击处理里 `cx.stop_propagation()`，否则行的点击（在 Usage 里按项目过滤）也会触发
 
@@ -248,6 +249,7 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 | 过滤条件变化 | 搜索对象变了 |
 | 扫描后的整表重读 | 索引内容或模型窗口变了；仅窗口变化也照常重搜 |
 | 活动集合变化 | Active 过滤开着时扫到了新的用量，这段时间里有调用的 session 变了（`sync_active_ids`）；和扫描后的整表重读一样走静默的 `refresh_search` |
+| 从 Usage 点一个 session（`reveal_session`） | 保留搜索时：放宽过滤引起的重搜记成 `Refresh`，回到会话表时攒齐再换；不保留时（结果还没到、搜索框里的词还没搜、它不在命中里）清空搜索，旧的 `seq` 作废，迟到的结果被丢掉 |
 
 程序化地改写搜索框不会产生"内容变化"事件，改写之后要自己触发搜索。
 
@@ -345,11 +347,11 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 - `crates/app/src/main.rs` — 两个接收任务、事件的成批应用、选中规则（`after_rows_changed`）、对话的请求与采用（`open_conversation`、`show_conversation`）、保存（`persist`）
 - `crates/app/src/toolbar.rs` — 过滤条件的应用、搜索的防抖与重跑；视图切换和 Usage 的工具栏（范围、`Custom…`、三个下拉、`as of`、立即扫描）
 - `crates/app/src/usage_view.rs` — Usage 视图：`UsageState`、`UsageSnapshot::build`（纯函数，测试断言它的字符串）、`refresh_usage`、范围 / 指标 / 点选某天、各区块的绘制
-- `crates/app/src/drilldown.rs` — 从 Usage 回到会话表：`reveal_session`、`show_active_sessions`、`clear_active`、活动集合的同步（`sync_active_ids`）、通知文字（`unlisted_notice`）
+- `crates/app/src/drilldown.rs` — 从 Usage 回到会话表：`reveal_session`、`show_active_sessions`、`clear_active`、活动集合（`active_ids_for`，带 Model；`sync_active_ids`）、是否保留搜索（`keeps_search`）、通知文字（`unlisted_notice`）
 - `crates/app/src/table.rs` — 全部行与过滤排序后的顺序、活动集合（`set_active_ids`、`passes_filters`）、按 id 找行（`row_by_id`）、搜索对象的生成
 - `crates/app/src/settings.rs` — 视图状态的读写与容错测试
 - `crates/app/src/resident.rs` — 菜单栏项与菜单（`install`、`Resident`、`MenuTarget`）、隐藏窗口与 activation policy、菜单文字的纯函数（标题取整、三行信息、连续失败的判定）
-- `crates/app/src/keyboard_tests.rs` — 启动焦点与搜索的键盘路径（`cmd-f`、Enter、Escape、`n`、`cmd-g`）、`cmd-c` / `cmd-shift-c` 复制（用测试平台的剪贴板）的行为测试；状态栏的 Today、自动扫描（定时、窗口激活、30 秒节流、不改摘要、不滚回选中行）、跨过 4:00 换日；关窗即隐藏（红色按钮、`cmd-w`）、隐藏时定时扫描与 Scan Now、重开后视图不变且焦点在表格、第一次关窗的说明只弹一次；Usage 视图的切换与焦点、只属于会话表的快捷键在 Usage 下无效、点选某天与 Escape、共用的过滤、每分钟扫描与隐藏后回到十分钟、Usage 下推迟的搜索、重启后恢复视图；从 Usage 跳转（选中与焦点、只放宽挡住的过滤、清空搜索、没有行 / 项目被隐藏时留在 Usage、`↗` 设 Active、通知的计数、标签的 ✕、Active 下的搜索、重启后不恢复 Active、扫描后列表跟着变），以及 `↗` 不冒泡到行、Sessions 卡和标签的鼠标点击
+- `crates/app/src/keyboard_tests.rs` — 启动焦点与搜索的键盘路径（`cmd-f`、Enter、Escape、`n`、`cmd-g`）、`cmd-c` / `cmd-shift-c` 复制（用测试平台的剪贴板）的行为测试；状态栏的 Today、自动扫描（定时、窗口激活、30 秒节流、不改摘要、不滚回选中行）、跨过 4:00 换日；关窗即隐藏（红色按钮、`cmd-w`）、隐藏时定时扫描与 Scan Now、重开后视图不变且焦点在表格、第一次关窗的说明只弹一次；Usage 视图的切换与焦点、只属于会话表的快捷键在 Usage 下无效、点选某天与 Escape、共用的过滤、每分钟扫描与隐藏后回到十分钟、Usage 下推迟的搜索、重启后恢复视图；从 Usage 跳转（选中与焦点、只放宽挡住的过滤、清空搜索、没有行 / 项目被隐藏时留在 Usage、`↗` 设 Active、通知的计数、标签的 ✕、Active 下的搜索、重启后不恢复 Active、扫描后列表跟着变），以及 `↗` 不冒泡到行、Sessions 卡和标签的鼠标点击；返工补的：新搜索还在路上或搜索词还在防抖时点 session（在同一次 update 里发起搜索再点，然后手动投递那次搜索的结果）、Active 下按调用比的 Model（A / B / C 三个 session）、会话表工具栏和 Usage 指标卡在窄窗口下（`simulate_resize`）、Usage 工具栏的分隔线不落在行末、通知不挡 Sessions 卡的 `↗`
 - `crates/core/src/ledger.rs`、`crates/core/src/usage.rs` — 账本与 4:00 分日、`UsageData` 的合计；表结构与迁移规则见 [数据层设计](data-layer-design.md)
 - `crates/core/src/index/indexer.rs` — 流式扫描与单事务写入
 - `kb/notes/2026-09-21-m2-real-data.md`、`kb/notes/2026-09-21-m3-search.md` — 上述数字的来源与当时的取舍

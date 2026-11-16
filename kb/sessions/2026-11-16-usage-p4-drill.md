@@ -94,3 +94,43 @@ tags: [usage, filter, navigation, gpui, screenshots]
 - spec：`kb/plans/2026-11-16-usage-stats/usage-drilldown.md`（末尾「实现记录」）
 - `kb/docs/app-architecture.md`「从 Usage 回到会话表」、`kb/docs/gpui-kit-guide.md`「测试」「脚本化交互与截图」
 - 证据：`tmp/2026-11-12-usage-stats/usage-p4-drill/`：`app-tests.log`、`core-tests.log`、`make-test.log`、`mutations.log`、`tour.log` 与 `screenshots/`（01–17、`app-195007.log`）、`jump-project-vs-ledger.txt`、`oneday/`、`lastmonth/`、`gone/`、`gone-candidates.txt`、`usage-run/`（`make screenshot-usage`）、`test-screenshot-resident.log`、`compare-jump-rows.py`。`data/` 和 `usage-run/claude/` 是 APFS 克隆的副本，验收完可以删
+
+## 协调者摘要（usage-p4-drill-r1）
+
+- 结果：任务 `tasks/usage-p4-drill-r1.md` 的 R1、D1（brief 决定 20）、验收问题 1–4 全部处理，完成标准都达到；spec 末尾加了「返工」一节，「实现记录」里 N 的说明按 D1 改了。
+- 提交：本节与代码、测试、脚本、文档、spec 同一提交，hash 见最终回复。
+- 测试：core 383 passed / 0 failed / 7 ignored；app 256 passed / 0 failed / 2 ignored；`make test` 639 passed / 0 failed / 9 ignored（变异检查之后在最终源码上又跑了一次，同样数字，`r1/make-test-final.log`）。新增 core 1 个、app 11 个（model 1、drilldown 1、键盘与鼠标 9，另改了 model 的 relaxed 测试）。R1 / D1 的 5 个和窄窗口、分隔线、指标卡、通知 4 个都先在旧行为上跑红（`r1/red-app.log`）；11 处变异把每项改回旧行为，全部被抓到（`r1/mutations.log`）。
+- 截图：`make screenshot-usage-view` 在真实索引与账本的副本上 18 张，全部判定通过、退出码 0，结束后没有残留进程；新加的 `16-sessions-narrow`（700px，工具栏两行、都在窗口里，Active 标签在）、`12-narrow`、`14-jump-project`、`17-empty` 都看过。`jump-project` 列出的 390 行与账本副本逐个对上（`r1/compare-jump-rows.txt`）。`make test-screenshot-resident` 退出码 0。
+- 默认宽度：1440px 下会话表工具栏每个控件的位置改前改后逐个对过，默认状态完全一致（`r1/toolbar-1440-{before,after}.txt`）。
+- `make parity` 没跑：core 只给 `UsageData::active_sessions` 加了模型参数，`asm` 不调用它。
+- 证据目录：`tmp/2026-11-12-usage-stats/usage-p4-drill/r1/`。
+- 自己的决定：验收 1 选换行而不是收起（理由见 spec「返工」）；R1 选「结果没确定就清空搜索」而不是等结果；截断的搜索在过滤放宽时也清空；通知统一挪到右下角（验收 4，影响所有通知）；Model 下拉里的数字在 Active 下仍按主模型数。
+- 未验证：真实鼠标点击（全部在测试窗口里用鼠标事件验）；Usage 视图 700px 只有测试，没进导览截图。
+- 交给协调者：见下文「交给协调者（r1）」。
+
+## 返工（r1）做了什么
+
+- **R1。** `drilldown::keeps_search(settled, hit, truncated, widened)`：搜索已结束、框里的词就是搜过的词、它在命中里、并且「结果被截到 200 个」和「放宽了过滤」不同时成立，才保留搜索；否则清空搜索框并 `run_search`（空词，取代旧 `seq`，迟到的结果被丢掉），通知里 `Search` 排第一。防抖还没触发的那次搜索读到的是空框，不用另外取消。
+- **D1。** core `active_sessions(span, model)` 只算这个模型的桶（两边 `pricing::normalize`）。app：`Filter::model_ok` 在 Active 下不看主模型；`active_ids_for(filter)` 把 Model 并进活动集合；`apply_filter` 在 `(active, model)` 变了时重算；`relaxed_for` 的第二个参数改成 `CallsInRange`，Active 下只调用过别的模型就只放宽 Model。
+- **验收 1。** 会话表工具栏 `flex_wrap`，Preview 用 `ml_auto()`，搜索框 `flex_basis(160).flex_grow(1).max_w(220)`；控件挂上 `toolbar-<id>` 的 debug selector，`AppRoot.session_toolbar` 记下上一帧的行数与是否都在窗口里（导览状态行的 `toolbar=`）。
+- **验收 2。** 窄于 960 时指标卡三张加两张，数字 `whitespace_nowrap`；Usage 工具栏的分隔线按 `on_children_prepainted` 量到的位置决定画不画（`UsageState.separator_shown`）。
+- **验收 3。** `index.md` 跨期验收第 3 条改了措辞，并补了一条共用口径：Model 在 Active 下按调用比。
+- **验收 4。** `style.rs` 把通知放到右下角、状态栏上方 12px（`STATUS_BAR_H` 常量，状态栏也用它）。
+- **导览。** `AUTOPLAY_STEPS` 17 步，`jump-session` 之后加 `sessions-narrow`（`AUTOPLAY_SESSIONS_NARROW_W` = 700，截完恢复）；脚本头的编号、STEPS、判定和 Makefile 的说明一起改了。
+
+## 交给协调者（r1）
+
+- `AGENTS.md`：「各功能要先知道的事」的 Usage 视图一条可补「Active 下 Model 按调用比（`active_ids_for`）」「点 session 时只在搜索结果确定后保留搜索（`keeps_search`）」「通知在右下角」；截图命令一节 `screenshot-usage-view` 现在是 18 张。
+- spec 的实施步骤勾选、`status.md`。
+- `scripts/screenshot-clicks.sh` 的坐标：默认状态下这次没让任何控件移位（逐个对过）；但它的 x 坐标在第 3 期加 `Sessions | Usage` 切换时就已经偏了（现在 Project 在 164–270、Updated 381–523、Kind 529–614，脚本点的是 54 / 274 / 383），需要另开任务校对，我没改，也没有跑它（要真点击）。
+- 可记进 `kb/known-issues.md`：700px 宽时状态栏左右两段文字重叠（`16-sessions-narrow.png` 底部 `Today $933.08` 和 `indexe 49807 messages` 挤在一起）；详情面板在 700px 下被压得只剩半宽，标题和按钮被截。都不在这次范围里。
+- 可考虑：给窗口设最小宽度（例如 900），上面两条和 Usage 700px 的排版问题就不会出现；这是产品决定，没做。
+- 会话表 Model 下拉在 Active 下只列出当过主模型的模型，只在这段时间被调用过、从没当过主模型的模型在会话表里选不到（Usage 里能选，选好再跳就行）。要改得让菜单按 Active 的范围数调用，没做。
+
+## 踩过的坑（r1）
+
+- **GPUI 的动画走真实时钟。** 通知从上面滑进来要 400ms，`advance_clock` 推不动；刚推出的那一帧它还在偏上 96px 的位置，「通知盖住 `↗`」的测试在旧代码上竟然通过。要在真实时间里一帧帧画 0.6 秒（`settle_animations`）再点，测试才在旧代码上红。
+- **Enter 把焦点交回表格。** 测「打了新词还没搜」时，第一次搜索按 Enter 之后焦点在表格，接着 `input` 打的字进不了搜索框；要先 `cmd-f`。
+- **`debug_bounds` 只认 `&'static str`。** `debug_selector` 的闭包可以返回 `format!("toolbar-{id}")`，但测试里 `cx.debug_bounds(..)` 只收 `&'static str`，查的时候写字面量（`"toolbar-preview"`）或常量。
+- **`flex_1` 的占位在换行时会骗人。** 它宽度为 0，换行时留在上一行末尾，右边那组跑到下一行最左边；改成 `ml_auto()`。去掉它之后开着 Active 和正则时搜索框宽了 6px（少了一个间距），默认状态不变。
+- **变异检查会改源码的 mtime。** `mutate-r1.py` 改完会还原，但文件时间比测试日志晚，看上去像测试之后又改过代码；最后在还原后的源码上重跑了一次 `make test` 作证。

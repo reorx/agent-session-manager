@@ -30,6 +30,8 @@ Usage 视图告诉用户「这一天花了 $300，大头在某个项目的某几
 
 - 「费用最高的 session」里每一行都可以点（鼠标移上去整行高亮）。点了之后切到会话表，选中这个 session，表格滚到它，详情面板显示它，键盘焦点在表格上。
 - 如果当前的过滤或搜索把它挡在外面，应用只放宽挡住它的那几项，其余不动，并弹一条通知说明放宽了什么，例如「已清除过滤：Updated、Model」。可能被放宽的有：搜索词（清空）、Updated（改为 Any time）、Project（改为 All）、Kind（把它的类型勾上）、Model（改为 All）、只看收藏（关掉）、不显示没有 prompt 的 session（改为显示）、「这段时间里有活动」（清掉）。
+- 搜索只在结果确定还会显示它时保留：搜索已经结束、搜索框里的词就是搜过的词、它在结果里。新的词还在搜（或刚打完、还没开始搜）时，旧结果说明不了新词，搜索被清空，免得新结果到达时把刚选中的它换掉。
+- 「这段时间里有活动」开着时，Model 按调用比（见下）：它在这段时间里调用过别的模型、没调用过选中的模型，放宽的是 Model；这段时间里一次调用都没有，放宽的是 Active（Model 回到按主模型比，它的主模型不是选中的那个时 Model 也放宽）。
 - 这个 session 的记录文件已被清理、会话表里只剩 History 行时：照常选中，详情显示它在历史里的 prompt。
 - 会话表里完全没有这个 session（记录已删，也不在历史里）：不切换视图，弹一条通知「这个 session 的记录已被清理，只保留了用量」。这种行的短 id 用灰色显示，鼠标移上去的提示写明原因。
 - 这个 session 属于会话表里被隐藏的项目：不切换视图，弹通知「这个 session 的项目在会话表里被隐藏，可在 Project 菜单里恢复显示」。不替用户取消隐藏。
@@ -47,6 +49,7 @@ Usage 视图告诉用户「这一天花了 $300，大头在某个项目的某几
 - Updated 被改为 Any time（否则两个时间条件会互相打架）；搜索词被清空。
 - 工具栏在 Updated 后面出现一个小标签，写着这段时间，例如 `Active 11-12 ✕` 或 `Active 11-01 – 11-12 ✕`。点 ✕ 清掉这个过滤，其他过滤不变，焦点留在表格上。
 - 这个过滤和其他过滤、搜索叠加：再选项目、再搜索，都在「这段时间里有活动」的范围内进行。
+- 这个过滤开着时，Model 的含义换成「这段时间里调用过这个模型」，和 Usage 的 Model 一样按调用比，不再按 session 的主模型比（用户决定，见实现记录）。所以从 Usage 带着 Model 跳过来，列出的正是 Usage 算进去的那批 session，只缺记录已清理的和被其他过滤（收藏、空 session、隐藏的项目等）挡住的。跳转之后再换模型也一样按调用比；清掉这个过滤后，Model 回到按主模型比。
 - 这段时间里有调用、但会话表里已经没有的 session（记录被清理）列不出来。有这种情况时，跳转后弹一条通知：「这段时间还有 N 个 session 的记录已被清理，未列出」。
 - 这个过滤不随重启保留：它是一次跳转的上下文。
 - 应用开着时扫到了新的调用，列表跟着更新（范围含今天时，新开始的 session 会出现）。
@@ -76,7 +79,7 @@ Usage 视图告诉用户「这一天花了 $300，大头在某个项目的某几
 7. 点 Sessions 卡的 `↗`：Project / Kind / Model 不变，加上 Active 过滤。
 8. 点标签的 ✕：过滤清掉，其他过滤不变，焦点在表格上。
 9. Active 过滤开着时搜索，结果都在过滤后的范围内；清掉过滤后搜索重跑。
-10. 有记录已清理的 session 时，通知里的 N 等于 Usage 的 Sessions 数减去列表里的行数。
+10. 有记录已清理的 session 时，通知里的 N 等于 Usage 的 Sessions 数减去列表里的行数（开着 Model 过滤时也成立）。
 11. 重启后没有 Active 过滤，Updated 是跳转时设的 Any time。
 
 ## Tech Design
@@ -114,13 +117,13 @@ Usage 视图告诉用户「这一天花了 $300，大头在某个项目的某几
 
 **core `usage.rs`**
 
-- `UsageData::active_sessions(&self, span: Span) -> HashSet<&str>`：有任何一个桶落在这段小时区间里的 session id（不看过滤；主线和 subagent 的桶都算）。
+- `UsageData::active_sessions(&self, span: Span, model: Option<&str>) -> HashSet<&str>`：有任何一个桶落在这段小时区间里的 session id（主线和 subagent 的桶都算）；给了模型时只算这个模型的桶（两边都按 `pricing::normalize` 比，和 `UsageFilter::model` 相同），其余过滤不看。
 
 **app `model.rs`**
 
 - `ActiveRange { first: NaiveDate, last: NaiveDate }`（起止用量日，都包含），`label()` 返回 `11-12` 或 `11-01 – 11-12`（跨年时带年份）。
 - `Filter` 加 `active: Option<ActiveRange>`。`Filter::matches` 不变（活动与否由 delegate 判）。
-- `Filter::relaxed_for(&self, row: &SessionRow, active_ok: bool) -> (Filter, Vec<&'static str>)`：逐项检查 `matches` 里的每个条件，不满足的那一项改成不限制，并记下名字（`"Updated"`、`"Project"`、`"Kind"`、`"Model"`、`"Favorites"`、`"Empty sessions"`、`"Active"`）。`hidden_projects` 不在其中，调用方先行判断。
+- `Filter::relaxed_for(&self, row: &SessionRow, calls: CallsInRange) -> (Filter, Vec<&'static str>)`（返工前是 `active_ok: bool`；`CallsInRange` 是 `None` / `OtherModels` / `Picked`，说这一行在 Active 的日子里调用了什么）：逐项检查 `matches` 里的每个条件，不满足的那一项改成不限制，并记下名字（`"Updated"`、`"Project"`、`"Kind"`、`"Model"`、`"Favorites"`、`"Empty sessions"`、`"Active"`）。`hidden_projects` 不在其中，调用方先行判断。
 
 **app `table.rs`**
 
@@ -209,8 +212,21 @@ app `keyboard_tests.rs`（无界面窗口，fixture 的调用时间固定，范�
 - **集合在 `apply_filter` 里给**：`active` 变了时 `apply_filter` 自己算集合（`active_ids_in`）并在 `set_filter` 之前交给 delegate，调用方不用先调 `sync_active_ids`；`sync_active_ids` 只用于收到用量之后。
 - **用量更新后的刷新走扫描刷新的规矩**：集合真变了才 `relocate_selection(false)`（不把表格滚回选中行），搜索中和整表重读一样走静默的 `refresh_search`，不是上文写的 `after_rows_changed` + `run_search`（AGENTS.md：扫描引起的刷新不滚回选中行、搜索模式下走 `refresh_search`）。
 - **`reveal_session` 把 `wanted_id` 设成目标，而不是清掉**：放宽过滤途中表格可能先选中别的行，启动时可能还在等恢复的选中，都让给目标。搜索中又放宽了过滤时，过滤变化引起的重搜记成 `Refresh`（结果攒齐再换），目标在重搜期间一直选中。被清空的搜索在通知里叫 `Search`（`已清除过滤：Search、Updated`）。
-- **通知的 N 是集合差，不是减法**：N = Usage 在同样 Project / Kind / Model 下算到、表格却没列出的 session 数。会话表的 Model 按 session 的主模型比，Usage 按每次调用的模型比，开着 Model 过滤时表格里可能有 Usage 没算的行，减法会少算。文字按原因分三种：全是记录已清理的「这段时间还有 N 个 session 的记录已被清理，未列出」；全是被其他过滤挡住的「…被会话表的其他过滤挡住，未列出」；两种都有的「这段时间还有 N 个 session 未列出：K 个的记录已被清理，其余被会话表的其他过滤挡住」。没有 Model 过滤时 N 等于 Usage 的 Sessions 数减去行数（验收 10，导览的 `jump-project` 判定这个等式）。
+- **通知的 N 是集合差，不是减法**：N = Usage 在同样 Project / Kind / Model 下算到、表格却没列出的 session 数。会话表的 Model 按 session 的主模型比，Usage 按每次调用的模型比，开着 Model 过滤时表格里可能有 Usage 没算的行，减法会少算。文字按原因分三种：全是记录已清理的「这段时间还有 N 个 session 的记录已被清理，未列出」；全是被其他过滤挡住的「…被会话表的其他过滤挡住，未列出」；两种都有的「这段时间还有 N 个 session 未列出：K 个的记录已被清理，其余被会话表的其他过滤挡住」。没有 Model 过滤时 N 等于 Usage 的 Sessions 数减去行数（验收 10，导览的 `jump-project` 判定这个等式）。返工后 Active 下 Model 也按调用比（见下节），开着 Model 时减法同样成立；集合差的算法保留，少见的情况下两者仍会不同：会话表 Kind 只勾了 History、关了 CLI 时，记录已删的 CLI session 的 History 行列得出来，Usage 却不算它。
 - **Sessions 卡的 `↗` 只在范围内有调用时显示**（`Empty::No`），没有调用、账本为空、账本不可用时不画。
 - **autoplay 加在 `ASM_USAGE_VIEW_AUTOPLAY` 的导览里，不是 `ASM_USAGE_AUTOPLAY`**：后者的 gate 驱动改数据的扫描和重建（`make screenshot-usage`），跳转只改视图状态，属于第 3 期的 Usage 视图导览（`make screenshot-usage-view`）。两步放在 `sessions` 之后、`empty` 之前，而不是 `project` 之后：放在中间，Active 过滤会一直带到 `month` / `narrow` / `sessions` 的截图里，前 13 张的含义就变了。状态行加了会话表一侧的字段（`active=`、`updated=`、`rows=`、`selected=`、`detail=`、`focus=`、`usage-sessions=`），`jump-project` 把列出的 id 打成 `jump-rows: …`，供和账本副本逐个对。
 - **第 4 步的键盘测试和实现是一起写的**，没有先跑出红。补的证据是变异检查：10 处改动（去掉 `stop_propagation`、收到用量后不同步集合、`apply_filter` 不给集合、不清搜索、不改 Updated、不清 `since/until`、通知不分原因、灰色判定恒真、不查隐藏项目、清标签后不给表格焦点）各自让对应的测试失败（`tmp/2026-11-12-usage-stats/usage-p4-drill/mutations.log`）。
 - **测试比上文多四个**：`a_session_left_only_in_history_is_revealed_as_its_history_row`（只剩 History 行的 session 照常选中）；三个鼠标测试 `a_click_on_a_session_line_in_usage_reveals_it`、`a_click_on_a_project_s_arrow_jumps_and_does_not_also_click_its_row`、`the_sessions_card_s_arrow_and_the_tag_s_cross_work_with_the_mouse` 用测试窗口的鼠标点击（`debug_selector` 定位）代替了上文的 cliclick 检查；真点击仍留给实机验收。
+
+## 返工（2026-11-16，usage-p4-drill-r1）
+
+依据审阅 `tmp/2026-11-12-usage-stats/reviews/usage-p4-rv.md` 的 R1、D1 和实机验收 `tmp/2026-11-12-usage-stats/usage-p4-accept/report.md`「发现的问题」1–4。证据和红绿记录在 `tmp/2026-11-12-usage-stats/usage-p4-drill/r1/`，总结在 `kb/sessions/2026-11-16-usage-p4-drill.md` 的 r1 一节。
+
+- **R1，搜索结果还在路上时点 session**：表格在新搜索的第一批结果到达前留着旧命中，原来只看 `hit(id)`，旧命中里有它就保留搜索，新结果到达后把刚选中的它换掉。现在由 `drilldown::keeps_search(settled, hit, truncated, widened)` 决定：搜索已结束、搜索框里的词就是搜过的词（`settled`），它在命中里，而且结果没被截到最新 200 个时才允许在放宽后的过滤上重跑；否则清空搜索（通知里的 `Search`），旧 `seq` 作废，迟到的结果被丢掉。搜索框里打了词还在防抖的情况一样处理（词和 `query` 不同）。选了「清空」而不是「等结果到了再决定」：点击是明确要看它，等待会让它先被选中、再在结果到达时被拿走或出现第二次通知。测试在同一次 update 里发起新搜索、切到 Usage、点它，再手动投递那次搜索的结果，不靠线程竞速。
+- **D1，用户决定（brief 决定 20）：下钻时按调用筛**。`Filter.active` 开着时 `Filter::matches` 不看主模型，Model 并进活动集合：`UsageData::active_sessions(span, model)` 只算这个模型的桶，`AppRoot::active_ids_for(filter)` 按过滤的范围和模型取集合；`apply_filter` 在 `active` 或 `model` 变了时重算，所以跳转后再换模型也按调用比，清掉 Active 后回到主模型。`relaxed_for` 的第二个参数从 `active_ok: bool` 换成 `CallsInRange`（`None` / `OtherModels` / `Picked`）：一次调用都没有放宽 Active（之后 Model 按主模型比，不符也放宽），只调用过别的模型放宽 Model。按审阅的 A / B / C 例子写了集合和通知的测试（`under_the_active_filter_the_model_is_the_one_called_in_those_days`）。会话表 Model 下拉里的数字仍是按主模型数的全部 session（它本来就不随 Project、Updated 变），Active 下没有改成按调用数；只在某些天被调用、从来不是主模型的模型在会话表的下拉里选不到，要在 Usage 里选好再跳。
+- **验收 1，会话表工具栏在窄窗口下溢出**：选了换行，不收起控件。理由：和 Usage 工具栏一致；所有控件仍是一次点击，不多一层菜单；默认宽度下一行放得下时布局不变（1440px 下各控件位置改前改后逐个对过，`r1/toolbar-1440-before.txt` / `-after.txt`，默认状态完全一致；开着 Active 和正则时搜索框比原来宽 6px，因为去掉的占位元素原来也占一个间距）。Preview 改用 `ml_auto()` 靠右，搜索框 `flex_basis(160).flex_grow(1.).max_w(220)`，先缩到 160 再换行。`screenshot-clicks.sh` 的坐标对默认状态不受影响；但它的 x 坐标早在第 3 期加 `Sessions | Usage` 切换时就已经偏了（例如 Kind 现在在 530–614，脚本点 383），交给协调者。
+- **验收 2，700pt 下 Usage 的大数字折行、分隔线落在行末**：窗口窄于 960（`NARROW_W`）时指标卡排成三张加两张，大数字 `whitespace_nowrap`。分隔线的规则不用写死阈值（项目名长短会改变断行处）：`on_children_prepainted` 量出这一帧各子元素的位置，分隔线和前后控件在同一行才画，不画时 `.invisible()` 照样占位，免得宽度变了又能放下一行、来回闪。
+- **验收 3**：`index.md` 跨期验收第 3 条按本 spec 的行为改了措辞：删文件之后、重建索引之前点它是选中它的 History 行；Rebuild Index 之后（它不在 `history.jsonl` 里时）才是灰色、点它提示已被清理。
+- **验收 4，通知盖住 Sessions 卡的 `↗`**：改了。通知统一放到右下角、状态栏上方（`install_theme` 里 `theme.notification.placement`）。右上角会盖住工具栏右端、Usage 的 Sessions 卡 `↗`，以及跳转之后详情面板标题行的按钮（Copy resume 等），都是下一下最可能点的地方；右下角盖的是内容。测试在通知滑到最终位置后用测试窗口的鼠标点 `↗`。
+- **导览加 `sessions-narrow`**：`jump-session` 之后把窗口改到 700px 截会话表（Active 标签还在），状态行加 `toolbar=<行数>/inside|overflow`，脚本判定多于一行且都在窗口里。截图从 17 张变成 18 张（`16-sessions-narrow.png`，之后 `17-empty`、`18-no-usage`）。
+- **先红后绿**：R1 两个、D1 三个（含 model.rs 的纯函数测试）在改实现之前跑过红（`r1/red-app.log`）；窄窗口、分隔线、指标卡、通知四个测试也先在旧布局上跑红再改。之后又用 `r1/mutate-r1.py` 把每一项改回旧行为（11 处，含 core 的 `active_sessions` 忽略模型），各自让对应的测试失败（`r1/mutations.log`）。

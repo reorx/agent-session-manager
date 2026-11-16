@@ -231,15 +231,48 @@ fn a_session_is_active_in_a_span_when_any_of_its_calls_falls_inside() {
         calls_at("outside", &[(1, false), (30, false)]),
         calls_at("subagent", &[(5, false), (12, true)]),
     ]);
-    let mut active: Vec<&str> = data.active_sessions(span).into_iter().collect();
+    let mut active: Vec<&str> = data.active_sessions(span, None).into_iter().collect();
     active.sort();
     assert_eq!(active, ["across", "inside", "subagent"], "calls before and after the span but none inside do not count");
-    assert!(data.active_sessions(Span { from_ms: 0, until_ms: 0 }).is_empty());
+    assert!(data.active_sessions(Span { from_ms: 0, until_ms: 0 }, None).is_empty());
     // a bucket without a call (as `summary` skips them) does not make a session active
     let mut idle = calls_at("idle", &[(12, false)]);
     idle.hours[0].responses = 0;
     data.apply(vec![idle]);
-    assert!(!data.active_sessions(span).contains("idle"));
+    assert!(!data.active_sessions(span, None).contains("idle"));
+}
+
+/// Under the session table's Active filter a picked model is the calls' model, as in Usage
+/// (decision 20 of the usage-stats brief): a session counts when it called that model in the
+/// span, whatever else it called and whatever model it spent the most on.
+#[test]
+fn a_session_is_active_for_a_model_when_it_called_that_model_in_the_span() {
+    let span = Span { from_ms: 10 * 3_600_000, until_ms: 20 * 3_600_000 };
+    let call = |hour: i64, model: &str| HourlyUsage { hour, model: model.into(), responses: 1, tokens: Tokens { input: 1, ..Default::default() }, ..Default::default() };
+    let with = |id: &str, hours: Vec<HourlyUsage>| SessionUsage { session: LedgerSession { id: id.into(), ..Default::default() }, hours };
+    let mut data = UsageData::default();
+    data.replace_all(vec![
+        // mostly Opus, but only Sonnet in the span
+        with("a", vec![call(1, "claude-opus-5-5"), call(2, "claude-opus-5-5"), call(12, "claude-sonnet-5-5")]),
+        // mostly Sonnet, one Opus call in the span, named with its date and window
+        with("b", vec![call(1, "claude-sonnet-5-5"), call(13, "claude-opus-5-5-20261101[1m]")]),
+        // Opus in the span from a subagent
+        with("c", vec![HourlyUsage { sub: true, ..call(14, "claude-opus-5-5") }]),
+        // Opus outside the span only
+        with("d", vec![call(30, "claude-opus-5-5"), call(15, "claude-haiku-5-5")]),
+    ]);
+    let sorted = |model: Option<&str>| {
+        let mut ids: Vec<&str> = data.active_sessions(span, model).into_iter().collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(sorted(None), ["a", "b", "c", "d"], "without a model any call counts");
+    assert_eq!(sorted(Some("claude-opus-5-5")), ["b", "c"]);
+    assert_eq!(sorted(Some("claude-opus-5-5-20261101")), ["b", "c"], "the pick is compared as Usage names models");
+    assert_eq!(sorted(Some("claude-sonnet-5-5")), ["a"]);
+    let filter = UsageFilter { model: Some("claude-opus-5-5".into()), ..Default::default() };
+    let counted: Vec<String> = data.summary(span, &filter).by_session.into_iter().map(|s| s.id).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    assert_eq!(counted, sorted(Some("claude-opus-5-5")), "the same sessions Usage counts for that model");
 }
 
 #[test]
@@ -254,7 +287,7 @@ fn the_span_ends_are_usage_days() {
         calls_at("next-day-before-four", &[(hour("2026-11-13T03:59:00+08:00"), false)]),
         calls_at("next-day-at-four", &[(hour("2026-11-13T04:00:00+08:00"), false)]),
     ]);
-    let mut active: Vec<&str> = data.active_sessions(span).into_iter().collect();
+    let mut active: Vec<&str> = data.active_sessions(span, None).into_iter().collect();
     active.sort();
     assert_eq!(active, ["first-day-at-four", "next-day-before-four"], "03:59 the day after still belongs to the last day, 04:00 does not");
 }

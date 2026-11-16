@@ -607,6 +607,17 @@ impl ActiveRange {
     }
 }
 
+/// What the usage data says of a session's calls in the Active filter's days.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CallsInRange {
+    /// None at all.
+    None,
+    /// Some, none of them of the Model filter's model.
+    OtherModels,
+    /// Some of the Model filter's model, or some at all when no model is picked.
+    Picked,
+}
+
 /// Filter applied to the table rows before sorting.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Filter {
@@ -619,13 +630,14 @@ pub struct Filter {
     /// Sessions that never got a human prompt are hidden unless this is set.
     pub show_empty: bool,
     pub kinds: KindSet,
-    /// Only sessions whose main model is this one.
+    /// Only sessions whose main model is this one; under `active`, only sessions that called
+    /// it in those days (the Active set is worked out with it, as Usage counts).
     pub model: Option<SharedString>,
     /// `project_key`s whose sessions never show (noise such as a probe tool's directory).
     pub hidden_projects: BTreeSet<SharedString>,
-    /// Only sessions with a call in these days (a jump from Usage). `matches` does not look at
-    /// it: the table holds the sessions that had one (`SessionTableDelegate::set_active_ids`).
-    /// Never saved.
+    /// Only sessions with a call in these days (a jump from Usage), of `model` when one is
+    /// picked. `matches` does not look at it: the table holds the sessions that had one
+    /// (`SessionTableDelegate::set_active_ids`). Never saved.
     pub active: Option<ActiveRange>,
 }
 
@@ -656,17 +668,29 @@ impl Filter {
         self.show_empty || row.prompts > 0
     }
 
+    /// The Model pick lets `row` through. Under Active the pick is the calls' model and the
+    /// Active set has already decided.
     fn model_ok(&self, row: &SessionRow) -> bool {
+        self.active.is_some() || self.main_model_ok(row)
+    }
+
+    fn main_model_ok(&self, row: &SessionRow) -> bool {
         // a pick saved by an older version may still carry a date
         self.model.as_deref().is_none_or(|m| row.primary_model.as_deref() == Some(normalize(m)))
     }
 
     /// The filter that lets `row` through with as little changed as possible, and the names of
     /// what changed, in toolbar order: Updated → any time, Project → all, Kind → the row's kind
-    /// on, Model → all, Favorites only → off, Empty sessions → shown, Active → off (when
-    /// `active_ok` says the row had no call in those days). Hidden projects stay hidden: the
-    /// caller checks them first.
-    pub fn relaxed_for(&self, row: &SessionRow, active_ok: bool) -> (Filter, Vec<&'static str>) {
+    /// on, Model → all, Favorites only → off, Empty sessions → shown, Active → off. `calls`
+    /// says what the row called in the Active days: nothing takes Active off (and the main
+    /// model decides the Model pick again), other models than the pick take the pick off.
+    /// Hidden projects stay hidden: the caller checks them first.
+    pub fn relaxed_for(&self, row: &SessionRow, calls: CallsInRange) -> (Filter, Vec<&'static str>) {
+        let active_off = self.active.is_some() && calls == CallsInRange::None;
+        let model_off = match self.active {
+            Some(_) if !active_off => self.model.is_some() && calls == CallsInRange::OtherModels,
+            _ => !self.main_model_ok(row),
+        };
         let mut out = self.clone();
         let mut names = Vec::new();
         if !self.updated_ok(row) {
@@ -681,7 +705,7 @@ impl Filter {
             out.kinds.toggle(row.kind);
             names.push("Kind");
         }
-        if !self.model_ok(row) {
+        if model_off {
             out.model = None;
             names.push("Model");
         }
@@ -693,7 +717,7 @@ impl Filter {
             out.show_empty = true;
             names.push("Empty sessions");
         }
-        if self.active.is_some() && !active_ok {
+        if active_off {
             out.active = None;
             names.push("Active");
         }
@@ -1282,8 +1306,8 @@ pub mod tests {
 
     /// `(relaxed, names)`, after checking the relaxed filter lets the row through and keeps the
     /// hidden projects as they were.
-    fn relax(filter: &Filter, row: &SessionRow, active_ok: bool) -> (Filter, Vec<&'static str>) {
-        let (relaxed, names) = filter.relaxed_for(row, active_ok);
+    fn relax(filter: &Filter, row: &SessionRow, calls: CallsInRange) -> (Filter, Vec<&'static str>) {
+        let (relaxed, names) = filter.relaxed_for(row, calls);
         assert!(relaxed.matches(row), "{names:?}: the row shows with the relaxed filter");
         assert_eq!(relaxed.hidden_projects, filter.hidden_projects, "hidden projects are never shown on the user's behalf");
         (relaxed, names)
@@ -1311,45 +1335,72 @@ pub mod tests {
 
         let mut no_cli = base.kinds;
         no_cli.toggle(Kind::Cli);
-        let cases: Vec<(Filter, &SessionRow, bool, &str, Filter)> = vec![
-            (Filter { since_ms: Some(15_000), ..base.clone() }, &r, true, "Updated", Filter { since_ms: None, until_ms: None, ..base.clone() }),
-            (Filter { until_ms: Some(9_000), ..base.clone() }, &r, true, "Updated", Filter { since_ms: None, until_ms: None, ..base.clone() }),
-            (Filter { project: Some("-p-beta".into()), ..base.clone() }, &r, true, "Project", Filter { project: None, ..base.clone() }),
-            (Filter { kinds: no_cli, ..base.clone() }, &r, true, "Kind", base.clone()),
-            (Filter { model: Some("claude-opus-5-5".into()), ..base.clone() }, &r, true, "Model", base.clone()),
-            (Filter { favorites_only: true, ..base.clone() }, &r, true, "Favorites", base.clone()),
-            (base.clone(), &empty, true, "Empty sessions", Filter { show_empty: true, ..base.clone() }),
-            (base.clone(), &r, false, "Active", Filter { active: None, ..base.clone() }),
+        let opus = || Some(SharedString::from("claude-opus-5-5"));
+        let no_active = Filter { active: None, ..base.clone() };
+        use CallsInRange::{None as NoCall, OtherModels, Picked};
+        let cases: Vec<(Filter, &SessionRow, CallsInRange, &str, Filter)> = vec![
+            (Filter { since_ms: Some(15_000), ..base.clone() }, &r, Picked, "Updated", Filter { since_ms: None, until_ms: None, ..base.clone() }),
+            (Filter { until_ms: Some(9_000), ..base.clone() }, &r, Picked, "Updated", Filter { since_ms: None, until_ms: None, ..base.clone() }),
+            (Filter { project: Some("-p-beta".into()), ..base.clone() }, &r, Picked, "Project", Filter { project: None, ..base.clone() }),
+            (Filter { kinds: no_cli, ..base.clone() }, &r, Picked, "Kind", base.clone()),
+            // without Active the main model decides, under it the calls in its days
+            (Filter { model: opus(), ..no_active.clone() }, &r, Picked, "Model", no_active.clone()),
+            (Filter { model: opus(), ..base.clone() }, &r, OtherModels, "Model", base.clone()),
+            (Filter { favorites_only: true, ..base.clone() }, &r, Picked, "Favorites", base.clone()),
+            (base.clone(), &empty, Picked, "Empty sessions", Filter { show_empty: true, ..base.clone() }),
+            (base.clone(), &r, NoCall, "Active", no_active.clone()),
         ];
-        for (filter, row, active_ok, name, expected) in cases {
-            let (relaxed, names) = relax(&filter, row, active_ok);
+        for (filter, row, calls, name, expected) in cases {
+            let (relaxed, names) = relax(&filter, row, calls);
             assert_eq!(names, [name]);
             assert_eq!(relaxed, expected, "{name}: only that filter changed");
         }
 
         // the kind turned on is the row's: the other kinds stay as they were
         let mut sdk_only = KindSet { cli: false, sdk: true, bg: false, history: false };
-        let (relaxed, _) = relax(&Filter { kinds: sdk_only, ..base.clone() }, &r, true);
+        let (relaxed, _) = relax(&Filter { kinds: sdk_only, ..base.clone() }, &r, Picked);
         sdk_only.cli = true;
         assert_eq!(relaxed.kinds, sdk_only);
 
-        // two at once, both relaxed, in the order the toolbar has them
-        let filter = Filter { since_ms: Some(15_000), model: Some("claude-opus-5-5".into()), ..base.clone() };
-        let (relaxed, names) = relax(&filter, &r, false);
+        // two at once, both relaxed, in the order the toolbar has them: no call in the Active
+        // days, so Active goes, and then the main model decides the Model pick
+        let filter = Filter { since_ms: Some(15_000), model: opus(), ..base.clone() };
+        let (relaxed, names) = relax(&filter, &r, NoCall);
         assert_eq!(names, ["Updated", "Model", "Active"]);
         assert_eq!(relaxed, Filter { since_ms: None, until_ms: None, active: None, ..base.clone() });
+        // a session whose main model is the pick keeps it once Active is gone
+        let mut opus_row = summary("o", "/p/alpha", 10_000);
+        opus_row.model_usage = vec![usage("claude-opus-5-5", 0, 0, 1)];
+        let opus_row = builtin_row(&opus_row);
+        let (relaxed, names) = relax(&Filter { model: opus(), ..base.clone() }, &opus_row, NoCall);
+        assert_eq!(names, ["Active"]);
+        assert_eq!(relaxed, Filter { model: opus(), ..no_active.clone() });
+    }
+
+    /// Under the Active filter the Model pick is the calls' model in its days (decision 20):
+    /// the Active set, worked out with the model, decides; the main model does not. Without
+    /// Active it is the main model again.
+    #[test]
+    fn under_the_active_filter_the_model_pick_is_not_the_main_model() {
+        let filter = Filter { model: Some("claude-opus-5-5".into()), active: Some(nov(12)), ..Default::default() };
+        let fable = on("b", vec![usage("claude-fable-5-1", 0, 0, 1)]);
+        assert!(filter.matches(&fable), "the Active set (by calls) decides, not the main model");
+        assert!(filter.matches(&on("d", vec![])));
+        assert_eq!(filter.relaxed_for(&fable, CallsInRange::Picked), (filter.clone(), Vec::new()), "it had an Opus call in those days");
+        let main_model = Filter { active: None, ..filter };
+        assert!(!main_model.matches(&fable));
     }
 
     #[test]
     fn a_row_that_already_shows_relaxes_nothing() {
         let r = row("r", "/p/alpha", 10_000);
         for filter in [Filter::default(), Filter { project: Some("-p-alpha".into()), since_ms: Some(1), active: Some(nov(1)), ..Default::default() }] {
-            assert_eq!(filter.relaxed_for(&r, true), (filter.clone(), Vec::new()));
+            assert_eq!(filter.relaxed_for(&r, CallsInRange::Picked), (filter.clone(), Vec::new()));
         }
         // a hidden project is not relaxed here: the caller says so and stops
         let mut hidden = Filter::default();
         hidden.hide_project("-p-alpha".into());
-        assert_eq!(hidden.relaxed_for(&r, true), (hidden.clone(), Vec::new()));
+        assert_eq!(hidden.relaxed_for(&r, CallsInRange::Picked), (hidden.clone(), Vec::new()));
     }
 
     #[test]

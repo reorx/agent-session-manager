@@ -231,11 +231,15 @@ impl UsageData {
         for s in self.sessions.values().filter(|s|s.hours.iter().any(|h|h.responses>0)) {entries.entry(s.session.project_key.clone()).or_insert_with(||ProjectEntry{key:s.session.project_key.clone(),name:project_name(&s.session),sessions:0}).sessions+=1;}
         entries.into_values().collect()
     }
-    /// Sessions with at least one call inside `span`, their subagents' calls included and
-    /// whatever the filters: what "active in this range" means for the session table.
-    pub fn active_sessions(&self, span: Span) -> HashSet<&str> {
+    /// Sessions with at least one call inside `span`, their subagents' calls included, of `model`
+    /// when one is given (compared as `pricing::normalize` names it, like `UsageFilter::model`),
+    /// whatever the other filters: what "active in this range" means for the session table.
+    pub fn active_sessions(&self, span: Span, model: Option<&str>) -> HashSet<&str> {
+        let model = model.map(pricing::normalize);
         self.sessions.values()
-            .filter(|s| s.hours.iter().any(|h| h.responses > 0 && span.contains_hour(h.hour)))
+            .filter(|s| s.hours.iter().any(|h| {
+                h.responses > 0 && span.contains_hour(h.hour) && model.is_none_or(|m| m == pricing::normalize(&h.model))
+            }))
             .map(|s| s.session.id.as_str())
             .collect()
     }

@@ -66,6 +66,10 @@ pub struct UsageState {
     pub models: Vec<(String, u64)>,
     /// Sessions with calls by kind (CLI, SDK, BG), for the Kind dropdown.
     pub kind_counts: [usize; 3],
+    /// The toolbar's line between the ranges and Project / Kind / Model is painted: it sat
+    /// between two controls on one row when last laid out (a wrapped toolbar would end a row
+    /// with it).
+    pub separator_shown: Rc<Cell<bool>>,
 }
 
 impl UsageState {
@@ -86,6 +90,7 @@ impl UsageState {
             projects: Vec::new(),
             models: Vec::new(),
             kind_counts: [0; 3],
+            separator_shown: Rc::new(Cell::new(true)),
         }
     }
 }
@@ -986,6 +991,9 @@ pub const UNLISTED_TIP: &str = "Transcript cleaned up: only its usage is kept";
 pub const SESSION_LINE_SELECTOR: &str = "usage-session-line-0";
 pub const PROJECT_JUMP_SELECTOR: &str = "usage-project-jump-0";
 pub const SESSIONS_JUMP_SELECTOR: &str = "usage-sessions-jump";
+/// The five cards and their big numbers (tests).
+pub const CARD_SELECTORS: [&str; 5] = ["usage-card-0", "usage-card-1", "usage-card-2", "usage-card-3", "usage-card-4"];
+pub const CARD_VALUE_SELECTORS: [&str; 5] = ["usage-card-value-0", "usage-card-value-1", "usage-card-value-2", "usage-card-value-3", "usage-card-value-4"];
 
 impl AppRoot {
     /// The Usage view under the toolbar: five cards, the chart, then "Where the money goes" next
@@ -1010,7 +1018,7 @@ impl AppRoot {
             div().id("usage-scroll").size_full().overflow_y_scrollbar().child(
                 v_flex()
                     .w_full()
-                    .child(render_cards(&snap.cards, self.render_sessions_jump(cx), cx))
+                    .child(render_cards(&snap.cards, narrow, self.render_sessions_jump(cx), cx))
                     .child(self.render_chart_panel(cx))
                     .child(grid2(narrow, self.render_parts(cx), self.render_models(cx)))
                     .child(grid2(narrow, self.render_projects(cx), self.render_sessions(cx))),
@@ -1207,9 +1215,12 @@ impl AppRoot {
     }
 }
 
-/// The five cards in a row; `jump` goes next to the Sessions card's label.
-fn render_cards(cards: &[Card], mut jump: Option<Stateful<Div>>, cx: &App) -> Div {
-    let mut row = h_flex().w_full().items_stretch().border_b_1().border_color(style::hairline());
+/// The five cards in a row, or when the window is narrow three over two (five cards of a
+/// 700 px window had no room for a number like `$5,913.96`); `jump` goes next to the Sessions
+/// card's label. A number never breaks.
+fn render_cards(cards: &[Card], narrow: bool, mut jump: Option<Stateful<Div>>, cx: &App) -> Div {
+    let per_row = if narrow { 3 } else { cards.len() };
+    let mut rows: Vec<Div> = Vec::new();
     for (ix, card) in cards.iter().enumerate() {
         // one text that wraps inside the card, its pieces colored by their tone
         let mut text = String::new();
@@ -1227,15 +1238,20 @@ fn render_cards(cards: &[Card], mut jump: Option<Stateful<Div>>, cx: &App) -> Di
             text.push_str(piece);
         }
         let sub = StyledText::new(text).with_highlights(marks);
-        row = row.child(
+        if ix % per_row == 0 {
+            rows.push(h_flex().w_full().items_stretch().when(ix > 0, |el| el.border_t_1().border_color(style::hairline())));
+        }
+        let row = rows.pop().expect("a row");
+        rows.push(row.child(
             v_flex()
+                .debug_selector(move || CARD_SELECTORS[ix].into())
                 .flex_1()
                 .min_w_0()
                 .px(px(20.))
                 .pt(px(16.))
                 .pb(px(15.))
                 .gap(px(4.))
-                .when(ix > 0, |el| el.border_l_1().border_color(style::hairline()))
+                .when(ix % per_row > 0, |el| el.border_l_1().border_color(style::hairline()))
                 .child(
                     h_flex()
                         .h(px(16.))
@@ -1243,11 +1259,22 @@ fn render_cards(cards: &[Card], mut jump: Option<Stateful<Div>>, cx: &App) -> Di
                         .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(style::label()).child(card.label.to_uppercase()))
                         .when(card.label == "Sessions", |el| el.children(jump.take())),
                 )
-                .child(div().font_family(style::mono(cx)).text_size(px(24.)).font_weight(FontWeight::SEMIBOLD).line_height(px(30.)).child(card.value.clone()))
+                .child(
+                    div()
+                        .debug_selector(move || CARD_VALUE_SELECTORS[ix].into())
+                        // as wide as the number (not the card), so tests see it fit
+                        .self_start()
+                        .whitespace_nowrap()
+                        .font_family(style::mono(cx))
+                        .text_size(px(24.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .line_height(px(30.))
+                        .child(card.value.clone()),
+                )
                 .child(div().w_full().text_size(px(12.)).min_h(px(16.)).text_color(style::text_secondary()).child(sub)),
-        );
+        ));
     }
-    row
+    v_flex().w_full().border_b_1().border_color(style::hairline()).children(rows)
 }
 
 fn render_legend(legend: &[Legend]) -> Div {
@@ -1381,7 +1408,7 @@ fn usage_kind_counts(data: &UsageData) -> [usize; 3] {
 }
 
 /// The steps of the Usage view's autoplay (`ASM_USAGE_VIEW_AUTOPLAY`), in order.
-pub const AUTOPLAY_STEPS: [&str; 16] = [
+pub const AUTOPLAY_STEPS: [&str; 17] = [
     "today",
     "today-hover",
     "yesterday",
@@ -1397,10 +1424,13 @@ pub const AUTOPLAY_STEPS: [&str; 16] = [
     "sessions",
     "jump-project",
     "jump-session",
+    "sessions-narrow",
     "empty",
 ];
 /// The window width of the autoplay's `narrow` step: under `NARROW_W`, so the panels stack.
 const AUTOPLAY_NARROW_W: f32 = 900.;
+/// The window width of `sessions-narrow`: the session table's toolbar takes more than one row.
+const AUTOPLAY_SESSIONS_NARROW_W: f32 = 700.;
 
 impl AppRoot {
     /// Scripted tour of the Usage view for screenshots (`make screenshot-usage-view`). Once the
@@ -1422,6 +1452,9 @@ impl AppRoot {
     ///   the log as `jump-rows: <id>,<id>,…`;
     /// - `jump-session`: from Usage, the most expensive session the table has a row for, as a
     ///   click on it does (`reveal_session`): selected, in the detail panel, the keys on the table;
+    /// - `sessions-narrow`: the session table in a window 700 px wide, the Active tag still on:
+    ///   its toolbar wraps (the state's `toolbar=<rows>/<inside|overflow>`), its width restored
+    ///   after the capture;
     /// - `empty`: Usage, no project, a Custom range in 2000 (no calls).
     pub(crate) fn usage_view_autoplay(&self, gate: PathBuf, window: &Window, cx: &mut Context<Self>) -> Task<()> {
         let only: Option<Vec<String>> = std::env::var("ASM_USAGE_VIEW_STEPS").ok().filter(|v| !v.trim().is_empty()).map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
@@ -1527,6 +1560,12 @@ impl AppRoot {
                 let id = self.usage_view.snapshot.sessions.iter().find(|s| s.listed).map(|s| s.id.clone()).ok_or("no session of the range in the table")?;
                 self.reveal_session(&id, window, cx);
             }
+            "sessions-narrow" => {
+                self.set_view(MainView::Sessions, window, cx);
+                let size = window.viewport_size();
+                window.resize(gpui_kit::size(px(AUTOPLAY_SESSIONS_NARROW_W), size.height));
+                return Ok(Some(size));
+            }
             "empty" => {
                 self.set_view(MainView::Usage, window, cx);
                 self.set_project(None, cx);
@@ -1544,7 +1583,9 @@ impl AppRoot {
     /// chart=daily/30 hover=12 empty=no calls=1234 cost=$… project=<key> width=1440 today=Today $…
     /// today-matches=yes`, then the session table's side: `active=2026-11-01..2026-11-16
     /// updated=any|limited rows=12 selected=<short id> detail=yes focus=table|search|usage|-
-    /// usage-sessions=14` (the last is Usage's Sessions card). The script checks these.
+    /// usage-sessions=14` (Usage's Sessions card) `toolbar=2/inside` (rows of the session table's
+    /// toolbar and whether all its controls are in the window; `-` in Usage). The script checks
+    /// these.
     fn usage_autoplay_state(&self, window: &Window, cx: &App) -> String {
         let u = &self.usage_view;
         let snap = &u.snapshot;
@@ -1582,7 +1623,7 @@ impl AppRoot {
         let usage_sessions = snap.cards.iter().find(|c| c.label == "Sessions").map_or(String::from("-"), |c| c.value.replace(',', ""));
         format!(
             "view={} range={} metric={metric} chart={}/{} hover={} empty={empty} calls={} cost={} project={} width={:.0} {} today-matches={today_matches} \
-             active={} updated={} rows={} selected={} detail={} focus={focus} usage-sessions={usage_sessions}",
+             active={} updated={} rows={} selected={} detail={} focus={focus} usage-sessions={usage_sessions} toolbar={}",
             if self.view == MainView::Usage { "usage" } else { "sessions" },
             snap.range_label,
             if chart.hourly { "hourly" } else { "daily" },
@@ -1598,6 +1639,10 @@ impl AppRoot {
             delegate.ix.len(),
             self.selected.as_ref().map_or("-", |row| row.short_id.as_ref()),
             if self.detail_visible { "yes" } else { "no" },
+            match (self.view, self.session_toolbar.get()) {
+                (MainView::Usage, _) => "-".to_string(),
+                (MainView::Sessions, (rows, inside)) => format!("{rows}/{}", if inside { "inside" } else { "overflow" }),
+            },
         )
     }
 }

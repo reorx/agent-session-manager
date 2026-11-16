@@ -21,18 +21,20 @@
 #                       sessions with a call in This month
 #   15-jump-session.png the most expensive session the table has, as a click on it in Usage: it is
 #                       selected, in the detail panel, the keys on the table
-#   16-empty.png        a range without calls: $0.00, empty axes, "No calls in this range"
-#   17-no-usage.png     a second launch on an empty data directory: "No usage recorded yet"
+#   16-sessions-narrow.png  the session table in a window 700 px wide, the `Active …` tag still on:
+#                       its toolbar on more rows, every control in the window
+#   17-empty.png        a range without calls: $0.00, empty axes, "No calls in this range"
+#   18-no-usage.png     a second launch on an empty data directory: "No usage recorded yet"
 #
 # The app prints its state with each step (`autoplay-usage-view: <step> · view=… range=…
 # chart=hourly/24 hover=… empty=… calls=… project=… width=… today-matches=… active=… updated=…
-# rows=… selected=… detail=… focus=… usage-sessions=…`) and holds it until
+# rows=… selected=… detail=… focus=… usage-sessions=… toolbar=…`) and holds it until
 # the script has captured it (`<step>.shot` in the gate directory). The script checks the state:
 # today by the hour with its cost equal to the status bar's Today, 30 bars a day, the metric
 # switched, a tooltip pinned, the drill by the hour and back to 30 days, the project picked and
 # kept in the session table, the narrow width, the jumps (the Active filter on and Updated any
 # time, the rows those of the notice's count; the revealed session selected with the keys on the
-# table), the empty states. The rows of the project jump go to the log as `jump-rows: <ids>`, to
+# table), the session table's toolbar wrapped inside a narrow window, the empty states. The rows of the project jump go to the log as `jump-rows: <ids>`, to
 # compare with the ledger (see gpui-kit-guide.md). A failed check prints FAILED and
 # the run goes on; it exits 1 at the end. A step the app skipped (no calls to hover or drill into)
 # is not captured and fails too. Nothing is typed or clicked, and the app never comes to the
@@ -45,7 +47,7 @@
 #   ASM_CLAUDE_DIR      the transcripts; may be the real ~/.claude (only read) or a copy
 #   ASM_STATE           defaults to a fresh file in <out-dir>, so the tour starts from defaults
 #   ASM_USAGE_VIEW_STEPS  comma-separated steps to run instead of all (their names above)
-#   USAGE_VIEW_FRESH=0  skip the second launch (15-no-usage)
+#   USAGE_VIEW_FRESH=0  skip the second launch (18-no-usage)
 #
 # Usage: screenshot-usage-view.sh <binary> <out-dir>.
 set -euo pipefail
@@ -63,7 +65,7 @@ build_winid
 wake-screen
 
 STAMP=$(date +%H%M%S)
-STEPS="today today-hover yesterday d30 d30-in d30-hit d30-hover drill back project month narrow sessions jump-project jump-session empty"
+STEPS="today today-hover yesterday d30 d30-in d30-hit d30-hover drill back project month narrow sessions jump-project jump-session sessions-narrow empty"
 if [ -n "${ASM_USAGE_VIEW_STEPS:-}" ]; then
   STEPS=$(echo "$ASM_USAGE_VIEW_STEPS" | tr ',' ' ')
 fi
@@ -185,6 +187,16 @@ check() {
       local sel
       sel=$(echo "$LINE" | sed -nE 's/.* selected=([^ ]+) .*/\1/p')
       grep -q "^reveal: $sel$" "$LOG" || fail_check "jump-session: $sel is not the session revealed"
+      ;;
+    sessions-narrow)
+      has sessions-narrow view=sessions ; has sessions-narrow width=700 ; lacks sessions-narrow active=-
+      local toolbar
+      toolbar=$(echo "$LINE" | sed -nE 's/.* toolbar=([0-9]+)\/([a-z]+).*/\1 \2/p')
+      case "$toolbar" in
+        "1 "*) fail_check "sessions-narrow: the toolbar kept to one row at 700 px" ;;
+        *" inside") ;;
+        *) fail_check "sessions-narrow: a toolbar control is out of the window ($toolbar)" ;;
+      esac
       ;;
     empty) has empty view=usage ; has empty empty=no-calls ; has empty calls=0 ; has empty project=- ;;
   esac

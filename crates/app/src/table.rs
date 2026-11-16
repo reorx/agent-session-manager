@@ -1003,7 +1003,7 @@ mod tests {
         d.set_rows(vec![row("late", "/p/x", at("2026-11-14T10:00:00+08:00")), row("idle", "/p/x", at("2026-11-12T12:00:00+08:00"))]);
         let nov_12: chrono::NaiveDate = "2026-11-12".parse().unwrap();
         let span = range_span(UsageRange::Custom, nov_12, Some((nov_12, nov_12)), None, &tz);
-        d.set_active_ids(Some(Arc::new(data.active_sessions(span).into_iter().map(|id| SharedString::from(id.to_string())).collect())));
+        d.set_active_ids(Some(Arc::new(data.active_sessions(span, None).into_iter().map(|id| SharedString::from(id.to_string())).collect())));
         d.set_filter(active_on("2026-11-12", "2026-11-12"));
         assert_eq!(ids(&d), ["late"]);
     }
