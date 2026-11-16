@@ -93,6 +93,14 @@ impl Ledger {
         Ok(())
     }
 
+    /// Import a readable index snapshot without opening or rebuilding it through `Db`.
+    /// The caller should open `source` read-only. Uses the same salvage reader and atomic
+    /// upserts as index upgrades; repeated imports keep the same responses and hourly totals.
+    pub fn salvage_into_ledger(&self, source: &Connection) -> Result<()> {
+        let batch = read_responses(source, None)?;
+        self.write(&batch, source)
+    }
+
     pub fn write(&self, batch: &LedgerBatch, index: &Connection) -> Result<()> {
         // Read the index before starting a ledger transaction, preserving source error identity.
         let sessions = read_sessions(index, &batch.sessions)?;

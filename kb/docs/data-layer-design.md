@@ -20,6 +20,8 @@ tags:
 >
 > **用量账本**：应用与 CLI 的索引同目录共享 `usage-ledger.sqlite`。它保留已读到的调用、session 标题和项目路径，不存对话内容；删记录、删 subagent、重建索引都不会删除账本里的调用。费用由小时汇总中的 token 按当前价格表计算。账本有独立版本与逐步迁移，不能像索引一样删掉重建；损坏时先改名保留原文件，再从可读索引补齐。扫描事务先提交账本再提交索引，索引版本变化时先抢救旧用量。表结构见 [ledger.sql](../../crates/core/src/ledger.sql)，迁移及损坏恢复规则见 [用量账本设计](../plans/2026-11-16-usage-stats/usage-ledger.md)「数据变动」「逻辑变动」；行为测试见 [ledger.rs](../../crates/core/tests/ledger.rs)。
 >
+> **手动补入历史用量**：先用 SQLite backup 制作来源索引和已有账本的快照，再对快照演练、核对调用并集与分日费用，最后才写目标账本。`Ledger::salvage_into_ledger` 可直接读取只读来源连接，不需要打开或重建来源索引；同一主键重复导入不会增加调用数。显式运行的忽略测试 `import_usage_from_an_index_backup` 接受 `ASM_LEDGER_IMPORT_SOURCES`（系统路径列表格式，macOS 用冒号分隔）和 `ASM_LEDGER_IMPORT_TARGET`，打印各来源导入前后数量及本地 4:00 分日费用。一次真实导入的过程与核对证据见 [导入记录](../sessions/2026-11-16-usage-p1-import.md)。
+>
 > **本文是开工前的设计稿，以下两处不要照着写**：§7.2 的 Rust 记录类型用了 `#[serde(tag)]`，实际实现是"大结构体 + `Option` 字段 + 按 `type` 匹配"，因为 `&RawValue` 不能放在 tag 之下；§2.1 提到的 closure 通道与 `Arc<Mutex<Connection>>` 都没有采用，线程划分、事件顺序和搜索连接的现状在 [运行时架构](app-architecture.md)。§2 的选型论证（为什么不用 tantivy、redb）仍然有效。
 
 ## 1. 决定设计的关键实测

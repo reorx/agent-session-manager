@@ -314,6 +314,7 @@ app：
 
 ### 风险与待定
 
+- **步骤 7 的实际执行（2026-11-16，usage-p1-import）**：按协调决定 14，先做只读快照，再直接向账本导入，没有用新构建打开真实索引。实际真实目录没有 `index-cli.sqlite` 和账本，真实 `index.sqlite` 仍为版本 4；它与受保护备份的快照内容相同，均有 129,372 次调用、2,225 个有用量的 session。备份先贡献全部调用，真实索引快照贡献 0，缺失的 CLI 来源跳过。真实账本完整保留 56 个已删 session，最早用量日 2026-07-13；77 个用量日费用、逐行调用并集与小时汇总均核对通过。步骤 6 的 CLI 验证改用真实索引快照的额外副本命名为 `index-cli.sqlite`，配真实账本的副本；新版 `asm stats` 成功，快照索引重建后账本用量不变。完整记录见 [导入总结](../../sessions/2026-11-16-usage-p1-import.md)。
 - **账本上线前索引很可能先被重建。** 规划时工作区里还有把 `SCHEMA_VERSION` 从 5 提升到 6 的改动（`asm` CLI 改了 prompt 的判定）；core 实现时已作为 `bd56682` 提交。它合并后，任何用新构建打开真实 `index.sqlite` 的动作（`make dev`、截图脚本、发版后的应用）都会重建索引，已删 session 的用量随之丢失；`asm` 自己用的是 `index-cli.sqlite`，不受影响。备份 `tmp/2026-11-12-usage-stats/index-copy.sqlite` 里有这批用量，实施步骤 7 负责把它找回来。账本这一期合并之后就不再有这个问题：重建前会先抢救。
 - **自动扫描后表格会滚回选中的行。** `after_rows_changed` → `select_row` 在选中的 session 换了位置时调 `set_selected_row`，它会顺带滚动（gpui-kit 没有只选中不滚动的入口）。手动扫描时这不是问题，每 10 分钟自动来一次就可能在用户往下翻的时候把表格拉回去。实现时先实测；确实打扰的话，自动扫描引起的刷新里，选中行不在当前可见范围内时不调 `set_selected_row`，只更新 `selected`。
   - **实测与处理（2026-11-16）**：无界面测试能复现：窗口压到 260px 高、选中第一行、滚到底，往排在最后的记录文件追加一条后自动扫描，滚动位置从 −86px 回到 0。没有照上面的做法（只更新 `selected`、不调 `set_selected_row`）：那样表格的选中行号还指着旧位置，高亮会落在另一个 session 上。改为照常 `set_selected_row`，但在同一个 update 里把它放进 `vertical_scroll_handle` 的延迟滚动请求拿掉（`deferred_scroll_to_item` 是公开字段，下一帧 prepaint 才执行）。范围是所有扫描引起的刷新（含菜单的 Scan for Changes），只对「同一个 session 换了行」生效；新选中的行、过滤和排序照常滚动。用例 `keyboard_tests.rs::an_automatic_scan_does_not_scroll_the_table_back_to_the_selected_row`。真实窗口里的手感留给实机验收。

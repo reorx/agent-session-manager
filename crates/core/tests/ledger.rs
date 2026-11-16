@@ -412,3 +412,65 @@ fn usage_accepts_more_ids_than_sqlite_bind_parameters_and_keeps_missing_metadata
     assert_eq!(usage[0].hours[0].responses, 1);
     assert!(l.usage(Some(&[])).unwrap().is_empty());
 }
+
+#[test]
+fn a_read_only_backup_can_be_imported_without_opening_or_rebuilding_an_index() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    let expected = db.ledger_usage(None).unwrap().unwrap();
+    let calls = count(db.conn(), "api_usage");
+    db.set_user_version_for_test(4);
+    drop(db);
+    let before = std::fs::read(sb.db_path()).unwrap();
+    let source = Connection::open_with_flags(sb.db_path(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    let target = sb.tmp.path().join("imported.sqlite");
+    let ledger = Ledger::open(&target).unwrap();
+    ledger.salvage_into_ledger(&source).unwrap();
+    assert_eq!(ledger.usage(None).unwrap(), expected);
+    ledger.salvage_into_ledger(&source).unwrap();
+    assert_eq!(ledger.usage(None).unwrap(), expected);
+    assert_eq!(ledger.response_counts().unwrap().values().sum::<u64>(), calls as u64);
+    drop(source);
+    assert_eq!(std::fs::read(sb.db_path()).unwrap(), before);
+    assert_eq!(Connection::open_with_flags(sb.db_path(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .unwrap().query_row("PRAGMA user_version", [], |r| r.get::<_, i32>(0)).unwrap(), 4);
+}
+
+/// Supply snapshot paths in ASM_LEDGER_IMPORT_SOURCES (OS path-list syntax) and an explicit
+/// ASM_LEDGER_IMPORT_TARGET. Sources are never opened through Db, which could rebuild them.
+#[test]
+#[ignore = "writes an explicitly supplied ledger; rehearse on snapshots before importing live data"]
+fn import_usage_from_an_index_backup() {
+    let sources = std::env::var_os("ASM_LEDGER_IMPORT_SOURCES").expect("source snapshot paths");
+    let paths: Vec<_> = std::env::split_paths(&sources).collect();
+    assert!(!paths.is_empty());
+    let target = std::path::PathBuf::from(std::env::var_os("ASM_LEDGER_IMPORT_TARGET").expect("target ledger path"));
+    // Resolve aliases before opening the destination for writing.
+    let target_identity = target.canonicalize().unwrap_or_else(|_| {
+        target.parent().unwrap().canonicalize().unwrap().join(target.file_name().unwrap())
+    });
+    let connections: Vec<_> = paths.iter().map(|path| {
+        assert_ne!(path.canonicalize().unwrap(), target_identity, "source cannot be the target");
+        Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap()
+    }).collect();
+    let ledger = Ledger::open(&target).unwrap();
+    for (path, source) in paths.iter().zip(&connections) {
+        let before = ledger.response_counts().unwrap();
+        ledger.salvage_into_ledger(source).unwrap();
+        let after = ledger.response_counts().unwrap();
+        println!("source={} calls_before={} calls_after={} usage_sessions_before={} usage_sessions_after={}",
+            path.display(), before.values().sum::<u64>(), after.values().sum::<u64>(), before.len(), after.len());
+    }
+    let mut usage = agent_session_core::usage::UsageData::default();
+    usage.replace_all(ledger.usage(None).unwrap());
+    let days: std::collections::BTreeSet<_> = usage.sessions.values().flat_map(|s| &s.hours)
+        .map(|hour| agent_session_core::usage::usage_day(hour.hour * 3_600_000, &chrono::Local)).collect();
+    for day in days {
+        let start = agent_session_core::usage::day_start_ms(day, &chrono::Local);
+        let end = agent_session_core::usage::day_start_ms(day.succ_opt().unwrap(), &chrono::Local);
+        let totals = usage.totals(start, end);
+        println!("day={day} calls={} cost={:.12} unpriced={}",
+            totals.responses, totals.cost.total(), totals.unpriced_responses);
+    }
+}
