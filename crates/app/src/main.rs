@@ -6,8 +6,13 @@
 //! to scroll / select / filter / sort automatically after launch (used by `make screenshot`),
 //! `ASM_SEARCH_AUTOPLAY=1` to run a scripted search session (`make screenshot-search`),
 //! `ASM_DETAIL_AUTOPLAY=1` to tour the Conversation tab (`make screenshot-detail`),
-//! `ASM_COST_AUTOPLAY=1` to tour the Cost tab (`make screenshot-cost`);
+//! `ASM_COST_AUTOPLAY=1` to tour the Cost tab (`make screenshot-cost`),
+//! `ASM_USAGE_AUTOPLAY=<dir>` to scan and rebuild when files show up in `<dir>` (`make screenshot-usage`);
 //! `ASM_CLAUDE_DIR`, `ASM_DB` and `ASM_STATE` point the app at other data.
+//!
+//! While the app is open it scans by itself (`auto_scan`): when its window comes to the front and
+//! every `AUTO_SCAN_IDLE`, at most once per `AUTO_SCAN_MIN_GAP`. The status bar shows what today
+//! (from 4:00 local) cost, from the usage ledger.
 
 mod actions;
 mod conversation;
@@ -36,8 +41,9 @@ use agent_session_core::format::{fmt_change, fmt_usd, human_size};
 use agent_session_core::pricing::display_name;
 use agent_session_core::index::ScanReport;
 use agent_session_core::search::Matcher;
+use agent_session_core::usage::{Totals, UsageData, day_start_ms};
 
-use chrono::NaiveDate;
+use chrono::{Local, NaiveDate};
 use gpui_kit::component::date_picker::{DatePickerEvent, DatePickerState};
 use gpui_kit::component::input::{Escape, InputEvent, InputState};
 use gpui_kit::component::status_bar::StatusBar;
@@ -48,7 +54,7 @@ use gpui_kit::*;
 use crate::actions::{CopyResume, CopySessionId, ExportTranscript, HideProject, OpenProjectFolder, RevealTranscript};
 use crate::conversation::{Card, ConversationView};
 use crate::detail::{DETAIL_W, DetailState, DetailTab, Load};
-use crate::model::{DisplayMode, Filter, Kind, ModelEntry, ProjectEntry, RangePreset, SessionRow, kind_counts, model_entries, project_entries, split_hidden};
+use crate::model::{DisplayMode, Filter, Kind, ModelEntry, ProjectEntry, RangePreset, SessionRow, kind_counts, model_entries, project_entries, split_hidden, today_at};
 use crate::search::{SearchMode, SearchOptions, SearchSummary, Searcher};
 use crate::settings::{SortDir, ViewState, default_state_path};
 use crate::store::{Store, StoreEvent, StoreRequest};
@@ -85,6 +91,10 @@ const WINDOW_W: f32 = 1440.;
 const WINDOW_H: f32 = 900.;
 /// Space the table needs besides its columns: trailing empty column + vertical scrollbar.
 const TABLE_CHROME_W: f32 = 16.;
+/// An automatic scan is skipped while one runs or within this long after the last one ended.
+const AUTO_SCAN_MIN_GAP: Duration = Duration::from_secs(30);
+/// While the app is open and nothing else scanned, it scans this often.
+const AUTO_SCAN_IDLE: Duration = Duration::from_secs(600);
 
 /// What the index is doing, shown in the middle of the status bar.
 #[derive(Clone, PartialEq)]
@@ -154,6 +164,23 @@ pub struct AppRoot {
     status: SharedString,
     index_status: IndexStatus,
     db_info: SharedString,
+    /// Hourly usage from the ledger: every call the app ever read, by session.
+    usage: UsageData,
+    /// `None` until the store says whether this run has a ledger.
+    usage_available: Option<bool>,
+    /// The usage day (from 4:00 local) the range presets, the date picker and `today` are on;
+    /// `roll_day` moves it on.
+    usage_day: NaiveDate,
+    /// All calls since 4:00 of `usage_day`, whatever the table shows.
+    today: Totals,
+    /// `Today $1.23 (2 unpriced)`, `Today —` without a ledger; empty until the ledger is read.
+    today_label: SharedString,
+    /// A scan was asked for (or the start-up one runs) and has not ended.
+    scan_in_flight: bool,
+    /// When the last scan ended (executor clock, so tests can move it).
+    last_scan_done: Option<Instant>,
+    /// Scans that reached `ScanDone`.
+    scans_done: usize,
     launched: Instant,
     first_rows_ms: Option<u128>,
     state_path: PathBuf,
@@ -163,6 +190,7 @@ pub struct AppRoot {
     _search_events: Task<()>,
     _debounce: Option<Task<()>>,
     _autoplay: Option<Task<()>>,
+    _auto_scan: Task<()>,
     #[cfg(test)]
     selection_event_count: Option<usize>,
 }
@@ -187,10 +215,15 @@ impl AppPaths {
     }
 }
 
+/// No transcript was new, changed or gone, and history.jsonl brought nothing.
+fn scan_changed_nothing(report: &ScanReport) -> bool {
+    report.files_parsed + report.files_appended + report.files_rebuilt == 0 && report.files_missing == 0 && report.history_sessions == 0
+}
+
 fn scan_summary(report: &ScanReport) -> SharedString {
     let changed = report.files_parsed + report.files_appended + report.files_rebuilt;
     let secs = report.elapsed.as_secs_f64();
-    if changed == 0 && report.files_missing == 0 && report.history_sessions == 0 {
+    if scan_changed_nothing(report) {
         format!("index up to date · {} files checked in {secs:.2}s", report.files_seen).into()
     } else {
         format!("indexed {changed} of {} files in {secs:.2}s", report.files_seen).into()
@@ -201,9 +234,10 @@ impl AppRoot {
     fn new(paths: AppPaths, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state_path = paths.state;
         let saved = ViewState::load(&state_path);
+        let usage_day = today_at(now_ms());
         let mut delegate = SessionTableDelegate::new(paths.claude.clone());
         delegate.mode = saved.mode;
-        let (since_ms, until_ms) = saved.range.bounds(saved.custom_range);
+        let (since_ms, until_ms) = saved.range.bounds_on(usage_day, saved.custom_range);
         delegate.set_filter(Filter {
             project: saved.project_key.clone().map(Into::into),
             since_ms,
@@ -225,7 +259,7 @@ impl AppRoot {
         // escape is handled by `clear_search` (the box propagates it), which also hands the focus back
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search sessions"));
         let resizable = cx.new(|_| ResizableState::default());
-        let shown_range = saved.custom_range.unwrap_or_else(|| RangePreset::default_custom(chrono::Local::now().date_naive()));
+        let shown_range = saved.custom_range.unwrap_or_else(|| RangePreset::default_custom(usage_day));
         let date_picker = cx.new(|cx| {
             let mut picker = DatePickerState::range(window, cx).date_format("%Y-%m-%d");
             picker.set_date(shown_range, window, cx);
@@ -262,6 +296,13 @@ impl AppRoot {
                 }
                 this.focus_table(window, cx);
             }),
+            // back to the window after working elsewhere: show what happened meanwhile
+            cx.observe_window_activation(window, |this, window, cx| {
+                if window.is_window_active() {
+                    this.roll_day(now_ms(), cx);
+                    this.auto_scan("window activated", cx);
+                }
+            }),
         ];
 
         let (store, events) = Store::spawn(paths.claude.clone(), paths.db.clone(), paths.favorites.clone());
@@ -285,6 +326,19 @@ impl AppRoot {
                     batch.push(ev);
                 }
                 if this.update(cx, |this, cx| this.on_search_events(batch, cx)).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let auto_scan = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AUTO_SCAN_IDLE).await;
+                let alive = this.update(cx, |this, cx| {
+                    this.roll_day(now_ms(), cx);
+                    this.auto_scan("timer", cx);
+                });
+                if alive.is_err() {
                     break;
                 }
             }
@@ -330,6 +384,15 @@ impl AppRoot {
             status: "".into(),
             index_status: IndexStatus::Loading,
             db_info: "".into(),
+            usage: UsageData::default(),
+            usage_available: None,
+            usage_day,
+            today: Totals::default(),
+            today_label: "".into(),
+            // the store thread scans right after it opened the index
+            scan_in_flight: true,
+            last_scan_done: None,
+            scans_done: 0,
             launched: Instant::now(),
             first_rows_ms: None,
             state_path,
@@ -339,6 +402,7 @@ impl AppRoot {
             _search_events: search_pump,
             _debounce: None,
             _autoplay: None,
+            _auto_scan: auto_scan,
             #[cfg(test)]
             selection_event_count: None,
         };
@@ -354,6 +418,8 @@ impl AppRoot {
             this._autoplay = Some(this.detail_autoplay(window, cx));
         } else if std::env::var_os("ASM_COST_AUTOPLAY").is_some() {
             this._autoplay = Some(this.cost_autoplay(window, cx));
+        } else if let Some(gate) = std::env::var_os("ASM_USAGE_AUTOPLAY").filter(|v| !v.is_empty()) {
+            this._autoplay = Some(this.usage_autoplay(PathBuf::from(gate), window, cx));
         }
         this
     }
@@ -363,6 +429,7 @@ impl AppRoot {
         let mut streamed = Vec::new();
         let mut data_changed = false;
         let mut reloaded = false;
+        let mut usage_changed = false;
         for ev in batch {
             match ev {
                 StoreEvent::Loaded { sessions, catalog, elapsed } => {
@@ -380,11 +447,31 @@ impl AppRoot {
                 StoreEvent::Session(s) => streamed.push(Arc::new(SessionRow::from_summary(&s, &self.catalog))),
                 StoreEvent::Progress(p) if p.done < p.total => self.index_status = IndexStatus::Scanning { done: p.done, total: p.total },
                 StoreEvent::Progress(_) => {}
-                StoreEvent::ScanDone { report, stats } => {
-                    println!("scan: {report:?}");
-                    self.index_status = IndexStatus::Idle(scan_summary(&report));
+                StoreEvent::ScanDone { report, stats, quiet } => {
+                    println!("scan{}: {report:?}", if quiet { " (automatic)" } else { "" });
+                    // an automatic scan that found nothing leaves the summary of the last one
+                    if !(quiet && scan_changed_nothing(&report)) {
+                        self.index_status = IndexStatus::Idle(scan_summary(&report));
+                    }
                     self.db_info = format!("{} messages · DB {}", stats.messages, human_size(stats.db_bytes)).into();
+                    self.scans_done += 1;
+                    self.scan_ended(cx);
                     data_changed = true;
+                    usage_changed = true;
+                }
+                StoreEvent::ScanSkipped => self.scan_ended(cx),
+                StoreEvent::Usage { sessions, full } => {
+                    if full {
+                        self.usage.replace_all(sessions);
+                        self.usage_available = Some(true);
+                    } else {
+                        self.usage.apply(sessions);
+                    }
+                    usage_changed = true;
+                }
+                StoreEvent::UsageUnavailable => {
+                    self.usage_available = Some(false);
+                    usage_changed = true;
                 }
                 StoreEvent::Conversation { seq, session_id, conversation, read, build } => {
                     if seq == self.conversation_seq && self.selected.as_ref().is_some_and(|row| row.id == session_id) {
@@ -408,6 +495,7 @@ impl AppRoot {
                 StoreEvent::Failed(message) => {
                     eprintln!("store: {message}");
                     self.index_status = IndexStatus::Failed(message.into());
+                    self.scan_ended(cx);
                 }
             }
         }
@@ -417,7 +505,12 @@ impl AppRoot {
             data_changed = true;
         }
         if data_changed {
-            self.after_rows_changed(cx);
+            // the user did not ask for this refresh: the selected session keeps its place in view
+            // or out of it, the table is not scrolled back to it
+            self.relocate_selection(false, cx);
+        }
+        if usage_changed {
+            self.roll_day(now_ms(), cx);
         }
         // a reload follows a scan that changed the index: the results on screen may be out of date
         if reloaded && self.searching() {
@@ -428,6 +521,13 @@ impl AppRoot {
 
     /// Rows or the filter changed: refresh the dropdown counts and keep the selection on its session.
     pub(crate) fn after_rows_changed(&mut self, cx: &mut Context<Self>) {
+        self.relocate_selection(true, cx);
+    }
+
+    /// `after_rows_changed`; `scroll`: false when a scan changed the rows, so that a selected
+    /// session that only moved to another row does not pull the table back to it (a newly picked
+    /// selection is still scrolled into view).
+    fn relocate_selection(&mut self, scroll: bool, cx: &mut Context<Self>) {
         let delegate = self.table.read(cx).delegate();
         let (show_empty, hidden) = (delegate.filter().show_empty, &delegate.filter().hidden_projects);
         let listed = || delegate.rows.iter().filter(|r| show_empty || r.prompts > 0);
@@ -442,7 +542,7 @@ impl AppRoot {
         let scanning = matches!(self.index_status, IndexStatus::Scanning { .. });
         let waiting = self.selected.is_none() && (scanning || (self.wanted_id.is_some() && self.index_status == IndexStatus::Loading));
         match position {
-            Some(row_ix) => self.select_row(row_ix, cx),
+            Some(row_ix) => self.select_row_scrolling(row_ix, scroll, cx),
             None if waiting => {}
             None if has_rows => self.select_row(0, cx),
             None => self.clear_selection(cx),
@@ -451,10 +551,23 @@ impl AppRoot {
     }
 
     fn select_row(&mut self, row_ix: usize, cx: &mut Context<Self>) {
+        self.select_row_scrolling(row_ix, true, cx);
+    }
+
+    /// `scroll`: false leaves the table's scroll position alone when the row is the session
+    /// already selected (`set_selected_row` always scrolls; its scroll is a deferred request on
+    /// the list's handle, taken back here before the next frame applies it).
+    fn select_row_scrolling(&mut self, row_ix: usize, scroll: bool, cx: &mut Context<Self>) {
+        let selected_id = self.selected.as_ref().map(|r| r.id.clone());
         let row = self.table.update(cx, |table, cx| {
             let row = table.delegate().ix.get(row_ix).map(|_| table.delegate().row(row_ix).clone());
             if row.is_some() && table.selected_row() != Some(row_ix) {
+                let moved = !scroll && row.as_ref().map(|r| &r.id) == selected_id.as_ref();
+                let pending = moved.then(|| table.vertical_scroll_handle.0.borrow_mut().deferred_scroll_to_item.take());
                 table.set_selected_row(row_ix, cx);
+                if let Some(pending) = pending {
+                    table.vertical_scroll_handle.0.borrow_mut().deferred_scroll_to_item = pending;
+                }
             }
             row
         });
@@ -560,10 +673,68 @@ impl AppRoot {
         self.saved = state;
     }
 
+    /// Scan for Changes / Rebuild Index from the menu.
     fn rescan(&mut self, rebuild: bool, cx: &mut Context<Self>) {
         self.index_status = IndexStatus::Loading;
-        self.store.request(if rebuild { StoreRequest::Rebuild } else { StoreRequest::Scan });
+        self.scan_in_flight = true;
+        self.store.request(if rebuild { StoreRequest::Rebuild } else { StoreRequest::Scan { quiet: false } });
         cx.notify();
+    }
+
+    /// A quiet incremental scan (window activated, the idle timer), unless one runs or the last
+    /// one ended less than `AUTO_SCAN_MIN_GAP` ago. Nothing on screen changes unless the scan
+    /// finds something. True when a scan was asked for.
+    pub(crate) fn auto_scan(&mut self, trigger: &str, cx: &mut Context<Self>) -> bool {
+        let now = cx.background_executor().now();
+        if self.scan_in_flight || self.last_scan_done.is_some_and(|t| now.saturating_duration_since(t) < AUTO_SCAN_MIN_GAP) {
+            return false;
+        }
+        println!("auto-scan: {trigger}");
+        self.scan_in_flight = true;
+        self.store.request(StoreRequest::Scan { quiet: true });
+        true
+    }
+
+    /// A scan ended (done, skipped or failed): the next automatic one may go after the gap.
+    fn scan_ended(&mut self, cx: &App) {
+        self.scan_in_flight = false;
+        self.last_scan_done = Some(cx.background_executor().now());
+    }
+
+    /// `now_ms` may be on a new usage day (past 4:00): move the range presets onto it, then
+    /// count today again.
+    pub(crate) fn roll_day(&mut self, now_ms: i64, cx: &mut Context<Self>) {
+        let day = today_at(now_ms);
+        if day != self.usage_day {
+            println!("usage day: {} → {day}", self.usage_day);
+            self.usage_day = day;
+            self.set_range(self.range, cx);
+        }
+        self.refresh_today(now_ms);
+        cx.notify();
+    }
+
+    /// Today's totals and the status bar's `Today …`. The upper end is the next whole UTC hour:
+    /// the ledger's hours are whole, and `now` would leave out the hour under way.
+    fn refresh_today(&mut self, now_ms: i64) {
+        let from = day_start_ms(self.usage_day, &Local);
+        let until = (now_ms.div_euclid(3_600_000) + 1) * 3_600_000;
+        self.today = self.usage.totals(from, until);
+        let label: SharedString = match self.usage_available {
+            None => "".into(),
+            Some(false) => "Today —".into(),
+            Some(true) => {
+                let unpriced = match self.today.unpriced_responses {
+                    0 => String::new(),
+                    n => format!(" ({n} unpriced)"),
+                };
+                format!("Today {}{unpriced}", fmt_usd(self.today.cost.total())).into()
+            }
+        };
+        if label != self.today_label {
+            println!("today: {label} (since {} 4:00, {} calls)", self.usage_day, self.today.responses);
+            self.today_label = label;
+        }
     }
 
     fn on_table_event(&mut self, _: &Entity<TableState<SessionTableDelegate>>, ev: &TableEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -623,6 +794,47 @@ impl AppRoot {
                 cx.notify();
             })
             .ok();
+        })
+    }
+
+    /// Scripted scans for the usage acceptance (`make screenshot-usage`). Once the start-up scan
+    /// and the ledger are in, prints `autoplay-usage: ready · <Today …>`; then waits for a file
+    /// named `scan` in `gate` and does Scan for Changes, then for `rebuild` and does Rebuild
+    /// Index, each time printing `autoplay-usage: scanned · …` / `rebuilt · …` once the scan has
+    /// ended and the table reloaded. Whatever the script does to the data goes in between.
+    fn usage_autoplay(&self, gate: PathBuf, window: &Window, cx: &mut Context<Self>) -> Task<()> {
+        let settled = |this: &AppRoot| !this.scan_in_flight && !this.today_label.is_empty() && matches!(this.index_status, IndexStatus::Idle(_));
+        cx.spawn_in(window, async move |this, cx| {
+            for _ in 0..1200 {
+                if this.update(cx, |this, _| settled(this)).unwrap_or(true) {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_millis(100)).await;
+            }
+            cx.background_executor().timer(Duration::from_millis(800)).await;
+            let Ok(today) = this.update(cx, |this, _| this.today_label.clone()) else { return };
+            println!("autoplay-usage: ready · {today}");
+            for (trigger, step, rebuild) in [("scan", "scanned", false), ("rebuild", "rebuilt", true)] {
+                while !gate.join(trigger).exists() {
+                    cx.background_executor().timer(Duration::from_millis(200)).await;
+                }
+                let Ok(base) = this.update(cx, |this, cx| {
+                    this.rescan(rebuild, cx);
+                    this.scans_done
+                }) else {
+                    return;
+                };
+                for _ in 0..1200 {
+                    if this.update(cx, |this, _| this.scans_done > base && settled(this)).unwrap_or(true) {
+                        break;
+                    }
+                    cx.background_executor().timer(Duration::from_millis(100)).await;
+                }
+                // the reload after the scan, and a frame
+                cx.background_executor().timer(Duration::from_millis(800)).await;
+                let Ok(today) = this.update(cx, |this, _| this.today_label.clone()) else { return };
+                println!("autoplay-usage: {step} · {today}");
+            }
         })
     }
 
@@ -1007,10 +1219,17 @@ impl AppRoot {
         }
     }
 
-    fn render_status_bar(&self, cx: &mut Context<Self>) -> StatusBar {
+    /// `42 / 5488 sessions · $123.45 · Today $203.69`: the listed sessions, what they cost (and
+    /// would cost on another model), what today cost.
+    fn status_left(&self, cx: &App) -> String {
         let delegate = self.table.read(cx).delegate();
         let (shown, total, cost) = (delegate.ix.len(), delegate.rows.len(), delegate.shown_cost);
         let projection = delegate.projection().map(|p| format!(" · {} {} ({})", display_name(&p.target), fmt_usd(p.predicted), fmt_change(p.actual, p.predicted))).unwrap_or_default();
+        let today = if self.today_label.is_empty() { String::new() } else { format!(" · {}", self.today_label) };
+        format!("{shown} / {total} sessions · {}{projection}{today}", fmt_usd(cost))
+    }
+
+    fn render_status_bar(&self, cx: &mut Context<Self>) -> StatusBar {
         let index = match &self.index_status {
             IndexStatus::Loading => "loading index…".into(),
             IndexStatus::Scanning { done, total } => format!("indexing {done} / {total} files").into(),
@@ -1029,7 +1248,7 @@ impl AppRoot {
             .font_family(style::mono(cx))
             .text_size(px(11.))
             .text_color(style::head_fg())
-            .left(format!("{shown} / {total} sessions · {}{projection}", fmt_usd(cost)))
+            .left(self.status_left(cx))
             .child(center)
             .right(format!("{took}{}{first_rows}", self.db_info))
     }
@@ -1133,6 +1352,10 @@ impl AssetSource for AppAssets {
         paths.dedup();
         Ok(paths)
     }
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
 }
 
 /// `ASM_AUTOPLAY_STEP`, or `cut-output` for the older `ASM_AUTOPLAY_CUT_OUTPUT=1`.

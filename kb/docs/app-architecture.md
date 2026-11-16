@@ -1,6 +1,6 @@
 ---
 created: 2026-09-28
-updated: 2026-11-03
+updated: 2026-11-16
 tags:
   - architecture
   - threads
@@ -12,7 +12,7 @@ tags:
 
 # 运行时架构
 
-写给要改数据流的人：索引扫描、搜索、详情数据的读取、视图状态的保存。回答三个问题：什么工作跑在哪条线程上，事件按什么顺序到达界面，改动时哪些规则必须保持以及原因。
+写给要改数据流的人：索引扫描、用量与自动扫描、搜索、详情数据的读取、视图状态的保存。回答三个问题：什么工作跑在哪条线程上，事件按什么顺序到达界面，改动时哪些规则必须保持以及原因。
 
 本文只描述现状。界面组件的做法在 [gpui-kit 开发指南](gpui-kit-guide.md)，表结构与存储选型在 [数据层设计](data-layer-design.md)，各里程碑当时的实测与取舍在 `kb/notes/`。
 
@@ -20,8 +20,8 @@ tags:
 
 | 线程 | 持有 | 工作 |
 |---|---|---|
-| 主线程 | 全部行、过滤排序后的顺序、选中、视图状态 | 渲染；过滤与排序；应用后台事件 |
-| `asm-store` | 索引的读写连接、模型目录 | 读索引、扫描并写索引、读取模型窗口、收藏与目录迁移 |
+| 主线程 | 全部行、过滤排序后的顺序、选中、视图状态、内存里的用量（`UsageData`） | 渲染；过滤与排序；应用后台事件；算今天的费用；定时发起自动扫描 |
+| `asm-store` | 索引的读写连接（`Db` 自带用量账本的连接）、模型目录 | 读索引、扫描并写索引（同时记账）、读账本、读取模型窗口、收藏与目录迁移 |
 | `asm-search` | 索引的只读连接 | 文本搜索查全文索引；正则搜索扫 transcript 文件 |
 | `asm-reader` | 无（不碰索引） | 给详情面板直接读一个 session 的记录文件（或 History session 在 `history.jsonl` 里的 prompt），转换成回合卡；写导出的 TXT |
 | rayon 线程池 | 无 | 扫描时并行解析文件，正则搜索时并行扫文件 |
@@ -40,7 +40,7 @@ tags:
 store 线程启动后先自己走完一遍固定流程，然后才开始处理请求：
 
 ```text
-读取模型目录并打开索引 → 读出全部行 → 增量扫描 → 重读模型目录 → 记录或窗口有改动则再读一次全部行
+读取模型目录并打开索引 → 读出全部行 → 读出账本的全部用量 → 增量扫描 → 重读模型目录 → 记录或窗口有改动则再读一次全部行
 ```
 
 它发给界面的事件：
@@ -48,9 +48,13 @@ store 线程启动后先自己走完一遍固定流程，然后才开始处理�
 | 事件 | 内容 | 界面的处理 |
 |---|---|---|
 | `Loaded` | 索引里的全部行 | 整表替换 |
+| `Usage { full: true }` | 账本里全部 session 的小时汇总，紧跟第一个 `Loaded` | 整份替换 `UsageData`，算今天的费用 |
+| `UsageUnavailable` | 这次运行没有账本（更新版本写的账本，或读不了） | 状态栏 `Today —` |
 | `Progress` | 已处理与总文件数 | 状态栏进度 |
 | `Session` | 扫描刚写入的一行（新增或有变化） | 按 session id 新增或替换 |
-| `ScanDone` | 扫描报告、消息数、索引大小 | 状态栏摘要 |
+| `Usage { full: false }` | 这次扫描写过的 session 在账本里的小时汇总，在 `ScanDone` 之前；没有就不发 | 按 session id 替换，算今天的费用 |
+| `ScanDone` | 扫描报告、消息数、索引大小、是不是安静的扫描（`quiet`） | 状态栏摘要（安静的扫描什么都没变时不改）；结束扫描计时 |
+| `ScanSkipped` | 安静的扫描发现索引被另一个进程锁着，什么都没做 | 只结束扫描计时，界面没有反应 |
 | `Conversation` | 读取线程读好的回合卡（`ConversationView`）或出错信息，带 `seq` 和读取 / 转换耗时 | 见下文"详情的读取" |
 | `FavoriteChanged` | 收藏 / 取消收藏完成 | 通知提示；行沿 Session / Loaded 更新 |
 | `FavoritesDirChanged` | 新目录、迁移与跳过数 | 更新路径并通知 |
@@ -61,18 +65,21 @@ store 线程启动后先自己走完一遍固定流程，然后才开始处理�
 
 ```text
 热启动，文件没有变化
-  Loaded(全部行) → Progress → ScanDone
+  Loaded(全部行) → Usage(全部) → Progress → ScanDone
 
 热启动，有文件变化
-  Loaded(全部行) → Progress / Session … → ScanDone → Loaded(全部行)
+  Loaded(全部行) → Usage(全部) → Progress / Session … → Usage(写过的) → ScanDone → Loaded(全部行)
 
 冷启动（索引为空）
-  Loaded(0 行) → Progress / Session … → ScanDone → Loaded(全部行)
+  Loaded(0 行) → Usage(全部) → Progress / Session … → Usage(写过的) → ScanDone → Loaded(全部行)
+
+Rebuild
+  Loaded(0 行) → Progress / Session … → Usage(写过的) → ScanDone → Loaded(全部行)
 ```
 
 - 热启动在第一个 `Loaded` 到达时表格就可用，之后的扫描只是核对。本机 5488 个 session，从界面创建到行上屏 187–254ms，随后的增量扫描 0.07–0.66s
 - 冷启动靠 `Session` 事件填表，首批行约 1.0s 出现，全部完成 3.6–4.0s，期间表格可以滚动和操作
-- Index 菜单的 Rebuild 先清空索引，之后与冷启动相同；Scan for Changes 从"增量扫描"那一步开始，没有开头的 `Loaded`
+- Index 菜单的 Rebuild 先清空索引，之后与冷启动相同，只是不重读账本（账本不随索引清空）；Scan for Changes 从"增量扫描"那一步开始，没有开头的 `Loaded`
 - session 没有变化的扫描不发任何 `Session`；模型目录窗口也没变时，不触发最后的 `Loaded`，所以热启动时表格不会闪，搜索也不会重跑
 - 启动时读取 Claude 数据目录下的模型缓存，每次扫描发完 `ScanDone` 后重读。只比较归一化后的窗口表，获取时间或无关字段变化不刷新；窗口变化（含文件损坏或删除导致回退）即使没有 session 改动也补发 `Loaded`。不监听缓存文件
 - `Loaded { sessions, catalog, elapsed }` 把 `Arc<ModelCatalog>` 与整表一起交给主线程，主线程先替换目录再构造行；流式 `Session` 使用最近一次 `Loaded` 的目录。Ctx 比例、排序与 Metadata 都从同一份窗口计算，SQLite 不存窗口，目录变化无需重建索引
@@ -99,6 +106,31 @@ store 线程启动后先自己走完一遍固定流程，然后才开始处理�
 3. **代价很小。** 5488 行读出来约 25ms
 
 流式事件只会新增或替换行，从不删除行。重读是表格里的行与索引重新完全一致的唯一时机。
+
+## 用量与今天的费用
+
+用量账本（core 的 `ledger.rs`，索引同目录的 `usage-ledger.sqlite`）在 `Db` 里接上：store 线程写索引时同时记账，界面不碰账本。账本只增不删，所以界面的 `UsageData` 也只替换、不删除：
+
+- **只有启动时整份读一次**（`Usage { full: true }`）。之后每次扫描只发它写过的 session（`Usage { full: false }`，按 id 替换）。Rebuild 清空的是索引不是账本，这次扫描读不到的 session（记录文件已删、又不在 history.jsonl 里）不会出现在事件里，界面保留原来的用量（`store.rs` 的 `a_rebuild_does_not_drop_usage_the_ui_already_has`）
+- **今天的费用在主线程算**：`roll_day` → `refresh_today` 对 `UsageData` 求 `[今天 4:00, 下一个 UTC 整点)` 的合计。上界取下一个整点而不是现在，因为账本按 UTC 整点存小时桶，取现在会漏掉当前这个小时。状态栏的 `Today …` 在这里格式化成字段，render 只取
+- **用量日**（`AppRoot::usage_day`，4:00 起）是会话表时间预设、日期选择器快捷项和今天的唯一依据。它不在 render 里算：`roll_day` 在收到用量或扫描结束、窗口激活、定时器醒来时检查，换了日就重新应用时间过滤（`set_range`），再重算今天。所以跨过 4:00 后，最迟到下一次检查（不超过 10 分钟）才换日
+- 账本不可用（`UsageUnavailable`）时状态栏是 `Today —`，其余照常。还没收到账本时状态栏不显示这一段
+
+## 自动扫描
+
+应用开着时自己做增量扫描（`AppRoot::auto_scan`），触发有两个：窗口变为激活（`observe_window_activation`），和一个每 `AUTO_SCAN_IDLE`（600 秒）醒一次的循环任务（`_auto_scan`）。菜单的 Scan for Changes / Rebuild Index 照旧。
+
+| 规则 | 原因 |
+|---|---|
+| 上一次扫描（任何来源，包括启动时那次和菜单发起的）还没结束，或结束不到 `AUTO_SCAN_MIN_GAP`（30 秒），就跳过 | 切窗口很频繁；扫描排在 store 线程上，叠在一起会让收藏等请求排队 |
+| 发的是 `Scan { quiet: true }`，不把状态栏改成 `loading index…` | 没有变化时界面不应有任何反应 |
+| 安静的扫描什么都没变时，`ScanDone` 不改状态栏中间的摘要 | 同上；菜单发起的扫描照旧写「index up to date」 |
+| 安静的扫描遇到索引被锁（`is_busy`），store 线程发 `ScanSkipped` 而不是 `Failed` | `asm` 正好在扫描时不报错，等下一次 |
+| 有变化时和手动扫描一样流式更新、整表重读、搜索重跑 | 规则只有一套 |
+
+计时用 `cx.background_executor().now()`，不用 `Instant::now()`：测试里 `advance_clock` 能推进它，30 秒和 10 分钟的用例不用真等（`keyboard_tests.rs` 的 `scans_triggered_within_thirty_seconds_run_once`、`ten_minutes_later_…`）。`scan_in_flight` 在 `AppRoot::new` 里就是 true（store 线程打开索引后马上扫描），由 `ScanDone` / `ScanSkipped` / `Failed` 清掉；所以启动时窗口第一次激活不会多扫一次。
+
+日志：发起时打 `auto-scan: <触发>`，结束打 `scan (automatic): <报告>`，今天的费用变了打 `today: …`，换日打 `usage day: <旧> → <新>`。
 
 ### 扫描期间请求要排队
 
@@ -191,6 +223,8 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 - **扫描正在流式填表、且当前没有选中时，不自动选第一行。** 设置选中行会顺带滚动到该行，而扫描期间第一行一直在变。等扫描结束再选
 - **启动时要恢复上次的选中，但那一行还没出现时，先等。** 行出现就选中它；扫描结束仍然没有，才按第 2 条选第一行
 
+**扫描引起的刷新不把表格滚回选中的行。** 自动扫描每 10 分钟就可能来一次，选中的 session 因为别的 session 排到前面而换了行号时，`set_selected_row` 会顺带把它滚进视口，用户正往下翻的表格就被拉回去。所以 `on_store_events` 走 `relocate_selection(false)`：选中的还是同一个 session、只是换了行时，照样 `set_selected_row`（高亮跟着 session 走），但在同一个 update 里把它留在列表滚动句柄上的延迟滚动请求（`vertical_scroll_handle.0.deferred_scroll_to_item`）拿回去，下一帧就不会滚。新选中的行（恢复上次的选中、退回第一行）照常滚进视口；过滤、排序引起的重新定位也照常滚动。`keyboard_tests.rs` 的 `an_automatic_scan_does_not_scroll_the_table_back_to_the_selected_row` 锁住这一点（不这样做时滚动位置会从 −86px 回到 0）。
+
 点表头排序是表格组件自己做的，它重排行却不改选中的行号。所以 `AppRoot` 观察表格时记下上一次的排序，一变就按上面的规则重新定位选中；记录要在重新定位之前更新，因为重新定位会再通知一次表格。
 
 表格的 `SelectRow` 事件是通知，不是命令：表格先改好自己的选中行再发事件，事件要等当前 update 结束才处理。一次 update 里选了两次，就会排两个事件，只有和表格当前选中行一致的那个才处理，旧的丢掉。如果旧事件也照做，选中会被拉回旧行、再发一个事件，两个事件来回触发，主线程空转（autoplay 第二步曾因此卡死）。
@@ -242,7 +276,7 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 
 ## 相关文件
 
-- `crates/app/src/store.rs` — store 线程、读取线程、请求与事件类型；文件头注释有启动顺序，测试断言了冷启动、热启动、Rebuild 的事件序列，以及读取在扫描期间照常返回、新请求取代旧请求、History 的 prompt、导出与导出不被取代
+- `crates/app/src/store.rs` — store 线程、读取线程、请求与事件类型；文件头注释有启动顺序，测试断言了冷启动、热启动、Rebuild 的事件序列，用量事件（首次整份、之后只发写过的、Rebuild 不丢）、安静的扫描遇到锁时跳过，以及读取在扫描期间照常返回、新请求取代旧请求、History 的 prompt、导出与导出不被取代
 - `crates/app/src/actions.rs` — 操作的可用性（`available` / `check`）、恢复命令、导出文件名、各 action 与处理函数
 - `crates/app/src/conversation.rs` — 回合卡的转换（`build`）与行表（`rows`、`card_rows`、`row_of`、`fold`）；`real_transcript_timings` 是量真实文件读取与转换耗时的 ignored 测试
 - `crates/app/src/detail.rs` — 详情的状态（`DetailState`：加载状态、行表、展开 / 折叠、命中位置与停靠）
@@ -252,6 +286,7 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 - `crates/app/src/toolbar.rs` — 过滤条件的应用、搜索的防抖与重跑
 - `crates/app/src/table.rs` — 全部行与过滤排序后的顺序、搜索对象的生成
 - `crates/app/src/settings.rs` — 视图状态的读写与容错测试
-- `crates/app/src/keyboard_tests.rs` — 启动焦点与搜索的键盘路径（`cmd-f`、Enter、Escape、`n`、`cmd-g`）、`cmd-c` / `cmd-shift-c` 复制（用测试平台的剪贴板）的行为测试
+- `crates/app/src/keyboard_tests.rs` — 启动焦点与搜索的键盘路径（`cmd-f`、Enter、Escape、`n`、`cmd-g`）、`cmd-c` / `cmd-shift-c` 复制（用测试平台的剪贴板）的行为测试；状态栏的 Today、自动扫描（定时、窗口激活、30 秒节流、不改摘要、不滚回选中行）、跨过 4:00 换日
+- `crates/core/src/ledger.rs`、`crates/core/src/usage.rs` — 账本与 4:00 分日、`UsageData` 的合计；表结构与迁移规则见 [数据层设计](data-layer-design.md)
 - `crates/core/src/index/indexer.rs` — 流式扫描与单事务写入
 - `kb/notes/2026-09-21-m2-real-data.md`、`kb/notes/2026-09-21-m3-search.md` — 上述数字的来源与当时的取舍

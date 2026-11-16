@@ -239,6 +239,14 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   - `roll_day(cx)`：`usage_day(now)` 和记着的不同就更新，调 `set_range(self.range, cx)` 让时间过滤重算边界，再 `refresh_today()`。
   - `render_status_bar`：左侧末尾加 `· Today {fmt_usd}`，有 unpriced 时加 `(N unpriced)`，`usage_available` 为假时是 `Today —`。字符串在 `refresh_today` 里格式化好存成字段，render 只取。
 - `model.rs`：`RangePreset::bounds` 改为取 `usage_day(now, &Local)` 作为今天；`bounds_on` 里的 `local_midnight` 全部换成 `day_start_ms(.., &Local)`，删掉 `local_midnight`。`default_custom` 的调用方（`AppRoot::new`）和 `toolbar.rs::date_presets` 的调用方改传 `usage_day(now)`。
+- **app 实现补充（2026-11-16，usage-p1-app）**：
+  - `RangePreset::bounds` 删掉了，不是改写：调用方（`AppRoot::new`、`set_range`）都传 `AppRoot::usage_day` 给 `bounds_on`，`date_presets` 也传它。这样时间过滤、日期选择器和 Today 用同一个「今天」，`roll_day` 注入的时刻也对过滤生效；`model::today_at(now_ms)` 包一层 `usage_day(.., &Local)`。
+  - `StoreEvent::ScanDone` 多了 `quiet: bool`。界面靠它做到「自动扫描没有变化时状态栏中间留着上一次的摘要」：只看报告分不清这次是自动的还是菜单发起的（菜单的照旧写 `index up to date`）。
+  - `usage_available` 是 `Option<bool>`：`None` 是还没收到账本，状态栏不显示 Today 一段，避免启动时先闪一下 `Today —`。启动时读账本出错：store 线程发 `UsageUnavailable` 和 `Failed`，扫描照常进行。
+  - `roll_day(now)` 末尾总是调 `refresh_today(now)`，收到 `Usage` / `ScanDone`、窗口激活、定时器醒来都会调它；所以「今天」只有 `roll_day` 一个入口，Today 不会在换日之前按旧的一天算。
+  - `auto_scan(trigger, cx)` 多一个触发来源参数，只用于日志（`auto-scan: timer` / `window activated`），返回是否发出了请求；计时用 `cx.background_executor().now()`（测试能用 `advance_clock` 推进）。菜单的 `rescan` 也置 `scan_in_flight`；`scan_in_flight` 初值为 true（启动扫描）。
+  - store 侧的请求处理抽成 `Worker::serve`，错误在那里变成 `Failed` 或 `ScanSkipped`。
+  - 验收用的 autoplay：`ASM_USAGE_AUTOPLAY=<gate 目录>`，脚本 `make screenshot-usage`（用法见 `kb/docs/gpui-kit-guide.md`「脚本化交互与截图」）。
 - `kb/docs/`、`AGENTS.md`：见总 plan「各期都要更新的文档」。
 
 ### 实施步骤
@@ -307,6 +315,7 @@ app：
 
 - **账本上线前索引很可能先被重建。** 规划时工作区里还有把 `SCHEMA_VERSION` 从 5 提升到 6 的改动（`asm` CLI 改了 prompt 的判定）；core 实现时已作为 `bd56682` 提交。它合并后，任何用新构建打开真实 `index.sqlite` 的动作（`make dev`、截图脚本、发版后的应用）都会重建索引，已删 session 的用量随之丢失；`asm` 自己用的是 `index-cli.sqlite`，不受影响。备份 `tmp/2026-11-12-usage-stats/index-copy.sqlite` 里有这批用量，实施步骤 7 负责把它找回来。账本这一期合并之后就不再有这个问题：重建前会先抢救。
 - **自动扫描后表格会滚回选中的行。** `after_rows_changed` → `select_row` 在选中的 session 换了位置时调 `set_selected_row`，它会顺带滚动（gpui-kit 没有只选中不滚动的入口）。手动扫描时这不是问题，每 10 分钟自动来一次就可能在用户往下翻的时候把表格拉回去。实现时先实测；确实打扰的话，自动扫描引起的刷新里，选中行不在当前可见范围内时不调 `set_selected_row`，只更新 `selected`。
+  - **实测与处理（2026-11-16）**：无界面测试能复现：窗口压到 260px 高、选中第一行、滚到底，往排在最后的记录文件追加一条后自动扫描，滚动位置从 −86px 回到 0。没有照上面的做法（只更新 `selected`、不调 `set_selected_row`）：那样表格的选中行号还指着旧位置，高亮会落在另一个 session 上。改为照常 `set_selected_row`，但在同一个 update 里把它放进 `vertical_scroll_handle` 的延迟滚动请求拿掉（`deferred_scroll_to_item` 是公开字段，下一帧 prepaint 才执行）。范围是所有扫描引起的刷新（含菜单的 Scan for Changes），只对「同一个 session 换了行」生效；新选中的行、过滤和排序照常滚动。用例 `keyboard_tests.rs::an_automatic_scan_does_not_scroll_the_table_back_to_the_selected_row`。真实窗口里的手感留给实机验收。
 - **两个索引的解析版本不同。** `index-cli.sqlite` 的 schema 比已发布的 app 新，两边对同一次调用解析出的值如果不同，账本里是后写的那个。目前用量字段两边相同。
 - **账本和会话表的数字可以不同**：只增不删带来的（subagent 被单独删、文件被重写）。这是定下的语义，不登记为问题。
 - **核对只比调用数。** 账本里某个 session 多出几行（subagent 被单独删过）、同时又缺了另外几行时，两边的数可能相等或账本更大，这次缺的就补不上。要同时发生「只增不删造成的多」和「崩溃造成的少」，而后者在先提交账本的顺序下本来就不该出现，所以不为它付逐行比对的代价（110 ms，且随历史变慢）。

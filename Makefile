@@ -60,6 +60,9 @@ screenshot-search: build ## Run the scripted search session (text, next hit, CJK
 screenshot-detail: build ## Tour the Conversation tab (turn cards, steps, search hits, special cards, the 70MB session, history prompts, a code block, ] twice, Metadata) and capture up to 12 screenshots; types and clicks nothing
 	scripts/screenshot-detail.sh "$(BIN)" "$(SHOT_DIR)"
 
+screenshot-usage: build ## Usage acceptance on a copy (needs ASM_DB and ASM_CLAUDE_DIR): capture Today after start-up, Scan for Changes (USAGE_BEFORE_SCAN runs first) and Rebuild Index, then hold USAGE_HOLD seconds; types and clicks nothing
+	scripts/screenshot-usage.sh "$(BIN)" "$(SHOT_DIR)"
+
 screenshot-cost: build ## Tour the Cost tab (Opus 5.5 by context as Fable 5.2 and Sonnet 5.5, a session with other models as Haiku 5.5, sorted by In, then by Hit% from the lowest, a lost cache in ASM_AUTOPLAY_CACHE_SESSION, columns hidden) and capture up to 9 screenshots; types and clicks nothing
 	scripts/screenshot-cost.sh "$(BIN)" "$(SHOT_DIR)"
 
@@ -125,5 +128,5 @@ release-local: build-release ## The whole release chain locally into dist/releas
 clean: ## Remove this project's build artifacts only (the target dir is shared across projects)
 	cargo clean -p $(APP) -p $(CORE)
 
-.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search screenshot-detail screenshot-cost bin asm transcript-reader build-transcript-reader parity icon clean \
+.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search screenshot-detail screenshot-cost screenshot-usage bin asm transcript-reader build-transcript-reader parity icon clean \
 	build-release notarize-app dmg notarize appcast test-release release-local

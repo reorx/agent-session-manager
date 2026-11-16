@@ -6,6 +6,11 @@
 //! table this way) → `ScanDone` → a second `Loaded` when the scan changed anything, so rows that
 //! were streamed before their project's path was known end up exact.
 //! The first load includes the local model catalog; scans also reload when its windows change.
+//! Right after the first `Loaded` comes `Usage { full: true }`: every session in the usage ledger
+//! (or `UsageUnavailable`). Every scan then sends `Usage { full: false }` with the ledger's rows
+//! of the sessions it wrote, before its `ScanDone`. A quiet scan (`Scan { quiet: true }`, the
+//! app's automatic ones) that finds the index locked by another process ends in `ScanSkipped`
+//! instead of `Failed`.
 //!
 //! A second thread, `asm-reader`, reads transcripts for the detail panel straight from the file
 //! (no `Db`), so a conversation shows up while a scan holds the store thread. It also reads the
@@ -22,8 +27,8 @@ use agent_session_core::claude::conversation::{conversation_from_history, read_c
 use agent_session_core::claude::history::history_prompts;
 use agent_session_core::claude::paths::ClaudeDir;
 use agent_session_core::claude::model_catalog::ModelCatalog;
-use agent_session_core::index::{Db, IndexStats, Indexer, ListFilter, Order, Progress, ScanEvent, ScanReport};
-use agent_session_core::model::{Conversation, SessionSummary};
+use agent_session_core::index::{Db, IndexStats, Indexer, ListFilter, Order, Progress, ScanEvent, ScanReport, is_busy};
+use agent_session_core::model::{Conversation, SessionSummary, SessionUsage};
 use agent_session_core::search::Matcher;
 use agent_session_core::transcript::read_transcript;
 use anyhow::{Result, anyhow, ensure};
@@ -37,7 +42,9 @@ pub enum StoreRequest {
     Favorite(String),
     Unfavorite(String),
     SetFavoritesDir(Option<PathBuf>),
-    Scan,
+    /// An incremental scan. `quiet` ones (automatic) give up without a `Failed` when another
+    /// process holds the index (`ScanSkipped`).
+    Scan { quiet: bool },
     Rebuild,
 }
 
@@ -48,7 +55,17 @@ pub enum StoreEvent {
     Progress(Progress),
     /// One session written by the running scan (new or changed).
     Session(SessionSummary),
-    ScanDone { report: ScanReport, stats: IndexStats },
+    /// `quiet`: the scan was asked for with `Scan { quiet: true }`.
+    ScanDone { report: ScanReport, stats: IndexStats, quiet: bool },
+    /// A quiet scan found the index locked by another process and did nothing; the next one
+    /// tries again.
+    ScanSkipped,
+    /// Usage ledger rows: every session in the ledger (`full`, once after the first `Loaded`),
+    /// or those of the sessions a scan wrote (always before its `ScanDone`). Sessions a scan did
+    /// not write keep what the UI has: the ledger never forgets a call.
+    Usage { sessions: Vec<SessionUsage>, full: bool },
+    /// This run has no usage ledger (one written by a newer version, or it cannot be read).
+    UsageUnavailable,
     /// A transcript read for the detail panel (`Store::read_conversation`), or the prompts of a
     /// history-only session (`Store::read_history`), already built into cards. `read` is the
     /// file read, `build` the conversion; both ran on the reader thread.
@@ -197,20 +214,20 @@ fn run(claude: ClaudeDir, db_path: PathBuf, favorites: FavoritesDir, requests: m
             return;
         }
     };
-    if let Err(e) = worker.load().and_then(|_| worker.scan(false)) {
-        events.send_blocking(StoreEvent::Failed(format!("{e:#}"))).ok();
+    let fail = |e: anyhow::Error| events.send_blocking(StoreEvent::Failed(format!("{e:#}"))).ok();
+    let started = worker.load().and_then(|_| {
+        if let Err(e) = worker.load_usage() {
+            // the index works without the ledger: say so and go on
+            events.send_blocking(StoreEvent::UsageUnavailable).ok();
+            fail(e);
+        }
+        worker.scan(false, false)
+    });
+    if let Err(e) = started {
+        fail(e);
     }
     for request in requests {
-        let result = match request {
-            StoreRequest::Favorite(id) => worker.favorite(id, false),
-            StoreRequest::Unfavorite(id) => worker.favorite(id, true),
-            StoreRequest::SetFavoritesDir(dir) => worker.set_favorites_dir(dir),
-            StoreRequest::Scan => worker.scan(false),
-            StoreRequest::Rebuild => worker.scan(true),
-        };
-        if let Err(e) = result {
-            events.send_blocking(StoreEvent::Failed(format!("{e:#}"))).ok();
-        }
+        worker.serve(request);
     }
 }
 
@@ -231,6 +248,28 @@ impl Worker {
         Ok(Worker { db: Db::open(db_path)?, indexer: Indexer::new(claude.clone(), Some(favorites.claude())), claude, catalog, favorites, events })
     }
 
+    /// One request; a failure becomes `Failed`, or `ScanSkipped` for a quiet scan that found the
+    /// index busy.
+    fn serve(&mut self, request: StoreRequest) {
+        let quiet = matches!(request, StoreRequest::Scan { quiet: true });
+        let result = match request {
+            StoreRequest::Favorite(id) => self.favorite(id, false),
+            StoreRequest::Unfavorite(id) => self.favorite(id, true),
+            StoreRequest::SetFavoritesDir(dir) => self.set_favorites_dir(dir),
+            StoreRequest::Scan { quiet } => self.scan(false, quiet),
+            StoreRequest::Rebuild => self.scan(true, false),
+        };
+        let event = match result {
+            Ok(()) => return,
+            Err(e) if quiet && is_busy(&e) => {
+                println!("scan skipped: {e:#}");
+                StoreEvent::ScanSkipped
+            }
+            Err(e) => StoreEvent::Failed(format!("{e:#}")),
+        };
+        self.events.send_blocking(event).ok();
+    }
+
     fn favorite(&mut self, id: String, remove: bool) -> Result<()> {
         let s = self.db.session(&id)?.ok_or_else(|| anyhow!("session not found"))?;
         if remove { favorites::remove(&self.favorites.root, &s.project_key, &id, &self.favorites.trash)?; }
@@ -238,7 +277,7 @@ impl Worker {
             ensure!(!s.history_only(), "cannot favorite a history-only session");
             favorites::save(&self.favorites.root, s.file_path.as_ref().ok_or_else(|| anyhow!("no transcript"))?, &s.project_key, &id)?;
         }
-        self.scan(false)?;
+        self.scan(false, false)?;
         self.events.send_blocking(StoreEvent::FavoriteChanged { id, favorite: !remove })?; Ok(())
     }
     fn set_favorites_dir(&mut self, dir: Option<PathBuf>) -> Result<()> {
@@ -250,7 +289,7 @@ impl Worker {
             config::set_favorites_dir(&db_path, dir.as_ref().map(|_| new.as_path()))
         }))?;
         self.favorites.root = new.clone(); self.indexer = Indexer::new(self.claude.clone(), Some(self.favorites.claude()));
-        self.scan(false)?;
+        self.scan(false, false)?;
         self.events.send_blocking(StoreEvent::FavoritesDirChanged { dir: new, moved: report.moved, skipped: report.skipped })?; Ok(())
     }
 
@@ -261,28 +300,46 @@ impl Worker {
         Ok(())
     }
 
-    fn scan(&mut self, rebuild: bool) -> Result<()> {
+    /// Every session in the usage ledger, or `UsageUnavailable` when this run has none.
+    fn load_usage(&self) -> Result<()> {
+        let event = match self.db.ledger_usage(None)? {
+            Some(sessions) => StoreEvent::Usage { sessions, full: true },
+            None => StoreEvent::UsageUnavailable,
+        };
+        self.events.send_blocking(event)?;
+        Ok(())
+    }
+
+    /// A rebuild empties the index but not the ledger, so the UI keeps the usage it has.
+    fn scan(&mut self, rebuild: bool, quiet: bool) -> Result<()> {
         if rebuild {
             self.db.clear_all()?;
             self.load()?;
         }
         let events = self.events.clone();
+        let mut written = Vec::new();
         let result = self.indexer.scan_streaming(&mut self.db, &mut |ev| {
             let event = match ev {
                 ScanEvent::Progress(p) => StoreEvent::Progress(p),
-                ScanEvent::Session(s) => StoreEvent::Session(s),
+                ScanEvent::Session(s) => {
+                    written.push(s.id.clone());
+                    StoreEvent::Session(s)
+                }
             };
             events.send_blocking(event).ok();
         });
         let report = match result {
             Err(e) if e.is::<agent_session_core::index::indexer::RootsChanged>() => {
                 self.events.send_blocking(StoreEvent::RebuildingRoots)?;
-                return self.scan(true);
+                return self.scan(true, false);
             }
             result => result?,
         };
+        if let Some(sessions) = self.db.ledger_usage(Some(&written))?.filter(|s| !s.is_empty()) {
+            self.events.send_blocking(StoreEvent::Usage { sessions, full: false })?;
+        }
         let changed = report.files_seen != report.files_unchanged || report.files_missing > 0 || report.history_sessions > 0;
-        self.events.send_blocking(StoreEvent::ScanDone { report, stats: self.db.stats()? })?;
+        self.events.send_blocking(StoreEvent::ScanDone { report, stats: self.db.stats()?, quiet })?;
         let started = Instant::now();
         let catalog = Arc::new(ModelCatalog::load(&self.claude));
         let catalog_changed = catalog.windows() != self.catalog.windows();
@@ -336,12 +393,12 @@ mod tests {
         let (tx, events) = async_channel::unbounded();
         let favorites = FavoritesDir { root: dir.path().join("favorites"), trash: favorites::Trash::Dir(dir.path().join("trash")) };
         let mut worker = Worker::open(claude.clone(), &dir.path().join("index.sqlite"), favorites, tx).unwrap();
-        worker.scan(false).unwrap();
+        worker.scan(false, false).unwrap();
         let drain = || std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
         assert!(!drain().iter().any(|e| matches!(e, StoreEvent::Loaded { .. })));
         for (window, fetched, reload) in [(500_000, 2, true), (500_000, 3, false)] {
             write_catalog(&claude, window, fetched);
-            worker.scan(false).unwrap();
+            worker.scan(false, false).unwrap();
             let seen = drain();
             assert_eq!(seen.iter().filter(|e| matches!(e, StoreEvent::Loaded { .. })).count(), usize::from(reload));
             let scan = seen.iter().position(|e| matches!(e, StoreEvent::ScanDone { .. })).unwrap();
@@ -351,7 +408,7 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(claude.model_catalog_dir()).unwrap();
-        worker.scan(false).unwrap();
+        worker.scan(false, false).unwrap();
         assert!(drain().iter().any(|e| matches!(e, StoreEvent::Loaded { catalog, .. } if catalog.windows().is_empty())));
     }
 
@@ -626,6 +683,110 @@ mod tests {
         let seq = store.read_conversation(S1.into(), transcript(S1), ALPHA.into(), None);
         let seen = until_conversation(&events, seq);
         assert!(conversation_of(seen.last().unwrap()).2.is_ok(), "the reader thread is still there");
+    }
+
+    /// A copy of the fixture tree that a test may append to or delete from.
+    fn fixture_copy(dir: &std::path::Path) -> ClaudeDir {
+        let claude = dir.join("claude");
+        crate::keyboard_tests::copy_fixture(fixture_claude().root(), &claude);
+        ClaudeDir::new(claude)
+    }
+
+    fn usage_events(events: &[StoreEvent]) -> Vec<(bool, Vec<&str>)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                StoreEvent::Usage { sessions, full } => Some((*full, sessions.iter().map(|s| s.session.id.as_str()).collect())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn usage_follows_the_first_load_and_later_scans_send_only_changed_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = fixture_copy(dir.path());
+        let (store, events) = spawn(claude.clone(), dir.path().join("index.sqlite"));
+        let seen = until_settled(&events);
+        assert!(matches!(&seen[..2], [StoreEvent::Loaded { .. }, StoreEvent::Usage { full: true, .. }]), "the ledger right after the index: {seen:?}");
+        let scanned = usage_events(&seen);
+        assert_eq!(scanned.len(), 2, "the full load, then what the scan wrote: {scanned:?}");
+        assert!(!scanned[1].0 && scanned[1].1.contains(&S1), "the cold scan wrote S1's calls: {scanned:?}");
+        let responses = |events: &[StoreEvent]| -> u64 {
+            let Some(StoreEvent::Usage { sessions, .. }) = events.iter().rfind(|e| matches!(e, StoreEvent::Usage { .. })) else { panic!("no usage in {events:?}") };
+            sessions.iter().filter(|s| s.session.id == S1).flat_map(|s| &s.hours).map(|h| h.responses).sum()
+        };
+        let before = responses(&seen);
+        assert!(before > 0);
+        let done = seen.iter().position(|e| matches!(e, StoreEvent::ScanDone { .. })).unwrap();
+        let usage = seen.iter().rposition(|e| matches!(e, StoreEvent::Usage { .. })).unwrap();
+        assert!(usage < done, "the usage of a scan arrives before its ScanDone");
+
+        crate::keyboard_tests::append_response(claude.root(), S1, "msg_appended", "claude-opus-5", chrono::Utc::now().timestamp_millis());
+        store.request(StoreRequest::Scan { quiet: false });
+        let seen = until_settled(&events);
+        assert_eq!(usage_events(&seen), [(false, vec![S1])], "only the session the scan changed");
+        assert_eq!(responses(&seen), before + 1, "S1's calls and the appended one");
+
+        store.request(StoreRequest::Scan { quiet: false });
+        assert_eq!(usage_events(&until_settled(&events)), [], "a scan that changed nothing sends no usage");
+    }
+
+    #[test]
+    fn a_rebuild_does_not_drop_usage_the_ui_already_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let claude = fixture_copy(dir.path());
+        let (store, events) = spawn(claude.clone(), dir.path().join("index.sqlite"));
+        let mut usage = agent_session_core::usage::UsageData::default();
+        let take = |seen: &[StoreEvent], usage: &mut agent_session_core::usage::UsageData| {
+            for ev in seen {
+                if let StoreEvent::Usage { sessions, full } = ev {
+                    if *full { usage.replace_all(sessions.clone()) } else { usage.apply(sessions.clone()) }
+                }
+            }
+        };
+        take(&until_settled(&events), &mut usage);
+        let before = usage.sessions.get(S2).cloned().expect("S2 has calls");
+        assert!(!before.hours.is_empty());
+
+        // S2 is not in history.jsonl either: after the rebuild the index knows nothing of it
+        std::fs::remove_file(claude.root().join("projects/-Users-me-Code-alpha").join(format!("{S2}.jsonl"))).unwrap();
+        store.request(StoreRequest::Scan { quiet: false });
+        take(&until_settled(&events), &mut usage);
+        store.request(StoreRequest::Rebuild);
+        let seen = until_settled(&events);
+        assert!(!loaded_counts(&seen).is_empty() && !seen.iter().any(|e| matches!(e, StoreEvent::Session(s) if s.id == S2)), "gone from the table");
+        let sent = usage_events(&seen);
+        assert!(!sent.is_empty() && sent.iter().all(|(full, ids)| !full && !ids.contains(&S2)), "a rebuild only sends what it read again: {sent:?}");
+        take(&seen, &mut usage);
+        assert_eq!(usage.sessions.get(S2), Some(&before), "the UI keeps S2's usage");
+    }
+
+    #[test]
+    fn a_quiet_scan_that_finds_the_index_busy_is_skipped_without_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("index.sqlite");
+        let (tx, events) = async_channel::unbounded();
+        let favorites = FavoritesDir { root: dir.path().join("favorites"), trash: favorites::Trash::Dir(dir.path().join("trash")) };
+        let mut worker = Worker::open(fixture_copy(dir.path()), &db_path, favorites, tx).unwrap();
+        worker.db.set_busy_timeout(Duration::from_millis(100)).unwrap();
+        // asm scanning the same index
+        let writer = Db::open(&db_path).unwrap();
+        writer.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
+        let drain = || std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+
+        worker.serve(StoreRequest::Scan { quiet: true });
+        let seen = drain();
+        assert!(matches!(seen.last(), Some(StoreEvent::ScanSkipped)), "{seen:?}");
+        assert!(!seen.iter().any(|e| matches!(e, StoreEvent::Failed(_) | StoreEvent::ScanDone { .. })), "{seen:?}");
+
+        worker.serve(StoreRequest::Scan { quiet: false });
+        assert!(matches!(drain().last(), Some(StoreEvent::Failed(m)) if m.contains("locked")), "a scan the user asked for says why it failed");
+
+        writer.conn().execute_batch("COMMIT").unwrap();
+        worker.serve(StoreRequest::Scan { quiet: true });
+        let seen = drain();
+        assert!(matches!(seen.iter().find(|e| matches!(e, StoreEvent::ScanDone { .. })), Some(StoreEvent::ScanDone { quiet: true, .. })), "{seen:?}");
     }
 
     #[test]

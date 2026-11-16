@@ -1,6 +1,6 @@
 ---
 created: 2026-09-15
-updated: 2026-11-10
+updated: 2026-11-16
 tags:
   - prd
   - product
@@ -46,15 +46,15 @@ tags:
 | Preview 展示模式切换 | ✅ | 工具栏 Preview 下拉或 `cmd-1..4`，四种模式即时切换 |
 | 详情面板 | ✅ Metadata / ✅ Conversation / ✅ Cost / ✅ 操作入口 | 头部 + 三个 tab（Cost 见上方「成本分析」）；Metadata 为真实数据（含自算费用与 Claude Code 记录的费用、token 用量、context、时长、模型、权限模式、top 工具、修改过的文件）；Conversation 2026-10-27 完成 M4a：直接读记录文件，按回合卡显示全部对话（工具调用、thinking、AUTO、compact、打断与 API 错误），命中在哪都能跳过去，扫描期间照常显示，70MB 的 session 首帧 45–79ms（release，页缓存热；冷的一般 150–160ms）。M4b 同日完成：标题行操作按钮（收藏、复制 resume 命令、复制 ID、在 Finder 中显示、打开项目目录、导出 TXT），表格右键菜单提供同一组操作，`⌘C` / `⇧⌘C`；History session 显示 history.jsonl 里的 prompt 卡片；代码块是等宽框、行内代码等宽浅灰底；`[` / `]` 按回合跳转（`../plans/2026-10-26-m4-detail-panel.md`）。2026-11-12：Metadata 的 Tokens 行带一位小数的缓存命中率；Conversation 标出缓存失效的回合（重写了多少 token、花了多少、原因是空闲超时 / compact / 换模型 / 不明），顶部摘要给出次数（`../plans/2026-11-12-columns-and-cache-breaks.md`） |
 | 分栏与折叠 | ✅ | 拖拽调宽，快捷键折叠 |
-| 状态栏 | ✅ | 左：显示数 / 总数 · 显示行的费用合计；中：操作状态 + 索引状态（loading / indexing n / m / 完成摘要 / 错误）；右：消息数、DB 大小、首批行上屏耗时 |
+| 状态栏 | ✅ | 左：显示数 / 总数 · 显示行的费用合计 · 今天的费用（2026-11-16，`Today $X`，4:00 起全部调用，来自用量账本，不受过滤影响）；中：操作状态 + 索引状态（loading / indexing n / m / 完成摘要 / 错误）；右：消息数、DB 大小、首批行上屏耗时 |
 | 搜索框与范围切换 | ✅ | 搜索框（`cmd-f` 聚焦、Enter 回到表格、`esc` 清空）、Scope 多选、`.*` 正则开关、`Aa` 大小写、Labels 多选；选项重启后保留 |
-| 时间范围过滤 | ✅ | Updated 下拉：Today / 3 / 7 / 30 days / Any time / This month / Last month / 自定义起止日期，即时过滤 |
+| 时间范围过滤 | ✅ | Updated 下拉：Today / 3 / 7 / 30 days / Any time / This month / Last month / 自定义起止日期，即时过滤；2026-11-16 起一天从本地 4:00 开始，应用开着跨过 4:00 时自动换到新的一天 |
 | 项目过滤 | ✅ 单选 + 隐藏项目 | Project 下拉按最近活动列出真实项目与 session 数；可把噪音项目（如 CodexBar 的 `ClaudeProbe`）整个隐藏并随时恢复；多选、可搜索、worktree 聚合待做 |
 | Kind 过滤 | ✅ | Kind 多选下拉（CLI / SDK / BG / History，各带 session 数），默认全选，选择持久化 |
 | 更多过滤 | ⬜ | 最少 prompt 数的界面控件、使用过的工具、有 PR、有 subagent |
 | 全文搜索、正则搜索 | ✅ | 文本模式 FTS5（2–40ms，两字 CJK 走 LIKE 约 20ms）、正则模式流式扫描 transcript（2GB 记录文件，260–530ms，带 Tools 范围时已到 500ms 的目标线）；Matches 列、高亮片段、详情内命中跳转（命中在工具输入输出、thinking 里也能跳到）。`asm search` 命令行同样可用 |
 | 真实数据读取与索引 | ✅ | 解析器、增量 SQLite 索引、history.jsonl 补位、损坏自动重建；界面热启动约 200ms 出表（5488 行），冷索引 1.27GB 约 4s 且表格流式填充；Index 菜单可手动 Scan / Rebuild |
-| 实时更新 | ⬜ | |
+| 实时更新 | 🟡 定时 | 2026-11-16：应用开着时自动增量扫描（窗口回到前台、每 10 分钟，30 秒内只扫一次），有变化才刷新表格；不监听文件。用量账本见 `../plans/2026-11-16-usage-stats/usage-ledger.md` |
 | 快捷键与菜单 | ✅ 部分 | 退出、折叠详情面板、`cmd-f`、`cmd-1..4`、`cmd-shift-r` 重建索引、`cmd-c` / `cmd-shift-c` 复制 ID / resume 命令、`[` / `]` 按回合跳转；View 菜单可显示 / 隐藏没有 prompt 的空 session；表格行有右键菜单。启动后焦点在表格上，不需要先点击就能用快捷键 |
 | 设置与状态持久化 | ✅ 视图状态 / ⬜ 设置页 | 项目与时间过滤（含自定义区间）、排序、Preview 模式、空 session 开关、详情面板开合、选中行存 `state.json`，下次启动恢复 |
 | 安装与自动更新 | ✅ | 2026-10-28 发布 1.0：Homebrew cask（`brew install --cask reorx/tap/agent-session-manager`）或 GitHub Release 的 dmg，Apple Silicon、macOS 14 起，Developer ID 签名并经 Apple 公证；应用内每天检查一次更新（也可菜单 Check for Updates…），用户确认后安装并重启；About 面板显示版本。见 `release.md` |
@@ -161,11 +161,12 @@ Branch、Tools、ID 不作为列，只在详情面板的 Metadata 里显示（�
 
 **待补充**：在终端里直接打开 resume、查看 subagent 的对话、对话随记录文件追加实时刷新，都在 M5；从收藏副本恢复对话是收藏方案的后续工作。
 
-### 4.6 索引与实时更新 ✅ 索引与界面 / ⬜ 监听
+### 4.6 索引与实时更新 ✅ 索引与界面 / ✅ 定时扫描 / ⬜ 监听
 
 - 首次启动全量索引，状态栏显示进度，表格随索引流式填充
 - 之后启动增量更新，通常 100ms 内完成
-- 运行期间监听数据目录，新 session / 新消息自动出现，Updated 列实时刷新
+- 应用开着时自动做增量扫描（✅ 2026-11-16）：窗口回到前台时、之后每 10 分钟；上一次还没结束或结束不到 30 秒就跳过。自动扫描是安静的：没有变化时界面没有任何反应，状态栏中间留着上一次的摘要；有变化时和 Scan for Changes 一样整表刷新，选中的 session 保持选中，表格不会滚回选中的行；另一个进程（`asm`）占着索引时放弃这一次，不报错
+- 运行期间监听数据目录（⬜），新 session / 新消息立即出现，Updated 列实时刷新
 - 记录文件被清理后行保留并标记为 History
 - 菜单提供"Rebuild Index"；索引损坏时自动重建，不崩溃
 - subagent 默认不作为独立行出现，只在主 session 的 Kind 列显示数量；设置里可切换为缩进子行
@@ -180,7 +181,7 @@ M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebui
 
 ### 4.8 状态栏 ✅ 部分
 
-22px 等宽字体。左：当前显示 N / 总 M 个 session 与这 N 个 session 的费用合计（搜索时只合计命中的）；中：最近一次操作状态（过滤耗时等）+ 索引状态（`loading index…` / `indexing 598 / 941 files` / `index up to date · 941 files checked in 0.07s` / 错误信息）；右：已索引消息数、DB 大小、首批行上屏耗时。搜索时中间显示「N sessions · M matches」，右侧最前面是搜索耗时。待补充：生效过滤 chip。
+22px 等宽字体。左：当前显示 N / 总 M 个 session 与这 N 个 session 的费用合计（搜索时只合计命中的），再加今天的费用：`42 / 5488 sessions · $123.45 · Today $203.69`。Today 是今天 4:00 以来全部 API 调用按当前价格表算的费用，来自用量账本（记录文件删了也还在），不受过滤和搜索影响；每次扫描后更新，过了 4:00 归零；有价格表里没有的模型时加 `(N unpriced)`，账本读不了时是 `Today —`；点击没有反应（Usage 视图在后续一期）。中：最近一次操作状态（过滤耗时等）+ 索引状态（`loading index…` / `indexing 598 / 941 files` / `index up to date · 941 files checked in 0.07s` / 错误信息）；右：已索引消息数、DB 大小、首批行上屏耗时。搜索时中间显示「N sessions · M matches」，右侧最前面是搜索耗时。待补充：生效过滤 chip。
 
 ### 4.9 设置 ⬜
 

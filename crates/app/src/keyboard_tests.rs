@@ -133,7 +133,7 @@ fn a_scan_refreshes_catalog_context_in_the_table_and_selected_metadata(cx: &mut 
     let dir = h._dir.path().join("claude/cache/model-catalog");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("test-cc.json"), r#"{"catalog":{"config":{"models":[{"id":"claude-opus-5","runtime":{"max_input_tokens":100000}}]}}}"#).unwrap();
-    h.app.update(cx, |app, _| app.store.request(crate::store::StoreRequest::Scan));
+    h.app.update(cx, |app, _| app.store.request(crate::store::StoreRequest::Scan { quiet: false }));
     wait_until(cx, &h, "catalog context refresh", |app, _| app.catalog.window("claude-opus-5") == Some(100_000));
     h.app.read_with(cx, |app, cx| {
         let row = app.table.read(cx).delegate().rows.iter().find(|r| r.id == id).unwrap();
@@ -442,13 +442,38 @@ fn changing_favorites_directory_moves_files_and_restores_focus(cx: &mut TestAppC
     assert_eq!(focus(cx, &h), (false, true));
 }
 
-fn copy_fixture(from: &std::path::Path, to: &std::path::Path) {
+pub(crate) fn copy_fixture(from: &std::path::Path, to: &std::path::Path) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap() {
         let entry = entry.unwrap(); let target = to.join(entry.file_name());
         if entry.file_type().unwrap().is_dir() { copy_fixture(&entry.path(), &target); }
         else { std::fs::copy(entry.path(), target).unwrap(); }
     }
+}
+
+/// Tokens of the response `append_response` writes.
+pub(crate) const APPENDED: agent_session_core::model::Tokens =
+    agent_session_core::model::Tokens { input: 10, cache_write_5m: 0, cache_write_1h: 3_000, cache_read: 50_000, output: 1_200, web_search: 0 };
+
+/// Append one assistant response of `model` at `ts_ms` (ms since epoch) to the transcript of
+/// `session_id` under `claude/projects/-Users-me-Code-alpha`, as Claude Code would.
+pub(crate) fn append_response(claude: &std::path::Path, session_id: &str, msg_id: &str, model: &str, ts_ms: i64) {
+    use std::io::Write as _;
+    let ts = chrono::DateTime::from_timestamp_millis(ts_ms).unwrap().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let t = APPENDED;
+    let line = serde_json::json!({
+        "parentUuid": null, "isSidechain": false, "userType": "external", "entrypoint": "cli", "cwd": "/Users/me/Code/alpha",
+        "sessionId": session_id, "version": "2.1.260", "gitBranch": "main", "uuid": format!("appended-{msg_id}"), "timestamp": ts,
+        "requestId": format!("req_{msg_id}"), "type": "assistant",
+        "message": {"model": model, "id": msg_id, "type": "message", "role": "assistant", "content": [{"type": "text", "text": "Appended."}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": t.input, "cache_creation_input_tokens": t.cache_write_1h, "cache_read_input_tokens": t.cache_read, "output_tokens": t.output,
+                "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0}, "service_tier": "standard",
+                "cache_creation": {"ephemeral_1h_input_tokens": t.cache_write_1h, "ephemeral_5m_input_tokens": 0}, "speed": "standard"}},
+    });
+    let path = claude.join("projects/-Users-me-Code-alpha").join(format!("{session_id}.jsonl"));
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    writeln!(file, "{line}").unwrap();
 }
 
 #[gpui_kit::test]
@@ -614,4 +639,214 @@ fn hiding_the_sorted_column_from_the_header_menu_keeps_the_selection_and_is_reme
     in_window(cx, &h, |window, cx| window.dispatch_action(Box::new(ShowAllColumns), cx));
     cx.run_until_parked();
     assert!(state().hidden_columns.is_empty());
+}
+
+// ---- today's usage and automatic scans ----------------------------------------------------
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
+fn usage_loaded(app: &AppRoot, _: &App) -> bool {
+    !app.today_label.is_empty()
+}
+
+/// What `append_response`'s call costs on `model`, as the status bar writes it.
+fn today_of_one_appended(model: &str) -> String {
+    use agent_session_core::pricing::{price, price_tokens};
+    let cost = price_tokens(&price(model).expect("a model with a price"), &APPENDED, false, false).total();
+    format!("Today {}", agent_session_core::format::fmt_usd(cost))
+}
+
+fn updated_at(app: &AppRoot, cx: &App, id: &str) -> i64 {
+    app.table.read(cx).delegate().rows.iter().find(|r| r.id == id).expect("the session is listed").updated_at
+}
+
+#[gpui_kit::test]
+fn the_status_bar_shows_todays_cost_and_follows_a_scan(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    wait_until(cx, &h, "today's usage", usage_loaded);
+    h.app.read_with(cx, |app, cx| {
+        assert_eq!(app.today_label, "Today $0.00", "the fixture's calls were all made on other days");
+        assert!(app.status_left(cx).ends_with(" · Today $0.00"), "{}", app.status_left(cx));
+    });
+
+    append_response(&h._dir.path().join("claude"), S1, "msg_today", "claude-opus-5", now_ms());
+    h.app.update(cx, |app, cx| app.rescan(false, cx));
+    let expected = today_of_one_appended("claude-opus-5");
+    wait_until(cx, &h, "today's cost after the scan", |app, _| app.today_label != "Today $0.00");
+    h.app.read_with(cx, |app, cx| {
+        assert_eq!(app.today_label, expected.as_str(), "the price of the one call made today");
+        assert!(app.status_left(cx).ends_with(&format!(" · {expected}")), "{}", app.status_left(cx));
+    });
+
+    // the filter does not change what today cost
+    h.app.update(cx, |app, cx| app.set_project(Some("no-such-project".into()), cx));
+    assert_eq!(h.app.read_with(cx, |app, _| app.today_label.clone()), expected.as_str());
+
+    // a model without a price costs nothing and is counted
+    append_response(&h._dir.path().join("claude"), S1, "msg_unpriced", "claude-unknown-9", now_ms());
+    h.app.update(cx, |app, cx| app.rescan(false, cx));
+    wait_until(cx, &h, "the unpriced call", |app, _| app.today_label.ends_with("(1 unpriced)"));
+    assert_eq!(h.app.read_with(cx, |app, _| app.today_label.clone()), format!("{expected} (1 unpriced)").as_str());
+}
+
+#[gpui_kit::test]
+fn ten_minutes_later_an_appended_transcript_shows_up_without_any_input(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    wait_until(cx, &h, "today's usage", usage_loaded);
+    let before = h.app.read_with(cx, |app, cx| updated_at(app, cx, S1));
+    let at = now_ms();
+    append_response(&h._dir.path().join("claude"), S1, "msg_idle", "claude-opus-5", at);
+    cx.executor().advance_clock(crate::AUTO_SCAN_MIN_GAP);
+    cx.run_until_parked();
+    std::thread::sleep(Duration::from_millis(300));
+    cx.run_until_parked();
+    assert_eq!(h.app.read_with(cx, |app, cx| updated_at(app, cx, S1)), before, "nothing scans before the timer is due");
+
+    cx.executor().advance_clock(crate::AUTO_SCAN_IDLE);
+    wait_until(cx, &h, "S1 updated by the automatic scan", |app, cx| updated_at(app, cx, S1) != before);
+    h.app.read_with(cx, |app, cx| {
+        assert_eq!(updated_at(app, cx, S1) / 1000, at / 1000);
+        assert_eq!(app.table.read(cx).delegate().row(0).id, S1, "the newest session sorts first");
+        assert_eq!(app.today_label, today_of_one_appended("claude-opus-5"));
+    });
+}
+
+#[gpui_kit::test]
+fn scans_triggered_within_thirty_seconds_run_once(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    let done = |cx: &mut TestAppContext| h.app.read_with(cx, |app, _| app.scans_done);
+    let base = done(cx);
+    assert!(!h.app.update(cx, |app, cx| app.auto_scan("test", cx)), "the start-up scan just ended");
+
+    cx.executor().advance_clock(crate::AUTO_SCAN_MIN_GAP);
+    let sent = h.app.update(cx, |app, cx| [app.auto_scan("test", cx), app.auto_scan("test", cx)]);
+    assert_eq!(sent, [true, false], "the second waits for the first to end");
+    wait_until(cx, &h, "the automatic scan", |app, _| !app.scan_in_flight);
+    std::thread::sleep(Duration::from_millis(100));
+    cx.run_until_parked();
+    assert_eq!(done(cx), base + 1, "one request, one scan");
+
+    cx.executor().advance_clock(crate::AUTO_SCAN_MIN_GAP - Duration::from_secs(1));
+    assert!(!h.app.update(cx, |app, cx| app.auto_scan("test", cx)), "29 s after the last one ended");
+    cx.executor().advance_clock(Duration::from_secs(1));
+    assert!(h.app.update(cx, |app, cx| app.auto_scan("test", cx)), "30 s after");
+    wait_until(cx, &h, "the next automatic scan", |app, _| app.scans_done == base + 2);
+}
+
+#[gpui_kit::test]
+fn an_automatic_scan_that_finds_nothing_leaves_the_status_bar_alone(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    h.app.update(cx, |app, _| app.index_status = IndexStatus::Idle("indexed 4 of 4 files in 0.10s".into()));
+    cx.executor().advance_clock(crate::AUTO_SCAN_MIN_GAP);
+    let base = h.app.update(cx, |app, cx| {
+        assert!(app.auto_scan("test", cx));
+        assert!(matches!(app.index_status, IndexStatus::Idle(_)), "no 'loading index…' for an automatic scan");
+        app.scans_done
+    });
+    wait_until(cx, &h, "the automatic scan", |app, _| app.scans_done == base + 1);
+    h.app.read_with(cx, |app, _| {
+        assert!(matches!(&app.index_status, IndexStatus::Idle(s) if s == "indexed 4 of 4 files in 0.10s"), "the summary of the last scan stays");
+    });
+    // one the user asks for reports even when nothing changed
+    h.app.update(cx, |app, cx| app.rescan(false, cx));
+    wait_until(cx, &h, "the manual scan", |app, _| app.scans_done == base + 2);
+    h.app.read_with(cx, |app, _| assert!(matches!(&app.index_status, IndexStatus::Idle(s) if s.starts_with("index up to date"))));
+}
+
+#[gpui_kit::test]
+fn crossing_four_moves_today_and_the_range_filter(cx: &mut TestAppContext) {
+    use agent_session_core::usage::day_start_ms;
+    use chrono::{Local, NaiveDate};
+
+    use crate::model::RangePreset;
+
+    let h = launch(cx);
+    wait_until(cx, &h, "today's usage", usage_loaded);
+    append_response(&h._dir.path().join("claude"), S1, "msg_today", "claude-opus-5", now_ms());
+    h.app.update(cx, |app, cx| {
+        app.set_range(RangePreset::Today, cx);
+        app.rescan(false, cx);
+    });
+    let paid = today_of_one_appended("claude-opus-5");
+    wait_until(cx, &h, "today's cost", |app, _| app.today_label == paid.as_str());
+    let today = h.app.read_with(cx, |app, _| app.usage_day);
+    let tomorrow = today.succ_opt().unwrap();
+    let at = |day: NaiveDate, h: u32, m: u32| day.and_hms_opt(h, m, 0).unwrap().and_local_timezone(Local).earliest().unwrap().timestamp_millis();
+    let since = |app: &AppRoot, cx: &App| app.current_filter(cx).since_ms;
+
+    h.app.update(cx, |app, cx| app.roll_day(at(tomorrow, 3, 59), cx));
+    h.app.read_with(cx, |app, cx| {
+        assert_eq!((app.usage_day, since(app, cx)), (today, Some(day_start_ms(today, &Local))), "3:59 is still today");
+        assert_eq!(app.today_label, paid.as_str());
+    });
+
+    h.app.update(cx, |app, cx| app.roll_day(at(tomorrow, 4, 0), cx));
+    h.app.read_with(cx, |app, cx| {
+        assert_eq!(app.usage_day, tomorrow);
+        assert_eq!(since(app, cx), Some(day_start_ms(tomorrow, &Local)), "Today starts at 4:00 of the new day");
+        assert_eq!(app.today_label, "Today $0.00", "and counts from zero again");
+        assert_eq!(app.range, RangePreset::Today);
+    });
+}
+
+#[gpui_kit::test]
+fn coming_back_to_the_window_scans_at_once(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    wait_until(cx, &h, "today's usage", usage_loaded);
+    let before = h.app.read_with(cx, |app, cx| updated_at(app, cx, S1));
+    append_response(&h._dir.path().join("claude"), S1, "msg_back", "claude-opus-5", now_ms());
+    cx.executor().advance_clock(crate::AUTO_SCAN_MIN_GAP);
+    in_window(cx, &h, |window, _| window.activate_window());
+    wait_until(cx, &h, "S1 updated by the scan on activation", |app, cx| updated_at(app, cx, S1) != before);
+
+    // the window loses the focus to another one: nothing scans; it comes back: a scan
+    cx.executor().advance_clock(crate::AUTO_SCAN_MIN_GAP);
+    let base = h.app.read_with(cx, |app, _| app.scans_done);
+    let other = cx.add_window(|_, _| gpui_kit::EmptyView);
+    other.update(cx, |_, window, _| window.activate_window()).unwrap();
+    cx.run_until_parked();
+    std::thread::sleep(Duration::from_millis(100));
+    cx.run_until_parked();
+    assert_eq!(h.app.read_with(cx, |app, _| (app.scans_done, app.scan_in_flight)), (base, false), "losing the focus scans nothing");
+    in_window(cx, &h, |window, _| window.activate_window());
+    wait_until(cx, &h, "the scan on coming back", |app, _| app.scans_done == base + 1);
+}
+
+#[gpui_kit::test]
+fn an_automatic_scan_does_not_scroll_the_table_back_to_the_selected_row(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    // a few rows tall: the table scrolls
+    cx.simulate_window_resize(h.window, gpui_kit::size(gpui_kit::px(1000.), gpui_kit::px(260.)));
+    let (last, mover) = h.app.update(cx, |app, cx| {
+        app.select_row(0, cx);
+        let delegate = app.table.read(cx).delegate();
+        let last = delegate.ix.len() - 1;
+        // the transcript listed lowest: once written to, it moves to the top and row 0 moves down
+        let mover = [S1, "22222222-aaaa-4bbb-8ccc-000000000002", "55555555-aaaa-4bbb-8ccc-000000000005"]
+            .into_iter()
+            .max_by_key(|id| delegate.position_of(id))
+            .unwrap();
+        (last, mover)
+    });
+    let selected = h.app.read_with(cx, |app, _| app.selected.as_ref().unwrap().id.clone());
+    assert_ne!(selected, mover);
+    h.app.update(cx, |app, cx| app.table.update(cx, |table, cx| table.scroll_to_row(last, cx)));
+    cx.run_until_parked();
+    let offset = |cx: &mut TestAppContext| h.app.read_with(cx, |app, cx| app.table.read(cx).vertical_scroll_handle.0.borrow().base_handle.offset());
+    let scrolled = offset(cx);
+    assert!(scrolled.y < gpui_kit::px(0.), "the table scrolled down, away from the selected first row: {scrolled:?}");
+
+    append_response(&h._dir.path().join("claude"), mover, "msg_mover", "claude-opus-5", now_ms());
+    cx.executor().advance_clock(crate::AUTO_SCAN_MIN_GAP);
+    h.app.update(cx, |app, cx| assert!(app.auto_scan("test", cx)));
+    wait_until(cx, &h, "the written session on top", |app, cx| app.table.read(cx).delegate().row(0).id == mover);
+    cx.run_until_parked();
+    h.app.read_with(cx, |app, cx| {
+        let table = app.table.read(cx);
+        assert_eq!(app.selected.as_ref().unwrap().id, selected, "the same session stays selected");
+        assert_eq!(table.selected_row(), table.delegate().position_of(&selected), "on its new row");
+    });
+    assert_eq!(offset(cx), scrolled, "the table stays where the user scrolled to");
 }

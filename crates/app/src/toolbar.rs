@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use chrono::{Datelike, Days, Local, Months, NaiveDate};
+use chrono::{Datelike, Days, Months, NaiveDate};
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::date_picker::{DatePicker, DateRangePreset};
 use gpui_kit::component::input::Input;
@@ -128,7 +128,7 @@ impl AppRoot {
     pub fn set_range(&mut self, range: RangePreset, cx: &mut Context<Self>) {
         self.range = range;
         let mut filter = self.current_filter(cx);
-        (filter.since_ms, filter.until_ms) = range.bounds(self.custom_range);
+        (filter.since_ms, filter.until_ms) = range.bounds_on(self.usage_day, self.custom_range);
         self.apply_filter(filter, cx);
         // the range is saved even when the filter came out the same (Custom over the same days)
         self.persist(cx);
@@ -525,7 +525,7 @@ impl AppRoot {
             .when(self.range == RangePreset::Custom, |el| {
                 el.child(
                     div().w(px(DATE_PICKER_W)).child(
-                        DatePicker::new(&self.date_picker).small().number_of_months(2).presets(date_presets(Local::now().date_naive())),
+                        DatePicker::new(&self.date_picker).small().number_of_months(2).presets(date_presets(self.usage_day)),
                     ),
                 )
             })
@@ -563,7 +563,7 @@ impl AppRoot {
     }
 }
 
-/// Shortcuts beside the calendar of the Custom range.
+/// Shortcuts beside the calendar of the Custom range; `today` is a usage day (from 4:00).
 fn date_presets(today: NaiveDate) -> Vec<DateRangePreset> {
     let month = today.with_day(1).unwrap_or(today);
     let last_month = month.checked_sub_months(Months::new(1)).unwrap_or(month);

@@ -1,6 +1,6 @@
 ---
 created: 2026-09-28
-updated: 2026-11-15
+updated: 2026-11-16
 tags:
   - gpui
   - gpui-kit
@@ -91,7 +91,9 @@ Root
 
 ### 选中行
 
-`TableState::set_selected_row` 会顺带滚动到该行，没有只选中不滚动的入口。所以不能在行还在变动时反复设置选中，否则表格跟着跳。选中按 session id 保持以及由此而来的两个例外，规则在 [运行时架构](app-architecture.md) 的"选中"一节。
+`TableState::set_selected_row` 会顺带滚动到该行，没有只选中不滚动的入口。所以不能在行还在变动时反复设置选中，否则表格跟着跳。
+
+要只改选中、不滚动（扫描刷新后选中的 session 换了行号），可以利用它的滚动是延迟执行的：`set_selected_row` 只往公开的 `vertical_scroll_handle`（`UniformListScrollHandle`）里放一个 `deferred_scroll_to_item`，下一帧 prepaint 时才滚。调用前把原来的请求 `take()` 出来，调用后放回去，新请求就被丢掉了（`main.rs` 的 `select_row_scrolling`）。要放回原来的请求而不是直接置空：同一帧里可能还有别处刚要求过滚动（如 `scroll_to_row`）。目标行本来就在视口里时 uniform list 不会滚，所以只有行被挤出视口时才看得出差别。选中按 session id 保持以及由此而来的两个例外，规则在 [运行时架构](app-architecture.md) 的"选中"一节。
 
 列选中默认是开的：点表头会选中整列，整列的高亮会盖掉行选中。本项目的表头点击只用于排序，所以建表时关掉了（`col_selectable(false)`）。
 
@@ -218,6 +220,8 @@ edition 2024 下，`fn f(cx: &App) -> impl IntoElement` 的返回值会捕获 `c
 | 后台线程 | 先调 `cx.executor().allow_parking()`。测试调度器默认把别的线程发来的唤醒当成"测试不确定"而报错，而 store 和搜索线程是真线程 |
 | 等后台结果 | 真实时间轮询：`run_until_parked()` 后检查条件，不满足就睡 10ms 再看。`wait_for` 走的是测试时钟，等不到真线程 |
 | 定时器 | 防抖这类定时器走测试时钟，用 `cx.executor().advance_clock(..)` 推进 |
+| 计时 | 要和定时器一起被 `advance_clock` 推进的时刻（自动扫描的 30 秒节流），记 `cx.background_executor().now()`，不用 `Instant::now()` |
+| 窗口激活 | 测试窗口创建时不是激活的。`window.activate_window()` 让它激活，`observe_window_activation` 的回调照常触发；要模拟「切走再回来」，再开一个窗口（`cx.add_window(\|_, _\| gpui_kit::EmptyView)`）激活它，再激活回来 |
 | 剪贴板 | 测试平台有自己的剪贴板：应用里 `cx.write_to_clipboard(..)` 写进去，测试里 `cx.read_from_clipboard()` 读出来，不碰系统剪贴板 |
 | 保存 / 打开对话框 | `cx.simulate_new_path_selection(..)` / `simulate_path_prompt_response(..)` 回答；测试平台的 `reveal_path` 是 `unimplemented!()`，测试里不要走到它 |
 | 测滚动位置 | 测试窗口照常布局和绘制，`list` 会把滚过头的位置拉回来：fixture 的对话很短，整个放得下时 `scroll_to` 到第二张卡，下一帧就回到顶端。先 `cx.simulate_window_resize(window, size(..))` 把窗口压矮（`brackets_*` 用 300px 高） |
@@ -234,7 +238,7 @@ use core::prelude::v1::test;
 
 ## 脚本化交互与截图
 
-现有五个截图脚本（`scripts/screenshot*.sh`），每一张截的是什么写在各脚本的文件头和步骤注释里：
+现有六个截图脚本（`scripts/screenshot*.sh`），每一张截的是什么写在各脚本的文件头和步骤注释里：
 
 | 命令 | 驱动方式 | 截图 | 可调变量 |
 |---|---|---|---|
@@ -242,15 +246,18 @@ use core::prelude::v1::test;
 | `make screenshot-search` | `ASM_SEARCH_AUTOPLAY=1` | 7 张：文本搜索、下一个命中、两字 CJK、正则、Tools 范围、按 Matches 排序、清空 | `ASM_AUTOPLAY_QUERY` / `ASM_AUTOPLAY_CJK` / `ASM_AUTOPLAY_REGEX` 换查询 |
 | `make screenshot-detail` | `ASM_DETAIL_AUTOPLAY=1` | 最多 12 张：选中、展开步骤、展开一步、全部展开、搜索命中、下一个命中、特殊回合、70MB 文件、History 行（第一个 prompt 不少于 3 条的）、代码块（展开离开头最近的带代码块的回复）、从顶部按两次 `]`、Metadata | `ASM_AUTOPLAY_SESSION` / `ASM_AUTOPLAY_REGEX` / `ASM_AUTOPLAY_SPECIAL` 指定 session 和查询；`ASM_AUTOPLAY_STEP` 取 `cut-output`、`thinking` 或 `mcp`，决定展开哪种步骤 |
 | `make screenshot-cost` | `ASM_COST_AUTOPLAY=1` | 最多 9 张：Opus 5.5 按 Ctx 降序比 Fable 5.2、换 Sonnet 5.5、有其他模型的 session 比 Haiku 5.5、按 In 排序、按 Hit% 升序、指定 session 的 Conversation 顶部与第一处缓存失效、它的 Metadata、隐藏 Started / Size / Kind | `ASM_AUTOPLAY_CACHE_SESSION` 指定看缓存失效的 session，没给就跳过那 3 张 |
+| `make screenshot-usage` | `ASM_USAGE_AUTOPLAY=<gate 目录>` | 3–4 张：启动后用量读完（`1-ready`）、Scan for Changes 之后、Rebuild Index 之后，可选再开着 `USAGE_HOLD` 秒后一张；每张的状态栏都有 `Today $X` | 必须设 `ASM_DB`、`ASM_CLAUDE_DIR`（指向副本，否则拒绝运行）；`USAGE_BEFORE_SCAN` 是扫描前执行的 shell 命令，`USAGE_HOLD` 是最后开着的秒数 |
 | `make screenshot-clicks` | cliclick 真点击，启动三次 | 22 张：1–11 是下拉菜单、过滤、Preview 模式、选中行和 Metadata tab，12–15 是自定义区间与日期选择器，16–20 是回合卡（第二次启动，预选 `5f6eea99`），21–22 是普通行和 History 行的右键菜单（第三次启动） | 坐标写在脚本里；换机器要换一个不再变化的 session 并重量坐标 |
 
-五个脚本都先 `wake-screen`，再用 `caffeinate` 让显示器在 app 运行期间不睡（中途睡着会截不到图）。它们跑在真实索引上，用一次性的 `state.json` 保证从默认视图开始，按窗口 ID 截图，输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）。autoplay 的步骤做不了时会跳过不截。`screenshot-cost.sh` 用 `winid --pid` 只找自己启动的窗口，用户开着的同名 app 不受影响。
+脚本都先 `wake-screen`，再用 `caffeinate` 让显示器在 app 运行期间不睡（中途睡着会截不到图）。除 `screenshot-usage` 外都跑在真实索引上，用一次性的 `state.json` 保证从默认视图开始，按窗口 ID 截图，输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）。autoplay 的步骤做不了时会跳过不截。`screenshot-cost.sh` 用 `winid --pid` 只找自己启动的窗口，用户开着的同名 app 不受影响。
 
 需要自动驱动界面时，优先加环境变量控制的内置脚本（`ASM_SPIKE_AUTOPLAY=1`：启动后滚动并选中，再切过滤、排序和 tab）。它走的是和用户操作相同的代码路径，不依赖屏幕坐标。
 
 下拉菜单这类弹出层目前没有找到程序化打开的办法，只能用 cliclick 真点击。点击坐标是相对窗口的固定值，任何让控件移位的布局改动都要重新校对；工具栏按钮的位置取决于左边按钮的标签长度（选了项目、出现日期选择器都会把右边的按钮推开）。脚本启动的窗口不在前台，第一次点击只会激活窗口；GPUI 按上一帧的悬停状态判定点中了什么，指针瞬移过去立刻点击可能落空。所以 `screenshot-clicks.sh` 先点一下标题栏，每次点击前先把指针移过去停 200ms。详情面板的标题限制为单行也是这个原因：两行标题会把下面的 tab 和对话顶栏推下去 25px。表格行的右键菜单用 `cliclick rc:` 打开；History 行在表里的位置每天都变，脚本先用 Kind 下拉把列表收窄到 History，让它成为第一行再右键。导出的系统保存对话框不要用脚本点：app 从 agent 会话里启动时，对话框访问 iCloud Drive 会弹出记在 Claude Code 二进制名下的系统授权（2026-10-27 遇到），允许或拒绝都是用户的决定。
 
 **不要用固定的 `sleep` 等界面就绪。** 新编译的二进制首次启动要几秒才出窗口，等不够就截到空窗口或上一帧的画面；`set -euo pipefail` 下这类失败经常没有任何输出，看起来就像脚本正常跑完了。做法是让 app 在每一步稳定后打一行标记（`autoplay-search: <step>`），脚本轮询窗口 id 和日志里的标记，超时就报错并指向 app 日志。`screenshot-search.sh` 是这个写法的参考；`screenshot-detail.sh`（`ASM_DETAIL_AUTOPLAY`，详情面板的 12 步）同样写法，没有可做的步骤打 `autoplay-detail: <step> skipped`，脚本跳过不截。
+
+**`screenshot-usage` 的步骤由文件驱动。** 用量验收要在两步之间改数据（删掉一半记录文件），所以 autoplay 不按固定间隔走：用量读完打 `autoplay-usage: ready · Today $X`，然后等 gate 目录里出现 `scan` 文件才做 Scan for Changes，扫描结束、表格重读后打 `autoplay-usage: scanned · …`；再等 `rebuild` 文件做 Rebuild Index，打 `autoplay-usage: rebuilt · …`。脚本在两步之间执行 `USAGE_BEFORE_SCAN`，然后 `touch` 对应的文件。之后 app 照常开着，自动扫描的日志行是 `auto-scan:`、`scan (automatic):`、`today:`。它会重建索引，所以脚本要求 `ASM_DB`、`ASM_CLAUDE_DIR` 都指向副本，`ASM_STATE` 默认在输出目录里新建；从 core 的 fixture 复制一份就能跑通全程（2026-11-16 自查过）。挪走记录文件用 `mv` 到别的目录，不必删除。
 
 **脚本里"挑一个最有代表性的"要从当前可见的行里算，不要从全量数据里算。** 真实数据的分布很不均匀，按 session 数挑"最忙的项目"会稳定挑中某个工具批量产生的 history session，截出来的图说明不了任何功能。autoplay 选项目就是从过滤后的索引向量里取的。
 

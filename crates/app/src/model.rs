@@ -11,6 +11,7 @@ use agent_session_core::cost::primary_model;
 use agent_session_core::model::{ModelUsage, SessionSummary};
 use agent_session_core::pricing::{context_window, display_name};
 use agent_session_core::session::SessionKind;
+use agent_session_core::usage::{day_start_ms, usage_day};
 use chrono::{Datelike, Days, Local, Months, NaiveDate};
 use gpui_kit::*;
 use serde::{Deserialize, Serialize};
@@ -543,13 +544,11 @@ impl RangePreset {
         (today.with_day(1).unwrap_or(today), today)
     }
 
-    /// `[since, until)` for `updated_at` (ms since epoch, local days), `None` for an open end.
-    pub fn bounds(self, custom: Option<(NaiveDate, NaiveDate)>) -> (Option<i64>, Option<i64>) {
-        self.bounds_on(Local::now().date_naive(), custom)
-    }
-
+    /// `[since, until)` for `updated_at` (ms since epoch), `None` for an open end. `today` is a
+    /// usage day (`today_at`): every day here starts at 4:00 local.
     pub fn bounds_on(self, today: NaiveDate, custom: Option<(NaiveDate, NaiveDate)>) -> (Option<i64>, Option<i64>) {
-        let days_back = |days: u64| (local_midnight(today.checked_sub_days(Days::new(days)).unwrap_or(today)), None);
+        let start = |day: NaiveDate| Some(day_start_ms(day, &Local));
+        let days_back = |days: u64| (start(today.checked_sub_days(Days::new(days)).unwrap_or(today)), None);
         let month = today.with_day(1).unwrap_or(today);
         match self {
             RangePreset::Today => days_back(0),
@@ -557,19 +556,21 @@ impl RangePreset {
             RangePreset::Days7 => days_back(6),
             RangePreset::Days30 => days_back(29),
             RangePreset::Any => (None, None),
-            RangePreset::ThisMonth => (local_midnight(month), None),
-            RangePreset::LastMonth => (month.checked_sub_months(Months::new(1)).and_then(local_midnight), local_midnight(month)),
+            RangePreset::ThisMonth => (start(month), None),
+            RangePreset::LastMonth => (month.checked_sub_months(Months::new(1)).and_then(start), start(month)),
             RangePreset::Custom => {
-                let (start, end) = custom.unwrap_or_else(|| Self::default_custom(today));
-                (local_midnight(start), end.succ_opt().and_then(local_midnight))
+                let (first, last) = custom.unwrap_or_else(|| Self::default_custom(today));
+                (start(first), last.succ_opt().and_then(start))
             }
         }
     }
 }
 
-/// Start of `date` in local time (the earlier one when a DST change repeats midnight).
-fn local_midnight(date: NaiveDate) -> Option<i64> {
-    Some(date.and_hms_opt(0, 0, 0)?.and_local_timezone(Local).earliest()?.timestamp_millis())
+/// The usage day `now_ms` (ms since epoch) falls in: days start at 4:00 local, so at 3:00 it is
+/// still the calendar day before. The one rule for Today in the range presets, the date picker
+/// and the status bar.
+pub fn today_at(now_ms: i64) -> NaiveDate {
+    usage_day(now_ms, &Local)
 }
 
 /// Filter applied to the table rows before sorting.
@@ -1011,26 +1012,31 @@ pub mod tests {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
     }
 
-    fn midnight(date: NaiveDate) -> Option<i64> {
-        Some(date.and_hms_opt(0, 0, 0).unwrap().and_local_timezone(Local).earliest().unwrap().timestamp_millis())
+    /// 4:00 local on `date`, when its usage day starts.
+    fn four(date: NaiveDate) -> Option<i64> {
+        Some(date.and_hms_opt(4, 0, 0).unwrap().and_local_timezone(Local).earliest().unwrap().timestamp_millis())
+    }
+
+    fn local_ms(date: NaiveDate, h: u32, m: u32) -> i64 {
+        date.and_hms_opt(h, m, 0).unwrap().and_local_timezone(Local).earliest().unwrap().timestamp_millis()
     }
 
     #[test]
     fn day_presets_have_only_a_lower_bound() {
         let today = day(2026, 10, 23);
-        assert_eq!(RangePreset::Today.bounds_on(today, None), (midnight(today), None));
-        assert_eq!(RangePreset::Days7.bounds_on(today, None), (midnight(day(2026, 10, 17)), None), "today and the 6 days before");
+        assert_eq!(RangePreset::Today.bounds_on(today, None), (four(today), None));
+        assert_eq!(RangePreset::Days7.bounds_on(today, None), (four(day(2026, 10, 17)), None), "today and the 6 days before");
         assert_eq!(RangePreset::Any.bounds_on(today, None), (None, None));
     }
 
     #[test]
     fn month_presets_cover_whole_calendar_months() {
         let today = day(2026, 10, 23);
-        assert_eq!(RangePreset::ThisMonth.bounds_on(today, None), (midnight(day(2026, 10, 1)), None));
-        assert_eq!(RangePreset::LastMonth.bounds_on(today, None), (midnight(day(2026, 9, 1)), midnight(day(2026, 10, 1))));
+        assert_eq!(RangePreset::ThisMonth.bounds_on(today, None), (four(day(2026, 10, 1)), None));
+        assert_eq!(RangePreset::LastMonth.bounds_on(today, None), (four(day(2026, 9, 1)), four(day(2026, 10, 1))));
         assert_eq!(
             RangePreset::LastMonth.bounds_on(day(2026, 1, 5), None),
-            (midnight(day(2025, 12, 1)), midnight(day(2026, 1, 1))),
+            (four(day(2025, 12, 1)), four(day(2026, 1, 1))),
             "January looks back into last year"
         );
     }
@@ -1039,10 +1045,23 @@ pub mod tests {
     fn a_custom_range_includes_its_last_day_and_defaults_to_this_month_so_far() {
         let today = day(2026, 10, 23);
         let range = (day(2026, 9, 10), day(2026, 9, 20));
-        assert_eq!(RangePreset::Custom.bounds_on(today, Some(range)), (midnight(day(2026, 9, 10)), midnight(day(2026, 9, 21))));
+        assert_eq!(RangePreset::Custom.bounds_on(today, Some(range)), (four(day(2026, 9, 10)), four(day(2026, 9, 21))), "11-01 to 11-03 is 11-01 4:00 to 11-04 4:00");
         assert_eq!(RangePreset::default_custom(today), (day(2026, 10, 1), today));
-        assert_eq!(RangePreset::Custom.bounds_on(today, None), (midnight(day(2026, 10, 1)), midnight(day(2026, 10, 24))));
-        assert_eq!(RangePreset::Days3.bounds_on(today, Some(range)), (midnight(day(2026, 10, 21)), None), "only Custom reads the range");
+        assert_eq!(RangePreset::Custom.bounds_on(today, None), (four(day(2026, 10, 1)), four(day(2026, 10, 24))));
+        assert_eq!(RangePreset::Days3.bounds_on(today, Some(range)), (four(day(2026, 10, 21)), None), "only Custom reads the range");
+    }
+
+    #[test]
+    fn before_four_today_is_the_calendar_day_before() {
+        let (oct_23, oct_22) = (day(2026, 10, 23), day(2026, 10, 22));
+        assert_eq!(today_at(local_ms(oct_23, 3, 59)), oct_22, "3:59 still belongs to the day before");
+        assert_eq!(today_at(local_ms(oct_23, 4, 0)), oct_23);
+        assert_eq!(RangePreset::Today.bounds_on(today_at(local_ms(oct_23, 2, 0)), None), (four(oct_22), None), "at 2:00, Today began at 4:00 yesterday");
+        // on the first of a month before 4:00, This month is still the month before
+        let nov_1 = day(2026, 11, 1);
+        assert_eq!(RangePreset::ThisMonth.bounds_on(today_at(local_ms(nov_1, 3, 0)), None), (four(day(2026, 10, 1)), None));
+        assert_eq!(RangePreset::default_custom(today_at(local_ms(nov_1, 3, 0))), (day(2026, 10, 1), day(2026, 10, 31)));
+        assert_eq!(RangePreset::ThisMonth.bounds_on(today_at(local_ms(nov_1, 4, 0)), None), (four(nov_1), None));
     }
 
     #[test]
