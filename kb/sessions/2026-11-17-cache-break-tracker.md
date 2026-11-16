@@ -9,6 +9,31 @@ tags:
 
 # 按祖先调用与请求事实判定缓存重建
 
+## 协调者摘要（cbreak-tracker-r1）
+
+- 结果：审阅 R1 已修复。新增缓存辅助字段类型错误时只把该字段视为未知，不再丢掉合法 JSON 记录的正文、工具调用或导出；合法字段继续参与判定。
+- 提交：见本提交；只改 `transcript.rs`、两个行为测试文件及本总结，不改索引解析、判定算法、渲染或其他任务的文档。
+- 测试：先确认 2 个 Conversation 行为测试和 1 个导出行为测试失败，再实现；3 个新增测试通过。`make test` **673 passed / 11 ignored**（core 413 / 9、app 260 / 2），退出 0。
+- 失败证据：`r1/red-tests.log`（2 failed，合法记录被计为 skipped）、`r1/red-export.log`（1 failed，两个 assistant 记录丢失）；通过证据 `r1/field-tests.log`、`r1/make-test.log`。
+- 真实数据：重跑通过，3398 个冻结前缀均通过 SHA256 校验，842 条重建事件与参考 `cache-break-ref/after.tsv` 逐字节一致（0 diff）；证据 `r1/real-audit-retry.log`、`r1/verification.json`。第一次因原始文件被删除中止，不是解析／判定断言失败。
+- 自己的决定：共用 `cache_field` 先借用完整 RawValue，再单独尝试目标类型转换；覆盖 parentUuid、requestRef、effort、请求 id／querySource／shapeHash／keep／tail／params，以及 params.betas。类型不符、越界、null 均等同缺失；不使用 tagged／untagged／flatten，也不把请求正文物化成 Value。
+- 输入恢复：cc-renewer 的 `0a03c1ed-013c-4798-a51d-b83617e6f1b0.jsonl` 已被删；从既有 usage 快照取到同一 141549 字节前缀，SHA256 与冻结清单完全相同，只在 scratch 的清单替换此路径。未还原或修改 `~/.claude`。
+- scratch：`tmp/2026-11-16-cache-break-accuracy/cbreak-tracker/r1/`；所有失败／通过日志、备用冻结前缀、重跑 manifest、输出 TSV 均在此处。
+- 未做：GUI／截图、共享文档与计划收尾；不重复已签收的费用／账本／parity 全套审计。本次未改索引用量解析、搜索逻辑或导出格式。
+- 交给协调者：R1 可按上述证据复核；未改 `skills/asm/references/cli.md` 或 `kb/plans/2026-11-15-asm-skill-and-cli/` 的并行改动。
+
+### R1 实现与验证细节
+
+`Option<T>` 原先仅兼容缺字段与 null，字段类型变化会使外层 Record 反序列化失败。新字段统一使用 `#[serde(default, deserialize_with = "cache_field")]`：先完整消费该值的原始 JSON，再尝试解析 T；失败只返回 None。因此 `params.betas` 含非字符串元素时，整份 beta 列表视为未知，外层请求的时间、shape 仍有效；params 本身不是对象时，仅 params 未知。真正语法错误的 JSON 仍报坏行，既有非缓存字段的解析策略不变。
+
+新增测试覆盖：
+
+- assistant 的 effort 对象、requestRef 数值及其他新增辅助字段类型错误：skipped_lines 为 0，过程正文、Read 工具与最终回复都保留，正常的模型变化仍被检测。
+- 请求的 betas 对象／混合数组、非对象 params、字符串／越界 keep、非数组 tail：skipped_lines 为 0；有效开始时间仍给出 600000ms 空闲，有效 shape 仍能判 system/tools 变化，后续回复仍显示。
+- 同一 malformed effort／requestRef 记录的完整导出和 `turns=1, tools=true` 导出均保留最终回复与工具信息，不再静默漏内容。
+
+首次冻结重跑记录在 `r1/real-audit.log`，中止原因是 File::open NotFound。恢复前缀 SHA256 为 `3d9ecae47707e1f5d1126e5ed345e3672dd79b7a0ba663c106f8625665e3b439`。来源只读快照为 `tmp/2026-11-12-usage-stats/usage-p1-core/claude-snapshot/projects/-Users-reorx--local-share-cc-renewer-claude-cwd/0a03c1ed-013c-4798-a51d-b83617e6f1b0.jsonl`。重跑使用 `r1/manifest.json`，facts 仍为原 `cache-break-ref/calls.jsonl`；输出 `r1/actual.tsv`，日志 `r1/real-audit-retry.log`。没有删除缺失样本或重扫实时文件替代冻结输入。
+
 ## 协调者摘要（cbreak-tracker）
 
 - 结果：步骤 3–5 完成；新增独立 `CacheTracker`，接入 Reader 的祖先链、请求事实与 `prompt_of`，补齐 app 新原因文案。

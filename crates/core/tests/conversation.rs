@@ -525,3 +525,51 @@ fn real_transcripts_cache_breaks() {
 fn real_usage_ledger_correction() {
     cache_audit::ledger_correction();
 }
+
+#[test]
+fn malformed_cache_fields_keep_assistant_text_tools_and_valid_usage() {
+    for (field, value) in [
+        ("effort", json!({"level":"high"})), ("requestRef", json!(123)),
+        ("parentUuid", json!([])), ("id", json!(false)), ("querySource", json!({})),
+        ("shapeHash", json!(12)), ("keep", json!(-1)), ("tail", json!({})), ("params", json!([])),
+    ] {
+        let mut second = call("m2", 2, "claude-opus-4-7", 0, 40_000, true);
+        second[field] = value;
+        second["message"]["content"] = json!([
+            {"type":"text","text":"visible progress"},
+            {"type":"tool_use","id":"tool","name":"Read","input":{"file_path":"/example"}}
+        ]);
+        let c = read(vec![prompt_at("go", 0), call("m1", 1, OPUS, 0, 50_000, true), second, a("visible answer")]);
+        assert_eq!(c.skipped_lines, 0, "{field}");
+        let t = turn(&c, 0);
+        assert!(t.steps.iter().any(|s| matches!(&s.kind, StepKind::Text(m) if m.text == "visible progress")), "{field}");
+        assert!(t.steps.iter().any(|s| matches!(&s.kind, StepKind::Tool(t) if t.name == "Read" && t.arg == "/example")), "{field}");
+        assert_eq!(t.reply.as_ref().unwrap().text.text, "visible answer");
+        assert_eq!(breaks(&c)[0].1.cause, CacheBreakCause::ModelSwitch { from: OPUS.into() }, "{field}");
+    }
+}
+
+#[test]
+fn malformed_request_fields_preserve_independent_time_and_shape_facts() {
+    for (field, value) in [
+        ("params", json!({"betas":{}})), ("params", json!({"betas":["valid",42]})),
+        ("params", json!(12)), ("keep", json!("10")), ("keep", json!(4294967296u64)),
+        ("tail", json!({"hash":"x"})),
+    ] {
+        for idle in [false, true] {
+            let mut req = request("r2", if idle { 600 } else { 2 }, "main", "changed", vec![], 10, 1);
+            req[field] = value.clone();
+            let c = read(vec![
+                request("r1", 0, "main", "original", vec![], 0, 10),
+                linked(call("m1", if idle { 599 } else { 1 }, OPUS, 0, 50_000, false), "a", None, Some("r1")),
+                req,
+                linked(call("m2", if idle { 601 } else { 3 }, OPUS, 0, 40_000, false), "b", Some("a"), Some("r2")),
+            ]);
+            assert_eq!(c.skipped_lines, 0, "{field}: {value}");
+            assert_eq!(turn(&c, 0).reply.as_ref().unwrap().text.text, "ok");
+            assert_eq!(breaks(&c)[0].1.cause, if idle {
+                CacheBreakCause::Idle { gap_ms: 600_000, ttl_ms: 300_000 }
+            } else { CacheBreakCause::SystemOrTools }, "{field}: {value}");
+        }
+    }
+}

@@ -925,3 +925,28 @@ fn invalid_reading_options_exit_2_and_a_turn_past_the_end_exits_1() {
         assert!(String::from_utf8_lossy(&out.stderr).contains("term 1 is not a valid regular expression, matched as literal text"));
     }
 }
+
+#[test]
+fn malformed_cache_fields_do_not_remove_records_from_either_export() {
+    for (field, value) in [("effort", json!({"level":"high"})), ("requestRef", json!(123))] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tolerant.jsonl");
+        let mut tool = json!({"type":"assistant","message":{"id":"tool-msg","stop_reason":"tool_use","content":[
+            {"type":"tool_use","id":"tool","name":"Read","input":{"file_path":"/example"}}
+        ]}});
+        let mut reply = json!({"type":"assistant","message":{"id":"reply-msg","stop_reason":"end_turn","content":[
+            {"type":"text","text":"preserved final answer"}
+        ]}});
+        tool[field] = value.clone(); reply[field] = value;
+        let rows = [json!({"type":"user","message":{"content":"go"}}), tool, reply];
+        std::fs::write(&path, rows.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+        let full = read_transcript(&path).unwrap();
+        assert_eq!(full.skipped_lines, 0, "{field}");
+        assert!(full.text.contains("preserved final answer"), "{field}");
+        assert!(full.text.contains("Called Read 1 time."), "{field}");
+        let selected = read_transcript_with(&path, &TranscriptOptions { turns: range("1"), tools: true, ..TranscriptOptions::default() }).unwrap();
+        assert_eq!(selected.skipped_lines, 0, "{field}");
+        assert!(selected.text.contains("preserved final answer"), "{field}");
+        assert!(selected.text.contains("/example"), "{field}");
+    }
+}

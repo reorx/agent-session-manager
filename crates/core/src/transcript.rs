@@ -109,23 +109,44 @@ pub fn resolve_transcript(claude: &ClaudeDir, favorites: Option<&ClaudeDir>, inp
     }
 }
 
+/// Cache metadata is an unstable internal format. Capture the complete JSON value first,
+/// so a type mismatch consumes only this field and cannot discard the surrounding record.
+/// Borrowing RawValue also avoids materializing request tails or unrelated params as Value.
+fn cache_field<'de, D, T>(deserializer: D) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    let raw = <&RawValue>::deserialize(deserializer)?;
+    Ok(serde_json::from_str(raw.get()).ok())
+}
+
 #[derive(Deserialize)]
 pub(crate) struct Record<'a> {
     #[serde(rename = "type")]
     pub(crate) kind: Option<String>,
     pub(crate) uuid: Option<String>,
     #[serde(rename = "parentUuid")]
+    #[serde(default, deserialize_with = "cache_field")]
     pub(crate) parent_uuid: Option<String>,
     #[serde(rename = "requestRef")]
+    #[serde(default, deserialize_with = "cache_field")]
     pub(crate) request_ref: Option<String>,
+    #[serde(default, deserialize_with = "cache_field")]
     pub(crate) effort: Option<String>,
+    #[serde(default, deserialize_with = "cache_field")]
     pub(crate) id: Option<String>,
     #[serde(rename = "querySource")]
+    #[serde(default, deserialize_with = "cache_field")]
     pub(crate) query_source: Option<String>,
     #[serde(rename = "shapeHash")]
+    #[serde(default, deserialize_with = "cache_field")]
     pub(crate) shape_hash: Option<String>,
+    #[serde(default, deserialize_with = "cache_field")]
     pub(crate) keep: Option<u32>,
+    #[serde(default, deserialize_with = "cache_field")]
     pub(crate) tail: Option<Vec<serde::de::IgnoredAny>>,
+    #[serde(default, deserialize_with = "cache_field")]
     pub(crate) params: Option<RequestParams>,
     pub(crate) subtype: Option<String>,
     #[serde(rename = "isMeta", default)]
@@ -153,6 +174,7 @@ pub(crate) struct Record<'a> {
 
 #[derive(Deserialize)]
 pub(crate) struct RequestParams {
+    #[serde(default, deserialize_with = "cache_field")]
     pub(crate) betas: Option<Vec<String>>,
 }
 
