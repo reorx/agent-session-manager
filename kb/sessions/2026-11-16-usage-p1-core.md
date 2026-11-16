@@ -180,3 +180,30 @@ impl Ledger {
 - [账本 spec](../plans/2026-11-16-usage-stats/usage-ledger.md) — 本次实现依据；写回接口差异、Today 边界与实测值，不改勾选。
 - [数据层设计](../docs/data-layer-design.md) — 增补账本现状及表结构/迁移指向。
 - [M1 core 笔记](../notes/2026-09-17-m1-core-crate.md) — 模块规则与测试/比对依据。
+
+
+## 协调者摘要（usage-p1-core-r1）
+
+- 结果：R1、R2 和 `Ledger::usage(Some(ids))` 的 SQL 筛选均完成，公开 API 不变。
+- 提交：代码、回归测试、spec 和本节同一提交；用 `git log -1 --format=%H -- crates/core/src/ledger.rs` 查询。
+- R1：保留 SQLite 错误链，以 `LedgerFailure` 区分账本来源；BUSY/LOCKED 可被 `is_busy` 识别，账本损坏不触发索引删库。
+- R2：三个事务外写入口先开内部事务，复用账本先提交、索引后提交；账本失败时索引与派生汇总回滚。
+- SQL：单个 JSON 参数经 `json_each` 展开后按 id 连接，支持 40,000+ id；空列表直接返回，重复 id 与无元数据用量行为不变。
+- 红灯证据：`r1-red-ledger.log`（4 失败）、`r1-red-cli.log`（1 失败）、`r1-red-classification.log`（1 失败），均在生产实现修改前取得。
+- 绿灯证据：`cargo test -p agent-session-core`，372 通过 / 0 失败 / 5 忽略；`cargo test -p agent-session-manager`，162 通过 / 0 失败 / 2 忽略。
+- 证据目录：`tmp/2026-11-12-usage-stats/usage-p1-core/`；全量输出为 `r1-core.log` 和 `r1-app.log`。
+- 自己的决定：不用丢弃错误类型的字符串包装；不引入跨库事务或新的公共接口；schema 和账本版本不变。
+- 未验证项：本轮未跑 GUI、真实数据导入或 parity；未改解析、输出格式、排序，未打开真实索引/账本或原始备份。
+- 交给协调者：app 已有的 quiet 扫描 BUSY 分支可直接复用；无需 app 接口调整。范围外文件和协调者文件均未改。
+
+### 返工回归覆盖
+
+- SQLite BUSY/LOCKED 保留与 CORRUPT/NOTADB 来源隔离；共享账本锁导致写入和打开回填失败时，索引仍保留。
+- CLI 在共享账本被锁时成功返回最后完成的索引并打印 busy 提示；解锁后下一次扫描读到新 session。
+- standalone 用量写入失败后索引不留新行，重开后重试只记录一次；项目更新和 session 汇总写失败也回滚。
+- SQL 选择覆盖超过 SQLite 参数上限的 id 集合、重复 id、缺失元数据、排除未选用量和空列表。
+
+### 返工踩过的坑
+
+- 将 `anyhow` 错误格式化后重新构造会丢失 SQLite 类型；添加文字应使用 `context`，来源标记单独控制损坏分类。
+- autocommit 下在方法末尾 flush 已经太晚；事务必须在第一条索引写入之前开启。

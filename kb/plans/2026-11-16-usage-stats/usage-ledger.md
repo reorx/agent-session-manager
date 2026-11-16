@@ -201,15 +201,15 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   - `write(&self, batch: &LedgerBatch, index: &Connection)`：一个 `BEGIN IMMEDIATE` 事务里 upsert `batch.responses`（冲突时各列取新值，`ts` 取较小值，和 `Db::insert_usage` 一样）、upsert `batch.projects`（`path = COALESCE(excluded.path, projects.path)`）、对 `batch.sessions` 里的每个 id 从 `index` 读 session 行并 upsert 进 `sessions`（只读 `source = 'transcript'` 的行，读不到就跳过）、`refresh_hourly`。
   - `refresh_hourly(session_id)`：删掉这个 session 的 `usage_hourly`，再从 `responses` 按 `ts / 3600000, model, fast, 输入合计 > LONG_PROMPT, agent <> ''` 分组插入。
   - `response_counts() -> HashMap<String, u64>`（`usage_hourly` 按 session 求 `responses` 之和）。
-  - `usage(ids: Option<&[String]>) -> Vec<SessionUsage>`：整表或指定的 session，`sessions` 左连 `projects` 取路径；账本里有调用但没有 session 信息的也返回（标题为空、`project_key` 为空串）。
+  - `usage(ids: Option<&[String]>) -> Vec<SessionUsage>`：整表或指定的 session，`sessions` 左连 `projects` 取路径；账本里有调用但没有 session 信息的也返回（标题为空、`project_key` 为空串）。指定 id 时在 SQL 中筛选，用单个 JSON 参数经 `json_each` 展开后连接主键，避免大批 id 超过绑定参数上限；空 id 列表直接返回空结果。
   - `LedgerBatch { responses: Vec<(String, String, UsageRow)>, projects: Vec<(String, Option<String>)>, sessions: BTreeSet<String> }`。
 - `index/db.rs`：
   - `Db` 加 `ledger: Option<Ledger>` 和 `pending: RefCell<LedgerBatch>`。
   - `open_checked`：`configure` 之后、`ensure_schema` 之前打开账本（`Ledger::open(&ledger_path(path))`）；「版本太新」时 `ledger = None` 并 `eprintln!` 一行。`open_in_memory` 配 `Ledger::open_in_memory()`；`open_read_only` 不带账本。
   - `build_schema`：在事务里确认仍然 `schema_mismatch` 之后、`reset_schema` 之前调 `salvage_into_ledger(source: &Connection)`，`source` 传自己的连接：从它读 `api_usage` 的 12 列和 `sessions` 连 `projects` 的信息，整个写进账本并提交。来源做成参数，是为了能把一份索引备份抄进账本（实施步骤 7）。`prepare` 报「no such table / no such column」时跳过对应的部分，不算错误；新建的空索引（版本 0、没有表）直接跳过。读旧索引时遇到损坏类错误：账本的事务回滚，错误照常返回，由 `open_with` 按索引损坏处理。
-  - **账本的错误不能被 `open_with` 当成索引损坏。** `is_corrupt` 沿错误链找 `rusqlite` 的错误码，账本连接抛出的 `DatabaseCorrupt` 如果原样带出 `open_checked`，`open_with` 会去删索引。所以账本的损坏一律在 `Ledger` / `flush_ledger` 内部处理掉（改名、新建、补齐），不向外返回；账本的其他错误转成不带 `rusqlite::Error` 的 `anyhow` 错误（把原错误的文字放进消息）再返回。
+  - **账本的错误不能被 `open_with` 当成索引损坏。** 打开、读取、写入和恢复账本的错误保留原始 `rusqlite::Error` 链，并加 `LedgerFailure` 来源标记。索引的 `is_corrupt` 排除带此标记的错误，`is_busy` 仍沿链识别 `SQLITE_BUSY` / `SQLITE_LOCKED`，使 app quiet 扫描和 CLI 等待/回退规则照常生效。账本损坏先尝试改名、新建、补齐，恢复失败则带标记向外报错；从来源索引读取数据的错误不加账本标记，仍按索引错误处理。
   - `ensure_schema` 之后调 `reconcile_ledger`：索引侧 `SELECT session_id, sum(responses) FROM session_model_usage GROUP BY 1`，账本侧 `response_counts()`；账本数较小的 session，读出它在 `api_usage` 的全部行，连同它的 id 组成一个 `LedgerBatch` 写进去。
-  - `insert_usage`：照旧写索引，再把行推进 `pending.responses`。`refresh_session_usage`：照旧，再把 id 记进 `pending.sessions`。`upsert_project`：照旧，再推进 `pending.projects`。三者末尾：如果 `self.conn.is_autocommit()`（不在事务里），立即 `flush_ledger`。
+  - `insert_usage`：照旧写索引，再把行推进 `pending.responses`。`refresh_session_usage`：照旧，再把 id 记进 `pending.sessions`。`upsert_project`：照旧，再推进 `pending.projects`。三者入口先检查 `self.conn.is_autocommit()`：事务外调用先开启内部 `Db::transaction`，再执行写入；事务内调用复用现有事务。三者末尾只记录 pending，由外层事务统一先提交账本、再提交索引。账本失败时索引写入和派生汇总一起回滚，不能先自动提交索引后再补写账本。
   - `Db::transaction`：`f` 成功后先 `flush_ledger()`，再提交索引；`f` 失败时清空 `pending`。
   - `flush_ledger`：取出 `pending`，为空则返回；调 `ledger.write`。遇到损坏类错误：让 `Ledger` 改名重建，然后 `reconcile_ledger`（这时索引事务里未提交的行对同一个连接可见），再继续提交索引。其他错误原样返回，索引事务回滚。
   - `delete_usage`、`delete_session`、`clear_all`、`mark_transcript_missing`、`reset_schema`、`remove_db_files` 不碰账本。在 `remove_db_files` 上面加一句注释说明账本文件不在它的列表里是有意的。

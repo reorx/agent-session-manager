@@ -40,7 +40,8 @@ fn busy_code(code: ErrorCode) -> bool {
 
 /// The file is not an SQLite database, or a damaged one.
 fn is_corrupt(error: &anyhow::Error) -> bool {
-    has_sqlite_code(error, |code| matches!(code, ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt))
+    error.downcast_ref::<LedgerFailure>().is_none()
+        && has_sqlite_code(error, |code| matches!(code, ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt))
 }
 
 fn has_sqlite_code(error: &anyhow::Error, matches: impl Fn(ErrorCode) -> bool) -> bool {
@@ -184,7 +185,7 @@ impl Db {
         let ledger = match Ledger::open(&ledger_path(path)) {
             Ok(ledger) => Some(ledger),
             Err(e) if e.downcast_ref::<NewerVersion>().is_some() => { eprintln!("{e}"); None }
-            Err(e) => return Err(anyhow::anyhow!("open usage ledger: {e:#}")),
+            Err(e) => return Err(e.context(LedgerFailure).context("open usage ledger")),
         };
         db.ledger_required = ledger.is_some();
         db.ledger.replace(ledger);
@@ -333,11 +334,6 @@ impl Db {
         Ok(())
     }
 
-    fn flush_if_autocommit(&self) -> Result<()> {
-        if self.conn.is_autocommit() { self.flush_ledger()?; }
-        Ok(())
-    }
-
     fn flush_ledger(&self) -> Result<()> {
         let batch = self.pending.take();
         if batch.is_empty() { return Ok(()); }
@@ -366,8 +362,8 @@ impl Db {
         self.ledger.take();
         let path = self.path.as_ref().map(|p| ledger_path(p))
             .ok_or_else(|| anyhow::anyhow!("in-memory usage ledger is corrupt"))?;
-        Ledger::quarantine(&path).map_err(|e| anyhow::anyhow!("preserve corrupt ledger: {e:#}"))?;
-        let ledger = Ledger::open(&path).map_err(|e| anyhow::anyhow!("recreate ledger: {e:#}"))?;
+        Ledger::quarantine(&path).map_err(|e| e.context(LedgerFailure).context("preserve corrupt ledger"))?;
+        let ledger = Ledger::open(&path).map_err(|e| e.context(LedgerFailure).context("recreate ledger"))?;
         // Read in full: uncommitted rows are visible, and old indexes need not have
         // session_model_usage. A second failure is returned, never an unbounded retry.
         let batch = ledger::read_responses(source, None)?;
@@ -391,9 +387,9 @@ impl Db {
             Err(e) if ledger::corrupt(&e) => {
                 self.recover_ledger(&self.conn)?;
                 self.ledger.borrow().as_ref().map(read).transpose()
-                    .map_err(|e| anyhow::anyhow!("read recovered usage ledger: {e:#}"))
+                    .map_err(|e| e.context(LedgerFailure).context("read recovered usage ledger"))
             }
-            Err(e) => Err(anyhow::anyhow!("read usage ledger: {e:#}")),
+            Err(e) => Err(e.context(LedgerFailure).context("read usage ledger")),
             result => result,
         }
     }
@@ -402,13 +398,15 @@ impl Db {
 
     /// Insert or update a project; a known real path is never overwritten by `None`.
     pub fn upsert_project(&self, key: &str, path: Option<&str>) -> Result<i64> {
+        if self.conn.is_autocommit() {
+            return self.transaction(|db| db.upsert_project(key, path));
+        }
         self.conn.execute(
             "INSERT INTO projects (encoded_dir, path) VALUES (?1, ?2)
              ON CONFLICT(encoded_dir) DO UPDATE SET path = COALESCE(excluded.path, projects.path)",
             params![key, path],
         )?;
         self.pending.borrow_mut().projects.push((key.to_owned(), path.map(str::to_owned)));
-        self.flush_if_autocommit()?;
         Ok(self.conn.query_row("SELECT id FROM projects WHERE encoded_dir = ?1", [key], |r| r.get(0))?)
     }
 
@@ -711,6 +709,9 @@ impl Db {
     /// Add API responses of a session's transcript (`agent` = "") or of one of its subagents.
     /// A response already stored under the same id is replaced, keeping its earliest timestamp.
     pub fn insert_usage(&self, session_id: &str, agent: &str, rows: &[UsageRow]) -> Result<()> {
+        if self.conn.is_autocommit() {
+            return self.transaction(|db| db.insert_usage(session_id, agent, rows));
+        }
         let mut stmt = self.conn.prepare_cached(
             "INSERT INTO api_usage (session_id, agent, msg_id, model, ts, input, cache_write_5m, cache_write_1h,
                 cache_read, output, web_search, fast, cost_usd)
@@ -739,7 +740,7 @@ impl Db {
             ])?;
         }
         self.pending.borrow_mut().responses.extend(rows.iter().cloned().map(|u| (session_id.to_owned(), agent.to_owned(), u)));
-        self.flush_if_autocommit()
+        Ok(())
     }
 
     /// Drop a session's usage: all of it, or only what one file (`agent`) contributed.
@@ -754,6 +755,9 @@ impl Db {
     /// Recompute a session's cost and token totals, and its usage by model, from its stored API
     /// responses. The groups match `SessionSummary::set_usage`.
     pub fn refresh_session_usage(&self, session_id: &str) -> Result<()> {
+        if self.conn.is_autocommit() {
+            return self.transaction(|db| db.refresh_session_usage(session_id));
+        }
         self.conn.prepare_cached("DELETE FROM session_model_usage WHERE session_id = ?1")?.execute([session_id])?;
         let groups = format!(
             "INSERT INTO session_model_usage
@@ -774,7 +778,7 @@ impl Db {
         )?;
         stmt.execute([session_id])?;
         self.pending.borrow_mut().sessions.insert(session_id.to_owned());
-        self.flush_if_autocommit()
+        Ok(())
     }
 
     /// Every stored API response of a session, in time order.
@@ -862,10 +866,10 @@ impl Db {
     }
 }
 
-// Strip only ledger SQLite errors so open_with cannot mistake them for index damage.
+// Keep SQLite codes available to callers; LedgerFailure distinguishes ledger damage from index damage.
 fn ledger_write_error(error: anyhow::Error) -> anyhow::Error {
     if error.downcast_ref::<LedgerFailure>().is_some() {
-        anyhow::anyhow!("write usage ledger: {error:#}")
+        error.context("write usage ledger")
     } else {
         error
     }
@@ -1038,4 +1042,21 @@ mod tests {
             .unwrap();
         assert_eq!(plan, ["SEARCH messages USING COVERING INDEX messages_counted (<expr>=?)"]);
     }
+    #[test]
+    fn ledger_error_origin_preserves_busy_but_excludes_index_corruption() {
+        for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED,
+                     rusqlite::ffi::SQLITE_CORRUPT, rusqlite::ffi::SQLITE_NOTADB] {
+            let raw = anyhow::Error::new(rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(code), None));
+            let busy = matches!(code, rusqlite::ffi::SQLITE_BUSY | rusqlite::ffi::SQLITE_LOCKED);
+            assert_eq!(is_busy(&raw), busy);
+            assert_eq!(is_corrupt(&raw), !busy);
+            let marked = raw.context(LedgerFailure);
+            assert_eq!(is_busy(&marked), busy);
+            assert!(!is_corrupt(&marked), "ledger damage must never delete the index");
+            let returned = ledger_write_error(marked);
+            assert_eq!(is_busy(&returned), busy);
+            assert!(!is_corrupt(&returned));
+        }
+    }
+
 }

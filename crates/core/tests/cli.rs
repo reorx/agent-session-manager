@@ -1397,3 +1397,23 @@ fn output_cut_short_by_its_reader_is_not_an_error() {
     }
     assert!(failed.is_empty(), "{}", failed.join("\n"));
 }
+
+#[test]
+fn a_busy_shared_ledger_answers_from_the_last_completed_index() {
+    let sb = sandbox();
+    asm(&sb).arg("index").assert().success();
+    let new_id = "77777777-aaaa-4bbb-8ccc-000000000007";
+    std::fs::write(sb.transcript(ALPHA, new_id), format!(
+        "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"brand new\"}},\"uuid\":\"u7\",\"timestamp\":\"2026-09-15T00:00:00.000Z\",\"sessionId\":\"{new_id}\",\"cwd\":\"/Users/me/Code/alpha\"}}\n"
+    )).unwrap();
+    let lock = rusqlite::Connection::open(agent_session_core::claude::paths::ledger_path(&sb.db_path())).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let out = asm(&sb).args(["list", "alpha"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "index busy, results may miss the last few minutes\n");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains(new_id));
+    lock.execute_batch("COMMIT").unwrap();
+    let out = asm(&sb).args(["list", "alpha"]).output().unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains(new_id));
+}

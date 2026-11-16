@@ -151,19 +151,31 @@ impl Ledger {
     }
 
     pub fn usage(&self, ids: Option<&[String]>) -> Result<Vec<SessionUsage>> {
-        let wanted = ids.map(|ids|ids.iter().map(String::as_str).collect::<BTreeSet<_>>());
+        if ids.is_some_and(|ids| ids.is_empty()) { return Ok(Vec::new()); }
+        // A single JSON parameter avoids SQLite's bind limit for large scans.
+        let selected = ids.map(serde_json::to_string).transpose()?;
+        let candidates = if ids.is_some() {
+            "WITH wanted AS (SELECT DISTINCT value AS id FROM json_each(?1)),
+             ids AS (SELECT s.id FROM wanted JOIN sessions s ON s.id=wanted.id
+                     UNION SELECT h.session_id FROM wanted JOIN usage_hourly h ON h.session_id=wanted.id)"
+        } else {
+            "WITH ids AS (SELECT id FROM sessions UNION SELECT session_id FROM usage_hourly)"
+        };
         let mut out: BTreeMap<String,SessionUsage> = BTreeMap::new();
-        let mut stmt = self.conn.prepare(
-            "SELECT ids.id,s.project_key,p.path,s.title,s.entrypoint,s.is_background,s.started_at,s.updated_at,
+        let sql = format!(
+            "{candidates} SELECT ids.id,s.project_key,p.path,s.title,s.entrypoint,s.is_background,s.started_at,s.updated_at,
              h.hour,h.model,h.fast,h.long_prompt,h.sub,h.responses,h.input,h.cache_write_5m,h.cache_write_1h,h.cache_read,h.output,h.web_search
-             FROM (SELECT id FROM sessions UNION SELECT session_id FROM usage_hourly) ids
+             FROM ids
              LEFT JOIN sessions s ON s.id=ids.id
              LEFT JOIN usage_hourly h ON h.session_id=ids.id
-             LEFT JOIN projects p ON p.key=s.project_key ORDER BY ids.id,h.hour,h.model,h.fast,h.long_prompt,h.sub")?;
-        let mut rows = stmt.query([])?;
+             LEFT JOIN projects p ON p.key=s.project_key ORDER BY ids.id,h.hour,h.model,h.fast,h.long_prompt,h.sub");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = match selected {
+            Some(ref ids) => stmt.query([ids])?,
+            None => stmt.query([])?,
+        };
         while let Some(r) = rows.next()? {
             let id: String = r.get(0)?;
-            if wanted.as_ref().is_some_and(|ids|!ids.contains(id.as_str())) { continue; }
             let session = LedgerSession { id:id.clone(), project_key:r.get::<_,Option<String>>(1)?.unwrap_or_default(),
                 project_path:r.get(2)?, title:r.get::<_,Option<String>>(3)?.unwrap_or_default(), entrypoint:r.get(4)?,
                 is_background:r.get::<_,Option<bool>>(5)?.unwrap_or_default(), started_at:r.get(6)?,

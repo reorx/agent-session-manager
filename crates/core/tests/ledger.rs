@@ -329,3 +329,86 @@ fn a_failed_recovery_cannot_silently_disable_future_ledger_writes() {
     assert!(format!("{:#}",second.unwrap_err()).contains("ledger"));
     assert!(!db.usage(S1).unwrap().iter().any(|r|r.msg_id=="must-not-skip"));
 }
+
+#[test]
+fn shared_ledger_busy_remains_classifiable() {
+    let sb = sandbox();
+    let db = Db::open(&sb.db_path()).unwrap();
+    let lock = ledger(&sb);
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let error = db.transaction(|db| db.insert_usage("review", "", &[row("busy")])).unwrap_err();
+    assert!(agent_session_core::index::is_busy(&error), "{error:#}");
+    assert_eq!(count(db.conn(), "api_usage"), 0);
+}
+
+#[test]
+fn ledger_busy_during_open_remains_classifiable_and_keeps_the_index() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    let states = count(db.conn(), "index_state");
+    drop(db);
+    let lock = ledger(&sb);
+    lock.execute_batch("DELETE FROM responses; DELETE FROM usage_hourly; BEGIN IMMEDIATE;").unwrap();
+    let error = match Db::open(&sb.db_path()) {
+        Ok(_) => panic!("backfill must wait for the ledger lock"),
+        Err(error) => error,
+    };
+    assert!(agent_session_core::index::is_busy(&error), "{error:#}");
+    assert_eq!(count(&Connection::open(sb.db_path()).unwrap(), "index_state"), states);
+}
+
+#[test]
+fn a_failed_standalone_usage_write_rolls_back_and_can_be_retried_after_reopen() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    let before = db.usage(S1).unwrap();
+    ledger(&sb).execute_batch("CREATE TRIGGER fail_write BEFORE INSERT ON responses BEGIN SELECT RAISE(ABORT,'standalone failure'); END;").unwrap();
+    let error = db.insert_usage(S1, "", &[row("standalone-failed")]).unwrap_err();
+    assert!(format!("{error:#}").contains("standalone failure"));
+    assert_eq!(db.usage(S1).unwrap(), before, "failed writes must not leave committed index rows");
+    ledger(&sb).execute_batch("DROP TRIGGER fail_write;").unwrap();
+    drop(db);
+    let db = Db::open(&sb.db_path()).unwrap();
+    assert_eq!(db.usage(S1).unwrap(), before);
+    db.insert_usage(S1, "", &[row("standalone-failed")]).unwrap();
+    assert_eq!(db.usage(S1).unwrap().len(), before.len() + 1);
+    assert_eq!(ledger(&sb).query_row("SELECT count(*) FROM responses WHERE msg_id='standalone-failed'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+}
+
+#[test]
+fn standalone_project_and_usage_refresh_roll_back_when_the_ledger_fails() {
+    let sb = sandbox();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    let before = db.session(S1).unwrap().unwrap();
+    ledger(&sb).execute_batch("CREATE TRIGGER fail_project BEFORE INSERT ON projects BEGIN SELECT RAISE(ABORT,'project failure'); END;").unwrap();
+    let error = db.upsert_project(ALPHA, Some("/must-not-stick")).unwrap_err();
+    assert!(format!("{error:#}").contains("project failure"));
+    assert_eq!(db.session(S1).unwrap().unwrap().project_path, before.project_path);
+    ledger(&sb).execute_batch("DROP TRIGGER fail_project; CREATE TRIGGER fail_session BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT,'session failure'); END;").unwrap();
+    db.conn().execute("UPDATE api_usage SET input=input+100 WHERE session_id=?1", [S1]).unwrap();
+    let error = db.refresh_session_usage(S1).unwrap_err();
+    assert!(format!("{error:#}").contains("session failure"));
+    let after = db.session(S1).unwrap().unwrap();
+    assert_eq!(after.tokens_in, before.tokens_in);
+    assert_eq!(after.model_usage, before.model_usage);
+}
+
+#[test]
+fn usage_accepts_more_ids_than_sqlite_bind_parameters_and_keeps_missing_metadata() {
+    let l = Ledger::open_in_memory().unwrap();
+    let index = Db::open_in_memory().unwrap();
+    let mut batch = LedgerBatch::default();
+    batch.responses.push(("included".into(), "".into(), row("a")));
+    batch.responses.push(("excluded".into(), "".into(), row("b")));
+    l.write(&batch, index.conn()).unwrap();
+    let mut ids: Vec<_> = (0..40_000).map(|n| format!("absent-{n}")).collect();
+    ids.extend(["included".into(), "included".into()]);
+    let usage = l.usage(Some(&ids)).unwrap();
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].session.id, "included");
+    assert_eq!(usage[0].hours[0].responses, 1);
+    assert!(l.usage(Some(&[])).unwrap().is_empty());
+}
