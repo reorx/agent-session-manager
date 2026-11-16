@@ -663,6 +663,13 @@ fn cache_note(b: &CacheBreak) -> SharedString {
         CacheBreakCause::Idle { gap_ms, ttl_ms } => format!("idle {}, cache lasts {}", idle_label(*gap_ms), idle_label(*ttl_ms)),
         CacheBreakCause::Compaction => "after compaction".into(),
         CacheBreakCause::ModelSwitch { from } => format!("model changed from {}", display_name(from)),
+        CacheBreakCause::EffortChange { from, to } => format!("effort changed from {from} to {to}"),
+        CacheBreakCause::FastMode { on } => format!("fast mode turned {}", if *on { "on" } else { "off" }),
+        CacheBreakCause::RequestSettings { sign_in: true } => "sign-in changed (subscription / API key)".into(),
+        CacheBreakCause::RequestSettings { sign_in: false } => "request settings changed".into(),
+        CacheBreakCause::SystemOrTools => "system prompt or tools changed".into(),
+        CacheBreakCause::EarlierMessages => "earlier messages changed".into(),
+        CacheBreakCause::RequestUnchanged => "cache missed, request unchanged".into(),
         CacheBreakCause::Unknown => "cause unknown".into(),
     });
     parts.join(" · ").into()
@@ -1762,4 +1769,21 @@ pub mod tests {
         assert_eq!(row_of(&rows(&view, &HashSet::new()), &HitPlace { item: 0, part: Part::Step(1) }), Some(0), "a closed turn's steps are under its head");
         assert_eq!(row_of(&open, &HitPlace { item: 1, part: Part::Summary }), Some(4));
     }
+    #[test]
+    fn cache_notes_describe_new_causes_without_guessing_the_server_reason() {
+        for (cause, suffix) in [
+            (CacheBreakCause::EffortChange { from: "high".into(), to: "xhigh".into() }, "effort changed from high to xhigh"),
+            (CacheBreakCause::FastMode { on: true }, "fast mode turned on"),
+            (CacheBreakCause::FastMode { on: false }, "fast mode turned off"),
+            (CacheBreakCause::RequestSettings { sign_in: true }, "sign-in changed (subscription / API key)"),
+            (CacheBreakCause::RequestSettings { sign_in: false }, "request settings changed"),
+            (CacheBreakCause::SystemOrTools, "system prompt or tools changed"),
+            (CacheBreakCause::EarlierMessages, "earlier messages changed"),
+            (CacheBreakCause::RequestUnchanged, "cache missed, request unchanged"),
+        ] {
+            let b = CacheBreak { ts: None, dropped: 50_000, written: 40_000, cost_usd: Some(0.32), cause };
+            assert_eq!(cache_note(&b).as_ref(), format!("cache rebuilt · 40k written · $0.32 · {suffix}"));
+        }
+    }
+
 }

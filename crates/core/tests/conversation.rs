@@ -375,3 +375,137 @@ fn records_claude_code_wrote_itself_are_not_calls() {
     let c = read(vec![prompt_at("go", 0), call("m1", 1, OPUS, 0, 50_000, true), synthetic, call("m2", 30, OPUS, 50_003, 100, true)]);
     assert!(breaks(&c).is_empty());
 }
+
+fn linked(mut row: Value, uuid: &str, parent: Option<&str>, request: Option<&str>) -> Value {
+    row["uuid"] = json!(uuid); row["parentUuid"] = json!(parent); row["requestRef"] = json!(request);
+    row
+}
+fn request(id: &str, secs: u32, source: &str, shape: &str, betas: Vec<&str>, keep: u32, tail: usize) -> Value {
+    json!({"type":"api-request","id":id,"timestamp":at(secs),"querySource":source,"shapeHash":shape,
+        "params":{"betas":betas},"keep":keep,"tail":vec!["hash"; tail]})
+}
+
+#[test]
+fn cache_reader_rewinds_through_attachments_and_split_response_uuids() {
+    for idle in [false, true] {
+        let first = call("m1", 1, OPUS, 0, 50_000, true);
+        let c = read(vec![
+            linked(first.clone(), "a", None, None),
+            linked(first, "a2", Some("a"), None),
+            linked(call("m2", 2, OPUS, 50_003, 100_000, true), "b", Some("a2"), None),
+            json!({"type":"attachment","uuid":"bridge","parentUuid":"a2"}),
+            linked(prompt_at("rewind", 3), "u", Some("bridge"), None),
+            linked(call("m3", if idle { 7201 } else { 4 }, OPUS, if idle { 20_000 } else { 50_003 }, 60_000, true), "c", Some("u"), None),
+        ]);
+        let found = breaks(&c);
+        if idle {
+            assert_eq!(found.len(), 1);
+            assert_eq!(found[0].1.dropped, 30_003);
+            assert_eq!(found[0].1.cause, CacheBreakCause::Idle { gap_ms: 7_200_000, ttl_ms: 3_600_000 });
+        } else { assert!(found.is_empty()); }
+    }
+}
+
+#[test]
+fn cache_reader_uses_requests_without_responses_and_separates_query_sources() {
+    let c = read(vec![
+        request("r1", 0, "repl_main_thread", "shape", vec![], 0, 10),
+        linked(call("m1", 1, OPUS, 0, 50_000, true), "a", None, Some("r1")),
+        request("interrupted", 2, "repl_main_thread", "shape", vec![], 10, 10),
+        request("sdk", 3, "sdk", "shape", vec![], 0, 2),
+        request("r2", 4, "repl_main_thread", "shape", vec![], 10, 1),
+        linked(call("m2", 5, OPUS, 0, 50_000, true), "b", Some("a"), Some("r2")),
+    ]);
+    assert_eq!(breaks(&c)[0].1.cause, CacheBreakCause::EarlierMessages);
+    assert_eq!(c.skipped_lines, 0);
+}
+
+#[test]
+fn cache_reader_request_times_and_beta_sets_are_used() {
+    for (betas, cause) in [
+        (vec!["x", "oauth-login"], CacheBreakCause::RequestSettings { sign_in: true }),
+        (vec!["x", "new"], CacheBreakCause::RequestSettings { sign_in: false }),
+        (vec!["y", "x", "y"], CacheBreakCause::Idle { gap_ms: 600_000, ttl_ms: 300_000 }),
+    ] {
+        let c = read(vec![
+            request("r1", 0, "main", "shape", vec!["x", "y"], 0, 10),
+            linked(call("m1", 599, OPUS, 0, 50_000, false), "a", None, Some("r1")),
+            request("r2", 600, "main", "shape", betas, 10, 1),
+            linked(call("m2", 601, OPUS, 0, 50_000, false), "b", Some("a"), Some("r2")),
+        ]);
+        assert_eq!(breaks(&c)[0].1.cause, cause);
+    }
+}
+
+#[test]
+fn cache_reader_request_shapes_unchanged_requests_and_missing_requests() {
+    for (shape, reference, cause) in [
+        ("changed", Some("r2"), CacheBreakCause::SystemOrTools),
+        ("same", Some("r2"), CacheBreakCause::RequestUnchanged),
+        ("same", Some("absent"), CacheBreakCause::Unknown),
+        ("same", None, CacheBreakCause::Unknown),
+    ] {
+        let c = read(vec![
+            request("r1", 0, "main", "same", vec![], 0, 10),
+            linked(call("m1", 1, OPUS, 0, 50_000, true), "a", None, Some("r1")),
+            request("r2", 2, "main", shape, vec![], 10, 1),
+            linked(call("m2", 3, OPUS, 0, 50_000, true), "b", Some("a"), reference),
+        ]);
+        assert_eq!(breaks(&c)[0].1.cause, cause);
+    }
+}
+
+#[test]
+fn cache_reader_effort_and_fast_are_response_facts() {
+    for (effort, speed, cause) in [
+        ("xhigh", "fast", CacheBreakCause::EffortChange { from: "high".into(), to: "xhigh".into() }),
+        ("high", "fast", CacheBreakCause::FastMode { on: true }),
+    ] {
+        let mut first = call("m1", 1, OPUS, 0, 50_000, true);
+        first["effort"] = json!("high"); first["message"]["usage"]["speed"] = json!("standard");
+        let mut second = call("m2", 2, OPUS, 0, 50_000, true);
+        second["effort"] = json!(effort); second["message"]["usage"]["speed"] = json!(speed);
+        assert_eq!(breaks(&read(vec![first, second]))[0].1.cause, cause);
+    }
+}
+
+#[test]
+fn cache_reader_compact_waits_for_a_real_rebuild_and_respects_user_turns() {
+    for new_turn in [false, true] {
+        let mut rows = vec![
+            call("m1", 1, OPUS, 0, 50_000, true),
+            json!({"type":"system","subtype":"compact_boundary"}),
+            json!({"type":"user","isCompactSummary":true,"message":{"content":"summary"}}),
+            prompt_at("after manual compact", 2),
+            call("m2", 3, OPUS, 50_003, 1_000, true),
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"x","content":"ok"}]}}),
+        ];
+        if new_turn { rows.push(prompt_at("new turn", 4)); }
+        rows.push(call("m3", 5, OPUS, 0, 50_000, true));
+        let c = read(rows);
+        assert_eq!(breaks(&c)[0].1.cause, if new_turn { CacheBreakCause::Unknown } else { CacheBreakCause::Compaction });
+    }
+}
+
+#[test]
+fn cache_reader_uses_final_message_iteration_for_comparison() {
+    let mut first = call("m1", 1, OPUS, 0, 0, true);
+    first["message"]["usage"]["iterations"] = json!([
+        {"type":"compaction","cache_read_input_tokens":200_000},
+        {"type":"message","cache_read_input_tokens":50_000}
+    ]);
+    let c = read(vec![first, call("m2", 2, OPUS, 50_000, 1_000, true)]);
+    assert!(breaks(&c).is_empty(), "compaction work is billed but is not the next call's prefix");
+}
+
+#[test]
+fn cache_reader_bounds_parent_walk_and_falls_back_when_chain_is_broken() {
+    for parent in ["missing", "cycle"] {
+        let c = read(vec![
+            linked(call("m1", 0, OPUS, 0, 50_000, true), "a", None, None),
+            json!({"type":"attachment","uuid":"cycle","parentUuid":"cycle"}),
+            linked(call("m2", 1, OPUS, 0, 50_000, true), "b", Some(parent), None),
+        ]);
+        assert_eq!(breaks(&c)[0].1.dropped, 50_003);
+    }
+}

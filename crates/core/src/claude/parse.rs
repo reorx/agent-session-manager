@@ -465,8 +465,6 @@ pub(crate) fn tokens_of(u: &RawUsage) -> Tokens {
 }
 
 /// Cache comparisons use the final message's prompt, not the total billed sampling work.
-// The cache tracker consumes this in the next implementation step.
-#[allow(dead_code)]
 pub(crate) fn prompt_of(u: &RawUsage) -> (u64, u64) {
     let tokens = u.iterations.as_deref()
         .and_then(|items| items.iter().rev().find(|item| item.kind.as_deref() == Some("message")))

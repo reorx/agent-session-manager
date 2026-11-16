@@ -62,7 +62,7 @@ tags:
 
 user 特有：`promptId`、`toolUseResult`(tool_result 记录才有)、`sourceToolAssistantUUID`、`isMeta`（harness 注入的内容，如 skill 正文，非人类输入）、`promptSource`(typed / sdk / system / queued)、`origin`(`{kind: human | task-notification | auto-continuation | peer}`)、`permissionMode`、`slug`、`forkedFrom`、`isCompactSummary`、`imagePasteIds`、`sessionKind`(=bg 时为后台 session)。
 
-assistant 特有：`requestId`、`effort`、`message.model`、`message.id`、`message.usage`、`attributionSkill` / `attributionPlugin` / `attributionMcpServer`（标记该消息由哪个 skill/plugin 驱动）、`error` / `isApiErrorMessage`、`isAbortedMidStream`。
+assistant 特有：`requestId`、`requestRef`（关联 `api-request.id`）、`effort`、`message.model`、`message.id`、`message.usage`、`attributionSkill` / `attributionPlugin` / `attributionMcpServer`（标记该消息由哪个 skill/plugin 驱动）、`error` / `isApiErrorMessage`、`isAbortedMidStream`。
 
 `message.content` 形态：
 
@@ -100,6 +100,8 @@ assistant 特有：`requestId`、`effort`、`message.model`、`message.id`、`me
 
 | type | 次数 | 说明 |
 |---|---|---|
+| `api-request` | 2.1.300 起 | 请求开始时间、`id`、`querySource`、`shapeHash`、`params.betas`、`keep` 和 `tail`；详情读取时用于缓存判定，索引仍跳过 |
+| `api-request-blob` | 2.1.300 起 | 按哈希保存消息正文；缓存判定不读取正文 |
 | `attachment` | 27,175 | harness 注入（`attachment.type`: total_tokens_reminder、hook_success、skill_listing、edited_text_file、file …），**体积大且无检索价值**，但 `attachment.type == file` 时含 `@file` 引用的文件路径可做"引用文件"派生字段 |
 | `system` | 2,965 | `subtype`: turn_duration(1267)、stop_hook_summary(1245)、away_summary、local_command、api_error、compact_boundary、model_refusal_fallback …；`turn_duration.durationMs` 可累计 |
 | `file-history-snapshot` / `file-history-delta` | 4,417 | 文件备份跟踪；`trackingPath` 可派生"本 session 修改过的文件列表" |
@@ -112,13 +114,25 @@ assistant 特有：`requestId`、`effort`、`message.model`、`message.id`、`me
 - **一次 API 响应会写成多条记录。** 每个内容块（thinking、text、tool_use）各一条 assistant 记录，它们的 `message.id`、`requestId` 相同，`usage` 完全相同。本机 117,536 条 assistant 记录只对应 53,525 次响应，不去重 token 会多算约 2.2 倍。去重键依次取 `message.id` → `requestId` → 记录 `uuid`。增量索引可能把同一次响应的几条记录切在两次扫描之间，所以去重要跨扫描进行。
 - **`usage` 的字段**：`input_tokens`（未命中缓存的输入）、`cache_creation_input_tokens` 及其细分 `cache_creation.ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens`、`cache_read_input_tokens`、`output_tokens`（含 thinking）、`server_tool_use.web_search_requests`、`speed`（`standard` / `fast`）、`service_tier`、`inference_geo`。没有细分字段的旧记录，缓存写入全按 5 分钟算。本机 `speed: fast` 有 422 条，`web_search_requests` 全为 0，`service_tier` 全为 standard，`inference_geo` 只有 `global` 和 `not_available`（没有要加价 1.1 倍的 US-only）。
 - **`usage.iterations`**：非空时，计费用量取所有项（包括 `type: "compaction"`）的 input、output、cache read 和 cache write 之和，不再叠加外层数字；每项的缓存写入按自己的 5m / 1h 细分，缺细分时全按 5 分钟算。缺失或空数组退回外层字段；web search 次数和 fast 标记仍取外层。官方语义中，服务端 compaction 项也计费，但不计入外层 token。2026-11-17 的参考样本里 130,936 次响应带明细，全部只有一个 `message` 项；其中 4 次 Opus 5.5 响应外层主要 token 全为 0、缓存写入细分仍有数，明细修正了漏计的 input / output / cache read。`fallback_credit`（拒答回退的抵扣）全为 null。
-- **计费与缓存判定的 prompt 分开**：索引里的 context 和长 prompt 计价分组仍按 `UsageRow::prompt_tokens()`（各项输入之和）。`prompt_of` 提供最后一个 `type: "message"` 项的三项输入总和与 cache read；没有 message 项则退回外层，供下一步缓存 tracker 接入，不能拿 compaction 的额外工作量作缓存比较基准。本机还没有 compaction 项，相关口径由 fixture 覆盖。
+- **计费与缓存判定的 prompt 分开**：索引里的 context 和长 prompt 计价分组仍按 `UsageRow::prompt_tokens()`（各项输入之和）。`prompt_of` 提供最后一个 `type: "message"` 项的三项输入总和与 cache read；没有 message 项则退回外层，供 `claude/cache.rs::CacheTracker` 判定，不能拿 compaction 的额外工作量作缓存比较基准。本机还没有 compaction 项，相关口径由 fixture 覆盖。
 - **解析口径升级与账本**：索引 schema 7 触发全量重建，旧索引用量先抢救进账本；重新解析后按响应主键覆盖 token，并重算该 session 的小时汇总。记录已删、无法重新解析的响应保留旧值；账本结构和版本不变。
 - 官方口径的副本在 `kb/refs/`：价格与缓存倍率 `claude-api-pricing.md`，usage 字段与缓存规则 `claude-api-prompt-caching.md`，`iterations` `claude-api-compaction-threshold.md`，Claude Code 的 TTL 分桶和失效动作 `claude-code-prompt-caching.md`。
 - **`<synthetic>` 不是 API 调用**：`message.model == "<synthetic>"` 的记录是 Claude Code 自己写的（中断、报错），usage 全 0，不计价，也不算进模型列表。
 - **subagent 的花费不能忽略**：257 份 subagent transcript 有 5,545 次响应，cache read 6.16 亿 token、cache write 3,157 万 token，折合几百美元。它们的记录 `isSidechain = true`；主 transcript 里没有 sidechain 的 assistant 记录。
 - **`[1m]` 标记不可靠**：`message.model` 从不带 `[1m]`，`cost-state.modelUsage` 的键有时带（`claude-opus-5[1m]`）。带不带标记都有 session 超过 200K（最高 827K），所以 context 窗口先查模型目录、再查内置表，不看标记，规则见 §1。
 - **`cost-state` 不适合当费用来源**：1,636 份文件里有，其中 670 份 `totalCostUSD = 0`，更早的 session 没有这条记录；被 resume 过的 session 常常只记了最后一次运行（例：一个 session 的记录只覆盖了 32M cache read 里的 3.1M）。它确实包含 subagent 的费用，而且单次运行内的计算口径与官方价格一致（1 小时缓存写入按 2 倍输入价，两份抽样精确到小数点后 6 位）。按 usage 自算后，在 973 个 `cost-state` 非 0 的 session 上：61% 误差在 1% 以内、96% 在 10% 以内，合计相差 1.07%（自算偏低）。偏低来自 transcript 之外的调用：Claude Code 文档写明 compact 的摘要请求、session 标题、部分辅助请求都是主对话之外的独立请求（`kb/refs/claude-code-prompt-caching.md`「Which TTL each request gets」），它们的 usage 不进 transcript；各自占多少未量过。2026-11-12 复测合计相差 −1.95%（1,954 个 session）。
+
+### 2.5 缓存重建判定
+
+详情 Reader 按 `message.id` 对主线调用去重，忽略 `<synthetic>`。从第一次出现的响应记录沿 `parentUuid` 找最近的其他调用，分块回复的每个 uuid 都参与关联，中间的 user / attachment 等记录也参与回溯；最多走 10,000 步，断链、无 uuid 或超限时退回文件里的上一次调用。与该祖先调用的 prompt 比较，本次少读缓存达到 10,000 token 才记重建，因此 rewind 放弃的后缀不算丢失。
+
+`api-request` 只保留计数、指纹、设置和时间，不保存消息正文。`keep` 是相对同一 `querySource` 的上一次请求，包含中断或出错而没有回复的请求；上一请求长度为它的 `keep + tail.len()`。system / 工具指纹和 beta 集合在内存里存哈希，beta 排序、去重后比较。字段缺失保留为未知，不把缺失与空列表混为一谈。
+
+原因按以下顺序取第一项：compact、模型变化、effort 变化、fast 切换、登录标记变化、其他 beta 设置变化、空闲超时、system / 工具变化、更早消息改写、请求未变却未命中、不明。effort / fast 要求两边都有字段；登录变化是 beta 集合中 `oauth-` 标记的有无变化，不推断实际登录动作；更早消息改写是本次 `keep` 小于同来源上一请求的长度。两次调用都有请求记录而没有更具体的原因时写「cache missed, request unchanged」，不推断服务端故障；缺请求记录时退回不明或其他不依赖请求记录的原因。
+
+compact 标记保留到之后第一次真正重建才消耗。compact 后已经有调用时，新的用户回合会清除标记；首次调用前的新用户回合保留标记，覆盖手动 compact 后继续提问的情况。summary 和 tool_result 不开启新回合，已接受计划的交接沿用 `opens_turn` 的回合定义。
+
+空闲间隔优先用两次请求的开始时间，任一缺失则退回两次回复的时间。缓存前缀按写入的 1h / 5m 分段保存：先截取本次读回的前缀，再追加 1h、5m 写入段，合并相邻同时长段。丢失段是第一个结束位置大于本次读取量的段，恰好在边界时取后段；超出已知分段取最后段，没有分段取 5m。间隔严格超过该段 TTL 才算空闲超时。说明行的写入量、费用取本次全部计费用量中的缓存写入，fast 取外层 speed，长 prompt 档位取最后一个 message 的 prompt。
 
 ## 3. 派生字段（每个 session 一行）
 

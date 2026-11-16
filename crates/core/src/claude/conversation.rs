@@ -1,18 +1,18 @@
 //! Direct transcript reading for the detail panel. No index, subprocesses or UI dependencies.
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use memchr::memchr_iter;
 use serde_json::{Map, Value};
 
+use super::cache::{CacheTracker, CallInput, RequestFacts};
 use super::clean::clean_prompt;
-use super::parse::{Content, RawBlock, SYNTHETIC_MODEL, map_file, parse_content, tokens_of, user_text};
+use super::parse::{Content, RawBlock, SYNTHETIC_MODEL, map_file, parse_content, prompt_of, tokens_of, user_text};
 use crate::format::parse_ts;
 use crate::model::*;
-use crate::pricing::{LONG_PROMPT, price, price_tokens};
-use crate::transcript::Message;
 use crate::search::{Highlighted, Matcher, regex::{ToolLine, ToolLineKind, stringify}};
 use crate::transcript::{Record, RecordFilter, is_interruption, is_local_command_output, opens_turn};
 
@@ -20,10 +20,6 @@ pub const ENTRY_CHARS: usize = 20_000;
 pub const RESULT_CHARS: usize = 3_000;
 pub const INPUT_FIELD_CHARS: usize = 2_000;
 pub const HIT_LEAD_CHARS: usize = 200;
-/// A call that reads this many tokens less than the call before it sent lost the cache. Real
-/// transcripts split cleanly: nearly every call drops under 1k, the breaks drop over 10k.
-pub const CACHE_BREAK_MIN: u64 = 10_000;
-const MINUTE_MS: i64 = 60_000;
 
 /// History contains prompts only; preserve every row, including commands and empty prompts.
 pub fn conversation_from_history(prompts: &[HistoryPrompt], matcher: Option<&Matcher>) -> Conversation {
@@ -131,19 +127,11 @@ struct Reader<'a> {
     tool_messages: HashSet<String>,
     calls: HashMap<String, (usize, usize)>,
     matcher: Option<&'a Matcher>,
-    cache: CacheTrack,
-}
-
-/// What the next API call is compared with to tell whether it reused the cache.
-#[derive(Default)]
-struct CacheTrack {
-    /// Responses already seen: one response can be written as several records.
-    responses: HashSet<String>,
-    /// (prompt tokens, model, time) of the last call.
-    last: Option<(u64, String, Option<i64>)>,
-    /// The last call that wrote to the cache wrote 1-hour entries.
-    hour: bool,
-    compacted: bool,
+    cache: CacheTracker,
+    parents: HashMap<String, Option<String>>,
+    call_of: HashMap<String, String>,
+    requests: HashMap<String, (Option<i64>, RequestFacts)>,
+    last_len: HashMap<Option<String>, u32>,
 }
 
 impl Reader<'_> {
@@ -184,10 +172,15 @@ impl Reader<'_> {
     fn record(&mut self, r: &Record, content: Content) {
         self.record_no += 1;
         let ts = r.timestamp.as_deref().and_then(parse_ts);
+        if let Some(uuid) = &r.uuid { self.parents.insert(uuid.clone(), r.parent_uuid.clone()); }
+        if r.kind.as_deref() == Some("api-request") {
+            self.request(r, ts);
+            return;
+        }
         if r.kind.as_deref() == Some("system") {
             match r.subtype.as_deref() {
                 Some("compact_boundary") => {
-                    self.cache.compacted = true;
+                    self.cache.compacted();
                     self.finish(); self.conv.items.push(ConvItem::Compact(Compaction { ts, summary: None }));
                 }
                 Some("turn_duration") if self.current.is_some() => {
@@ -210,7 +203,7 @@ impl Reader<'_> {
     fn user(&mut self, r: &Record, content: &Content, ts: Option<i64>) {
         let text = user_text(content).unwrap_or_default();
         if r.is_compact_summary {
-            self.cache.compacted = true;
+            self.cache.compacted();
             let summary = Some(Marked::new(&text, ENTRY_CHARS, self.matcher));
             if let Some(ConvItem::Compact(c)) = self.conv.items.iter_mut().rev().find(|i| matches!(i, ConvItem::Compact(_))) {
                 c.summary = summary;
@@ -230,6 +223,7 @@ impl Reader<'_> {
             self.ensure_turn(ts); self.candidate = None; self.turn().end = TurnEnd::Interrupted { ts }; return;
         }
         if opens_turn(&flags, content) {
+            self.cache.new_turn();
             self.number += 1;
             self.start(Some(self.number), None, ts, Marked::new(&clean_prompt(&text), ENTRY_CHARS, self.matcher), attachments(content));
         } else if let Some(origin) = r.origin.as_ref().and_then(|o| o.kind.as_deref()).filter(|k| *k != "human") {
@@ -259,7 +253,7 @@ impl Reader<'_> {
 
     fn assistant(&mut self, r: &Record, content: &Content, ts: Option<i64>) {
         let message = r.message.as_ref().unwrap();
-        self.cache_check(message, ts);
+        self.track_cache(r, ts);
         if r.is_api_error || r.is_aborted {
             self.ensure_turn(ts); self.candidate = None;
             self.turn().end = if r.is_api_error {
@@ -295,40 +289,55 @@ impl Reader<'_> {
         }
     }
 
-    /// Compare an API call with the one before it; a lost cache is recorded on the current turn.
-    fn cache_check(&mut self, message: &Message, ts: Option<i64>) {
-        let (Some(id), Some(model), Some(usage)) = (&message.id, message.model.as_deref(), &message.usage) else { return };
-        if model == SYNTHETIC_MODEL || !self.cache.responses.insert(id.clone()) { return; }
-        let tokens = tokens_of(usage);
-        if let Some((prompt, last_model, last_ts)) = self.cache.last.take() {
-            let dropped = prompt.saturating_sub(tokens.cache_read);
-            if dropped >= CACHE_BREAK_MIN {
-                let gap_ms = ts.zip(last_ts).map_or(0, |(t, last)| t - last);
-                let ttl_ms = if self.cache.hour { 60 * MINUTE_MS } else { 5 * MINUTE_MS };
-                let cause = if self.cache.compacted {
-                    CacheBreakCause::Compaction
-                } else if last_model != model {
-                    CacheBreakCause::ModelSwitch { from: last_model }
-                } else if gap_ms > ttl_ms {
-                    CacheBreakCause::Idle { gap_ms, ttl_ms }
-                } else {
-                    CacheBreakCause::Unknown
-                };
-                let writes = Tokens { cache_write_5m: tokens.cache_write_5m, cache_write_1h: tokens.cache_write_1h, ..Tokens::default() };
-                let fast = usage.speed.as_deref() == Some("fast");
-                let cost_usd = price(model).map(|p| price_tokens(&p, &writes, fast, tokens.input_total() > LONG_PROMPT).total());
-                let written = tokens.cache_write_5m + tokens.cache_write_1h;
-                self.ensure_turn(ts);
-                self.turn().cache_breaks.push(CacheBreak { ts, dropped, written, cost_usd, cause });
+    fn request(&mut self, r: &Record, ts: Option<i64>) {
+        let prev_len = self.last_len.insert(r.query_source.clone(), r.keep.unwrap_or(0)
+            .saturating_add(r.tail.as_ref().map_or(0, |tail| tail.len() as u32)));
+        let Some(id) = &r.id else { return; };
+        let betas = r.params.as_ref().and_then(|p| p.betas.as_ref()).map(|betas| {
+            let mut sorted: Vec<_> = betas.iter().collect();
+            sorted.sort_unstable(); sorted.dedup();
+            sorted
+        });
+        let facts = RequestFacts {
+            shape: r.shape_hash.as_ref().map(fingerprint),
+            betas: betas.as_ref().map(fingerprint),
+            sign_in: betas.as_ref().map(|items| items.iter().any(|b| b.starts_with("oauth-"))),
+            keep: r.keep, prev_len,
+        };
+        self.requests.insert(id.clone(), (ts, facts));
+    }
+
+    fn ancestor_call(&self, r: &Record, id: &str) -> Option<String> {
+        let mut ancestor = r.parent_uuid.as_ref();
+        for _ in 0..10_000 {
+            let uuid = ancestor?;
+            if let Some(candidate) = self.call_of.get(uuid).filter(|candidate| candidate.as_str() != id) {
+                return Some(candidate.clone());
             }
+            ancestor = self.parents.get(uuid).and_then(Option::as_ref);
         }
-        if tokens.cache_write_1h > 0 {
-            self.cache.hour = true;
-        } else if tokens.cache_write_5m > 0 {
-            self.cache.hour = false;
+        None
+    }
+
+    fn track_cache(&mut self, r: &Record, ts: Option<i64>) {
+        let message = r.message.as_ref().unwrap();
+        let (Some(id), Some(model), Some(usage)) = (&message.id, message.model.as_deref(), &message.usage) else { return; };
+        if model == SYNTHETIC_MODEL { return; }
+        // Every block's uuid participates in ancestry, even when its response was already seen.
+        if let Some(uuid) = &r.uuid { self.call_of.insert(uuid.clone(), id.clone()); }
+        if self.cache.contains(id) { return; }
+        let parent = self.ancestor_call(r, id);
+        let request = r.request_ref.as_ref().and_then(|id| self.requests.get(id));
+        let (prompt, read) = prompt_of(usage);
+        let call = CallInput {
+            msg_id: id.clone(), parent, ts, start_ts: request.and_then(|(ts, _)| *ts),
+            model: model.to_owned(), effort: r.effort.clone(), speed: usage.speed.as_deref().map(str::to_owned),
+            tokens: tokens_of(usage), prompt, read, request: request.map(|(_, facts)| facts.clone()),
+        };
+        if let Some(rebuilt) = self.cache.call(&call) {
+            self.ensure_turn(ts);
+            self.turn().cache_breaks.push(rebuilt);
         }
-        self.cache.last = Some((tokens.input_total(), model.to_owned(), ts));
-        self.cache.compacted = false;
     }
 
     fn text(&mut self, text: &str, id: &MessageKey, pure: bool, ts: Option<i64>) {
@@ -359,6 +368,12 @@ impl Reader<'_> {
     }
 }
 
+fn fingerprint(value: &impl Hash) -> u64 {
+    let mut hash = DefaultHasher::new();
+    value.hash(&mut hash);
+    hash.finish()
+}
+
 fn attachments(content: &Content) -> Vec<Attachment> {
     let Content::Blocks(blocks) = content else { return Vec::new() };
     blocks.iter().filter_map(|b| {
@@ -376,7 +391,8 @@ pub fn read_conversation(path: &Path, matcher: Option<&Matcher>) -> Result<Conve
     let mut reader = Reader {
         conv: Conversation { history_only: false, items: Vec::new(), bytes: bytes.len() as u64, skipped_lines: 0 },
         current: None, number: 0, record_no: 0, candidate: None, tool_messages: HashSet::new(), calls: HashMap::new(), matcher,
-        cache: CacheTrack::default(),
+        cache: CacheTracker::default(), parents: HashMap::new(), call_of: HashMap::new(),
+        requests: HashMap::new(), last_len: HashMap::new(),
     };
     let mut filter = RecordFilter::for_file(path);
     let mut start = 0;

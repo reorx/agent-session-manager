@@ -8,3 +8,5 @@ pub mod paths;
 pub mod model_catalog;
 
 pub mod conversation;
+
+pub mod cache;

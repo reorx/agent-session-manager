@@ -114,6 +114,19 @@ pub(crate) struct Record<'a> {
     #[serde(rename = "type")]
     pub(crate) kind: Option<String>,
     pub(crate) uuid: Option<String>,
+    #[serde(rename = "parentUuid")]
+    pub(crate) parent_uuid: Option<String>,
+    #[serde(rename = "requestRef")]
+    pub(crate) request_ref: Option<String>,
+    pub(crate) effort: Option<String>,
+    pub(crate) id: Option<String>,
+    #[serde(rename = "querySource")]
+    pub(crate) query_source: Option<String>,
+    #[serde(rename = "shapeHash")]
+    pub(crate) shape_hash: Option<String>,
+    pub(crate) keep: Option<u32>,
+    pub(crate) tail: Option<Vec<serde::de::IgnoredAny>>,
+    pub(crate) params: Option<RequestParams>,
     pub(crate) subtype: Option<String>,
     #[serde(rename = "isMeta", default)]
     pub(crate) is_meta: bool,
@@ -136,6 +149,11 @@ pub(crate) struct Record<'a> {
     pub(crate) origin: Option<Origin>,
     #[serde(borrow)]
     pub(crate) message: Option<Message<'a>>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RequestParams {
+    pub(crate) betas: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]

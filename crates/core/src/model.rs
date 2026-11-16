@@ -441,7 +441,7 @@ pub struct Turn {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CacheBreak {
     pub ts: Option<i64>,
-    /// Tokens of the previous call's prompt that this call did not read from the cache.
+    /// Tokens of the ancestor call's prompt that this call did not read from the cache.
     pub dropped: u64,
     /// Tokens this call wrote to the cache.
     pub written: u64,
@@ -451,11 +451,23 @@ pub struct CacheBreak {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheBreakCause {
-    /// The context was compacted since the call before.
+    /// First actual rebuild after compaction, unless a later user turn cleared the marker.
     Compaction,
-    /// The call before ran on another model, which has a cache of its own.
+    /// The baseline ancestor ran on another model, which has a cache of its own.
     ModelSwitch { from: String },
-    /// Longer since the call before than the cache lives: 5 minutes, or an hour for 1-hour writes.
+    /// Both calls declare effort, and the values differ.
+    EffortChange { from: String, to: String },
+    /// Both calls declare speed, and exactly one is fast.
+    FastMode { on: bool },
+    /// Request beta sets differ; sign_in means oauth marker presence changed.
+    RequestSettings { sign_in: bool },
+    /// Request system/tool fingerprints differ.
+    SystemOrTools,
+    /// The request retained fewer messages than the preceding request of its source.
+    EarlierMessages,
+    /// Available request facts show no change explaining the miss.
+    RequestUnchanged,
+    /// Request-start gap (reply gap if either start is absent) exceeds the first lost segment's TTL.
     Idle { gap_ms: i64, ttl_ms: i64 },
     /// Nothing in the transcript explains it.
     Unknown,
