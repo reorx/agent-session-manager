@@ -65,13 +65,28 @@ pub fn encode_project_path(path: &str) -> String {
     path.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect()
 }
 
-/// Where the SQLite index lives by default.
+/// Where the app's SQLite index lives by default: `$ASM_DB`, else `index.sqlite` in the data
+/// directory.
 pub fn default_db_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("ASM_DB").filter(|v| !v.is_empty()) {
-        return PathBuf::from(p);
-    }
+    asm_db().unwrap_or_else(|| data_dir().join("index.sqlite"))
+}
+
+/// Where the `asm` CLI's index lives by default: `$ASM_DB`, else `index-cli.sqlite` next to the
+/// app's index. While the CLI's index is a newer schema than the released app's, sharing one
+/// file would rebuild it from scratch each time the other opens it; the two are merged again
+/// when the app ships with the CLI (plan `2026-11-15-asm-skill-and-cli`, P4).
+pub fn default_cli_db_path() -> PathBuf {
+    asm_db().unwrap_or_else(|| data_dir().join("index-cli.sqlite"))
+}
+
+fn asm_db() -> Option<PathBuf> {
+    std::env::var_os("ASM_DB").filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
+/// The app's data directory: the indexes, the favorites and their configuration.
+fn data_dir() -> PathBuf {
     match directories::ProjectDirs::from("dev", "reorx", "AgentSessionManager") {
-        Some(dirs) => dirs.data_dir().join("index.sqlite"),
-        None => home_dir().join(".agent-session-manager").join("index.sqlite"),
+        Some(dirs) => dirs.data_dir().to_path_buf(),
+        None => home_dir().join(".agent-session-manager"),
     }
 }

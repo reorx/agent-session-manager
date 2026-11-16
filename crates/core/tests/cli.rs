@@ -779,7 +779,7 @@ fn search_says_what_could_be_widened_when_nothing_is_found() {
          try: --in all for every kind · without --project · without --tool\n"
     );
     assert_eq!(first_two(&["nothing here", "--in", "all", "-d", "0"]), "0 sessions · terms [nothing here] · in prompt,reply,thinking,tool-input,tool-output,other · all time · 0.00s\ntry: other ways of saying each TERM\n");
-    let meta = json_out(asm(&sb).args(["search", "nothing here", "-p", "nope", "--json"]))["meta"].clone();
+    let meta = json_out(asm(&sb).args(["search", "nothing here", "-p", "alpha", "--json"]))["meta"].clone();
     assert_eq!(meta["hints"], serde_json::json!(["--in all for every kind", "without --project"]));
 }
 
@@ -1094,4 +1094,306 @@ fn projects_json_carries_the_fields_cli_md_lists() {
     let meta = &v["meta"];
     assert_eq!((meta["total"].as_u64(), meta["shown"].as_u64(), meta["truncated"].as_bool()), (Some(3), Some(1), Some(true)));
     assert_eq!(meta["range"]["since"], "2026-09-04T00:00:00+00:00");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rework R1 of the commands for agents
+
+/// A transcript of `records` under `projects/<key>/`; its mtime is `mtime` (unix ms), or now.
+fn write_transcript(sb: &Sandbox, key: &str, id: &str, records: &[serde_json::Value], mtime: Option<i64>) -> std::path::PathBuf {
+    let path = sb.root().join("projects").join(key).join(format!("{id}.jsonl"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let lines: Vec<String> = records.iter().map(|r| r.to_string()).collect();
+    std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+    if let Some(ms) = mtime {
+        set_mtime(&path, ms);
+    }
+    path
+}
+
+/// A record of session `id`; `ts` and `cwd` are left out when `None`.
+fn record(kind: &str, id: &str, uuid: &str, message: serde_json::Value, ts: Option<&str>, cwd: Option<&str>) -> serde_json::Value {
+    let mut r = serde_json::json!({"type": kind, "message": message, "uuid": uuid, "sessionId": id, "gitBranch": "main"});
+    if let Some(ts) = ts {
+        r["timestamp"] = ts.into();
+    }
+    if let Some(cwd) = cwd {
+        r["cwd"] = cwd.into();
+    }
+    r
+}
+
+fn user_text(text: &str) -> serde_json::Value {
+    serde_json::json!({"role": "user", "content": text})
+}
+
+fn reply_text(msg_id: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({"role": "assistant", "model": "claude-opus-5", "id": msg_id, "content": [{"type": "text", "text": text}]})
+}
+
+const DELTA: &str = "/Users/me/Code/delta";
+const MTIME_DELTA: i64 = 1789_862_400_000; // 2026-09-20T00:00:00Z
+
+/// `asm()`'s environment on a plain command, for a command that needs its own stdout or shell.
+fn with_asm_env(mut cmd: std::process::Command, sb: &Sandbox) -> std::process::Command {
+    cmd.env("ASM_CLAUDE_DIR", sb.root())
+        .env("ASM_DB", sb.db_path())
+        .env("TZ", "UTC")
+        .env("NO_COLOR", "1")
+        .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CLAUDE_CODE_SESSION_ID");
+    cmd
+}
+
+#[test]
+fn session_shows_the_last_prompt_a_person_wrote_not_a_task_notification() {
+    let sb = sandbox();
+    let id = "77777777-aaaa-4bbb-8ccc-000000000007";
+    let notification = "<task-notification>\n<task-id>b9s8pilxu</task-id>\n<status>completed</status>\n<summary>Background command \"cargo test\" completed</summary>\n</task-notification>";
+    let ts = |s: &str| Some(format!("2026-09-20T00:0{s}.000Z"));
+    let records = [
+        record("user", id, "u1", user_text("Fix the login page"), ts("0:00").as_deref(), Some(DELTA)),
+        record("assistant", id, "a1", reply_text("m1", "On it."), ts("0:01").as_deref(), Some(DELTA)),
+        record("user", id, "u2", user_text("<system-reminder>\nbe nice\n</system-reminder>\n好的，提交吧"), ts("1:00").as_deref(), Some(DELTA)),
+        record("assistant", id, "a2", reply_text("m2", "Committed, the tests run in the background."), ts("1:01").as_deref(), Some(DELTA)),
+        {
+            let mut r = record("user", id, "u3", user_text(notification), ts("2:00").as_deref(), Some(DELTA));
+            r["origin"] = serde_json::json!({"kind": "task-notification"});
+            r
+        },
+        record("assistant", id, "a3", reply_text("m3", "The tests passed."), ts("2:01").as_deref(), Some(DELTA)),
+    ];
+    write_transcript(&sb, "-Users-me-Code-delta", id, &records, None);
+    let (code, stdout, stderr) = run(asm(&sb).args(["session", id]));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(stdout.contains("\n  first prompt: Fix the login page\n  last prompt:  好的，提交吧\n"), "{stdout}");
+    assert!(stdout.contains("\n  turns:        2 (3 prompts)\n"), "the notification is no turn either: {stdout}");
+    let s = json_out(asm(&sb).args(["session", id, "--json"]))["session"].clone();
+    assert_eq!((s["first_prompt"].as_str(), s["last_prompt"].as_str()), (Some("Fix the login page"), Some("好的，提交吧")));
+
+    // a session Claude Code kept only in history.jsonl has its last prompt from there
+    let (_, stdout, _) = run(asm(&sb).args(["session", "4444"]));
+    assert!(stdout.contains("\n  last prompt:  [Pasted text #3 +9 lines]\n"), "{stdout}");
+}
+
+#[test]
+fn search_for_a_project_that_does_not_exist_suggests_only_dropping_it() {
+    let sb = sandbox();
+    let (code, stdout, stderr) = run(asm(&sb).args(["search", "parser", "nested", "-p", "nope", "--in", "prompt", "-d", "7"]));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(steady(&stdout), "0 sessions · terms [parser] [nested] · in prompt · project nope · last 7 days · 0.00s\ntry: without --project\n");
+    let meta = json_out(asm(&sb).args(["search", "nothing here", "-p", "nope", "-p", "nada", "--json"]))["meta"].clone();
+    assert_eq!(meta["hints"], serde_json::json!(["without --project"]));
+    // a project that exists, with nothing in range: every hint that applies
+    let (_, stdout, _) = run(asm(&sb).args(["search", "parser", "-p", "alpha", "-d", "7"]));
+    assert_eq!(
+        steady(&stdout),
+        "0 sessions · terms [parser] · in prompt,reply,thinking · project alpha · last 7 days · 0.00s\ntry: --days 0 for all time · --in all for every kind · without --project\n"
+    );
+}
+
+#[test]
+fn search_titles_a_session_by_its_first_prompt_or_no_prompt_and_labels_snippets_without_turn_or_time() {
+    let sb = sandbox();
+    let id = "77777777-aaaa-4bbb-8ccc-000000000007";
+    add_session(&sb, std::path::Path::new(DELTA), id, "Fix the login page\nand the logout button", Some(MTIME_DELTA));
+    let (code, stdout, stderr) = run(asm(&sb).args(["search", "logout"]));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(steady(&stdout), format!("\
+1 session · terms [logout] · in prompt,reply,thinking · all time · 0.00s
+
+{id}
+  updated 2026-09-20 00:00 · started 2026-09-20 00:00 · delta (main) · 1 turn
+  title: Fix the login page
+  hits: prompt 1 · reply 0 · thinking 0
+  [prompt · turn 1 · 09-20 00:00] Fix the login page⏎and the «logout» button
+  resume: claude --resume {id}
+"));
+
+    // no prompt with text: a pasted image; a reply before the first prompt has no turn, and no
+    // time without a timestamp (nor a start, as the first record has none)
+    let id = "88888888-aaaa-4bbb-8ccc-000000000008";
+    let image = serde_json::json!({"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}]});
+    let records = [
+        record("assistant", id, "a0", reply_text("m0", "Warming up the quokka cache."), None, Some(DELTA)),
+        record("user", id, "u1", image, Some("2026-09-20T00:00:00.000Z"), Some(DELTA)),
+        record("assistant", id, "a1", reply_text("m1", "The quokka is smiling."), Some("2026-09-20T00:00:05.000Z"), Some(DELTA)),
+    ];
+    write_transcript(&sb, "-Users-me-Code-delta", id, &records, Some(MTIME_DELTA));
+    let (code, stdout, stderr) = run(asm(&sb).args(["search", "quokka"]));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert_eq!(steady(&stdout), format!("\
+1 session · terms [quokka] · in prompt,reply,thinking · all time · 0.00s
+
+{id}
+  updated 2026-09-20 00:00 · delta (main) · 1 turn
+  title: (no prompt)
+  hits: prompt 0 · reply 2 · thinking 0
+  [reply] Warming up the «quokka» cache.
+  [reply · turn 1 · 09-20 00:00] The «quokka» is smiling.
+  resume: claude --resume {id}
+"));
+    let r = json_out(asm(&sb).args(["search", "quokka", "--json"]))["results"][0].clone();
+    assert_eq!((r["title"].is_null(), r["first_prompt"].is_null()), (true, true));
+    assert_eq!((r["snippets"][0]["turn"].is_null(), r["snippets"][0]["time"].is_null()), (true, true));
+}
+
+#[test]
+fn session_card_names_the_first_tools_and_files_and_dashes_what_is_unknown() {
+    let sb = sandbox();
+    let id = "77777777-aaaa-4bbb-8ccc-000000000007";
+    let dir = "/Users/me/Code/eps";
+    let tool = |n: usize, name: &str| serde_json::json!({"type": "tool_use", "id": format!("t{n}"), "name": name, "input": {}});
+    let tools: Vec<serde_json::Value> =
+        ["Bash", "Bash", "Read", "Edit", "Write", "Grep", "Glob", "Task", "TodoWrite", "WebFetch"].iter().enumerate().map(|(n, name)| tool(n, name)).collect();
+    let mut records = vec![
+        record("user", id, "u1", user_text("Tidy up the eps crate"), None, Some(dir)),
+        record("assistant", id, "a1", serde_json::json!({"role": "assistant", "model": "claude-opus-5", "id": "m1", "content": tools}), None, Some(dir)),
+    ];
+    for n in 1..=11 {
+        records.push(serde_json::json!({"type": "file-history-delta", "trackingPath": format!("{dir}/src/f{n:02}.rs"), "backup": {"backupFileName": null, "version": 1}}));
+    }
+    write_transcript(&sb, "-Users-me-Code-eps", id, &records, Some(MTIME_DELTA));
+    let (code, stdout, stderr) = run(asm(&sb).args(["session", id]));
+    assert_eq!(code, Some(0), "{stderr}");
+    let row = |label: &str| stdout.lines().find(|l| l.starts_with(&format!("  {label}:"))).unwrap_or_else(|| panic!("no {label} row: {stdout}")).to_string();
+    assert_eq!(row("tools"), "  tools:        Bash 2 · Edit 1 · Glob 1 · Grep 1 · Read 1 · Task 1 · TodoWrite 1 · WebFetch 1 (+1 more)");
+    assert_eq!(
+        row("files"),
+        "  files:        11 changed: src/f01.rs, src/f02.rs, src/f03.rs, src/f04.rs, src/f05.rs, src/f06.rs, src/f07.rs, src/f08.rs, src/f09.rs, src/f10.rs (+1 more)"
+    );
+    assert_eq!(row("started"), "  started:      —");
+    assert_eq!(row("cost"), "  cost:         —");
+    let s = json_out(asm(&sb).args(["session", id, "--json"]))["session"].clone();
+    assert_eq!((s["files"].as_array().map(Vec::len), s["tools"].as_object().map(|t| t.len())), (Some(11), Some(9)), "JSON is not cut");
+}
+
+#[test]
+fn search_json_meta_scan_has_the_keys_cli_md_names() {
+    let sb = sandbox();
+    let spec = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../skills/asm/references/cli.md")).unwrap();
+    let row = spec.lines().find(|l| l.starts_with("| `meta.scan` |")).expect("a meta.scan row");
+    let read = &row[row.find("what it read:").expect("the keys after 'what it read:'")..row.find("; `null`").unwrap()];
+    let named: std::collections::BTreeSet<String> = regex::Regex::new(r"`([a-z_]+)`").unwrap().captures_iter(read).map(|c| c[1].to_string()).collect();
+    assert_eq!(named.len(), 4, "{read}");
+    let scan = json_out(asm(&sb).args(["search", "cargo", "--in", "tool", "-d", "0", "--json"]))["meta"]["scan"].clone();
+    let keys: std::collections::BTreeSet<String> = scan.as_object().expect("scan is an object with the scan engine").keys().cloned().collect();
+    assert_eq!(keys, named);
+    assert!(scan.as_object().unwrap().values().all(|v| v.is_u64()), "{scan}");
+    assert_eq!((scan["files"].as_u64(), scan["skipped_files"].as_u64()), (Some(4), Some(3)), "{scan}");
+    assert!(scan["bytes"].as_u64() > scan["skipped_bytes"].as_u64(), "{scan}");
+}
+
+#[test]
+fn search_does_not_need_the_current_directory_unless_a_project_is_relative() {
+    let sb = sandbox();
+    let gone = sb.tmp.path().join("gone");
+    std::fs::create_dir(&gone).unwrap();
+    let asm_in_gone_dir = |args: &str| {
+        let script = format!("cd '{d}' && rmdir '{d}' && exec '{asm}' {args}", d = gone.display(), asm = assert_cmd::cargo::cargo_bin("asm").display());
+        let mut sh = std::process::Command::new("/bin/sh");
+        sh.args(["-c", &script]);
+        let out = with_asm_env(sh, &sb).output().unwrap();
+        std::fs::create_dir(&gone).unwrap();
+        (out.status.code(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    let (code, stdout, stderr) = asm_in_gone_dir("search parser --snippets 0");
+    assert_eq!((code, stderr.as_str()), (Some(0), ""));
+    assert!(steady(&stdout).starts_with("1 session · terms [parser] · "), "{stdout}");
+    for p in ["/Users/me/Code/alpha", "~/Code", "alpha"] {
+        let (code, _, stderr) = asm_in_gone_dir(&format!("search parser -p '{p}'"));
+        assert_eq!((code, stderr.as_str()), (Some(0), ""), "{p}");
+    }
+    let (code, stdout, stderr) = asm_in_gone_dir("search parser -p ./x");
+    assert_eq!((code, stdout.as_str()), (Some(1), ""));
+    assert_eq!(stderr, "--project ./x is relative, and the current directory cannot be read: No such file or directory (os error 2)\n");
+}
+
+#[test]
+fn session_with_an_empty_id_is_an_invalid_argument() {
+    let sb = sandbox();
+    for args in [&["session", ""][..], &["session", "  "], &["session", "", "--json"]] {
+        let (code, stdout, stderr) = run(asm(&sb).args(args));
+        assert_eq!((code, stdout.as_str(), stderr.as_str()), (Some(2), "", "error: ID is empty\n"), "{args:?}");
+    }
+    assert!(!sb.db_path().exists(), "invalid arguments never open the index");
+}
+
+#[test]
+fn a_project_whose_path_is_unknown_is_listed_by_a_name_that_works_as_project() {
+    let sb = sandbox();
+    let (key, id) = ("-Users-me-Code-lost", "99999999-aaaa-4bbb-8ccc-000000000009");
+    let records = [
+        record("user", id, "u1", user_text("Where did the zebra go?"), Some("2026-09-20T00:00:00.000Z"), None),
+        record("assistant", id, "a1", reply_text("m1", "It went home."), Some("2026-09-20T00:00:01.000Z"), None),
+    ];
+    write_transcript(&sb, key, id, &records, Some(MTIME_DELTA));
+    let (_, stdout, _) = run(asm(&sb).arg("projects"));
+    let line = stdout.lines().nth(1).unwrap().to_string();
+    assert_eq!(line, format!("2026-09-20 00:00    1 session   {key}"));
+    let printed = line.rsplit("  ").next().unwrap();
+    let project = json_out(asm(&sb).args(["projects", "--json"]))["results"][0].clone();
+    assert_eq!((project["project_path"].is_null(), project["project"].as_str(), project["project_key"].as_str()), (true, Some(key), Some(key)));
+    let joined = format!("--project={printed}");
+    for args in [&["-p", printed][..], &["--project", printed], &[joined.as_str()]] {
+        let (code, stdout, stderr) = run(asm(&sb).args(["search", "zebra", "--snippets", "0"]).args(args));
+        assert_eq!(code, Some(0), "{args:?}: {stderr}");
+        assert!(steady(&stdout).starts_with(&format!("1 session · terms [zebra] · in prompt,reply,thinking · project {key} · all time · 0.00s\n\n{id}\n")), "{args:?}: {stdout}");
+    }
+    // the next word after -p is its value; the option after that value is still an option
+    let v = json_out(asm(&sb).args(["search", "zebra", "-p", printed, "--json"]));
+    assert_eq!((v["meta"]["projects"].clone(), v["meta"]["total"].as_u64()), (serde_json::json!([key]), Some(1)));
+}
+
+#[test]
+fn without_asm_db_the_cli_keeps_an_index_of_its_own_next_to_the_apps() {
+    let sb = sandbox();
+    let home = sb.tmp.path().join("home");
+    std::fs::create_dir(&home).unwrap();
+    let data = home.join("Library/Application Support/dev.reorx.AgentSessionManager");
+    let (code, stdout, stderr) = run(asm(&sb).arg("projects").env_remove("ASM_DB").env("HOME", &home));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(steady(&stdout).starts_with("3 projects · all time · "), "{stdout}");
+    assert!(data.join("index-cli.sqlite").is_file(), "the CLI's index");
+    assert!(!data.join("index.sqlite").exists(), "the app's index is left alone");
+    // the favorites (and their configuration) stay the app's: next to both indexes
+    let (_, stdout, _) = run(asm(&sb).arg("favorites-dir").env_remove("ASM_DB").env("HOME", &home));
+    assert_eq!(stdout, format!("{}\n", data.join("favorites").display()));
+    // --db still chooses (as ASM_DB does in every other test)
+    let other = sb.tmp.path().join("other.sqlite");
+    let (code, _, stderr) = run(asm(&sb).args(["projects", "--db"]).arg(&other).env_remove("ASM_DB").env("HOME", &home));
+    assert_eq!(code, Some(0), "{stderr}");
+    assert!(other.is_file());
+}
+
+#[test]
+fn output_cut_short_by_its_reader_is_not_an_error() {
+    let sb = sandbox();
+    // enough output to fill the 8 KB write buffer of each command below
+    let ids: Vec<String> = (0..200).map(|i| format!("99999999-aaaa-4bbb-8ccc-{i:012}")).collect();
+    for (i, id) in ids.iter().enumerate() {
+        let dir = format!("/Users/me/Code/p{i:03}");
+        add_session(&sb, std::path::Path::new(&dir), id, &format!("Fix the login page {}", "and the rest ".repeat(80)), Some(MTIME_DELTA));
+    }
+    let mut failed = Vec::new();
+    for (bin, args) in [
+        ("asm", &["search", "login", "-n", "0"][..]),
+        ("asm", &["search", "login", "-n", "0", "--json"]),
+        ("asm", &["search", "login", "--in", "all", "-d", "0", "-n", "0"]),
+        ("asm", &["projects", "-n", "0"]),
+        ("asm", &["projects", "-n", "0", "--json"]),
+        ("asm", &["transcript", &ids[0]]),
+        ("asm", &["search-old", "login", "-d", "0"]),
+        ("transcript-reader", &[&ids[0]]),
+    ] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let mut cmd = with_asm_env(std::process::Command::new(assert_cmd::cargo::cargo_bin(bin)), &sb);
+        let out = cmd.args(args).stdout(writer).stderr(std::process::Stdio::piped()).output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if (out.status.code(), stderr.as_ref()) != (Some(0), "") {
+            failed.push(format!("{bin} {args:?}: exit {:?}, {stderr:?}", out.status.code()));
+        }
+    }
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
 }

@@ -12,6 +12,7 @@ use serde_json::{Map, Value};
 
 use super::Highlighted;
 use super::query::{Query, TermMask, has_non_ascii_case, indexes};
+use crate::claude::clean::clean_prompt;
 use crate::cost::primary_model;
 use crate::index::Db;
 use crate::model::{SessionSummary, TextKind};
@@ -227,7 +228,7 @@ impl ProjectMatcher {
     /// A directory when `arg` is `.` or `..`, contains `/` or starts with `~`; else text.
     /// Relative directories are taken from `cwd`, `~` is `home`.
     pub fn parse(arg: &str, cwd: &Path, home: &Path) -> ProjectMatcher {
-        if !(arg == "." || arg == ".." || arg.contains('/') || arg.starts_with('~')) {
+        if !is_directory(arg) {
             return ProjectMatcher::Text(arg.to_lowercase());
         }
         let path = if arg == "~" {
@@ -240,6 +241,12 @@ impl ProjectMatcher {
         let written = normalize_path(&path);
         let resolved = resolve_symlinks(&written).filter(|r| *r != written);
         ProjectMatcher::Dir { written, resolved }
+    }
+
+    /// `parse` takes `arg` from the current directory: a relative directory. Asking for the
+    /// current directory only then lets a search run from one that was deleted.
+    pub fn needs_cwd(arg: &str) -> bool {
+        is_directory(arg) && !(arg == "~" || arg.starts_with("~/")) && !Path::new(arg).is_absolute()
     }
 
     fn matches(&self, path: Option<&str>, key: &str, resolve: &mut impl FnMut(&str) -> Option<PathBuf>) -> bool {
@@ -261,6 +268,11 @@ impl ProjectMatcher {
             }
         }
     }
+}
+
+/// `--project P` names a directory, not text in project paths.
+fn is_directory(arg: &str) -> bool {
+    arg == "." || arg == ".." || arg.contains('/') || arg.starts_with('~')
 }
 
 /// The path with symlinks resolved as far as it exists: its longest existing ancestor is
@@ -436,6 +448,21 @@ fn shown(limit: usize, total: usize) -> usize {
 pub fn turn_count(db: &Db, session_id: &str) -> Result<u32> {
     let mut stmt = db.conn().prepare_cached("SELECT count(*) FROM messages WHERE session_id = ?1 AND kind = 'prompt'")?;
     Ok(stmt.query_row([session_id], |r| r.get(0))?)
+}
+
+/// The session's last prompt with text, cleaned of injected tags: the last `prompt` row, so never
+/// a task notification or a compact summary (the parser's `SessionSummary::last_prompt` counts
+/// those, the reference script's way). `None` without one, as for a history-only session.
+pub fn last_prompt(db: &Db, session_id: &str) -> Result<Option<String>> {
+    let mut stmt = db.conn().prepare_cached("SELECT text FROM messages WHERE session_id = ?1 AND kind = 'prompt' AND text <> '' ORDER BY byte_offset DESC")?;
+    let mut rows = stmt.query([session_id])?;
+    while let Some(row) = rows.next()? {
+        let text = clean_prompt(&row.get::<_, String>(0)?);
+        if !text.is_empty() {
+            return Ok(Some(text));
+        }
+    }
+    Ok(None)
 }
 
 /// Search `sessions` (from `select_sessions`).

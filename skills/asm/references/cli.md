@@ -25,7 +25,7 @@ These go before or after the command name and apply to every command.
 | Option | Values | Default | Meaning |
 |---|---|---|---|
 | `--claude-dir DIR` | directory | `$ASM_CLAUDE_DIR`, else `$CLAUDE_CONFIG_DIR`, else `~/.claude` | Claude Code data directory to read |
-| `--db FILE` | file | `$ASM_DB`, else `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite` | The SQLite index (shared with the app) |
+| `--db FILE` | file | `$ASM_DB`, else `~/Library/Application Support/dev.reorx.AgentSessionManager/index-cli.sqlite` | The SQLite index, see Where the index is |
 | `--color WHEN` | `auto`, `always`, `never` | `auto` | ANSI colors. `auto`: only when stdout is a terminal and `NO_COLOR` is unset or empty. `always` wins over `NO_COLOR` |
 | `--no-color` | — | — | Same as `--color never`, and wins over `--color` when both are given |
 | `--version`, `--help` | — | — | Print the version (`asm 0.1.0`) or the help, then exit 0. The version is the crate's and never changes, so it cannot tell what the CLI can do; see Checking the CLI below |
@@ -40,6 +40,16 @@ describes; an older one exits 2 (unrecognized subcommand). Do not check with
 `asm search --help`: older binaries have a `search` too, with other options. When this reference
 adds commands, it names the one to check here.
 
+### Where the index is
+
+While these commands are developed, `asm` keeps an index of its own, `index-cli.sqlite`, next to
+the app's `index.sqlite` in `~/Library/Application Support/dev.reorx.AgentSessionManager/`: the
+CLI's index has a newer layout than the released app's, and one file shared by both would be
+rebuilt from scratch whenever the other opened it. The two are merged again when the app ships
+with these commands (plan P4). `--db` / `ASM_DB` still pick any file, the app's included.
+Favorites and their settings live in the same directory and stay shared: a session favorited in
+the app is a favorite here too.
+
 ### The index and the write lock
 
 A command that reads the index first brings it up to date with the files on disk (an incremental
@@ -47,7 +57,7 @@ scan, usually under 0.2 s); `--no-scan` skips that step where the command offers
 index no scan has gone through yet (see below). `stats` never refreshes. `transcript`, `search-old` without `--index` and `session-old --conversation` read the
 record files and do not touch the index at all.
 
-The app may be writing the same index. When the scan cannot get the write lock within 2 seconds,
+Another `asm` process, or the app when `--db` points at its index, may be writing the same index. When the scan cannot get the write lock within 2 seconds,
 the command drops the scan, prints one line on stderr and answers from the index as it is:
 
 ```
@@ -239,7 +249,7 @@ When a command fails (exit 1) with `--json`, stdout carries
 
 | Code | Meaning |
 |---|---|
-| 0 | Success, including zero results |
+| 0 | Success, including zero results, and output its reader stopped reading (`asm … \| head`): nothing is printed about the closed pipe |
 | 1 | Error: no session matches an ID, an ambiguous ID prefix, an unreadable file, an index error |
 | 2 | Invalid arguments (unknown option, bad value, options that cannot go together); the message is on stderr |
 
@@ -264,7 +274,7 @@ asm search TERM... [--in KINDS] [--tool NAME]... [--regex] [--same-message]
 | `--regex` | — | off | Each TERM is a regular expression, see TERMs |
 | `--same-message` | — | off | All TERMs must occur in one item (see Items) |
 | `-d, --days N`, `--since DATE`, `--until DATE` | see Time range | all time when every kind searched is `prompt`, `reply`, `thinking` or `other` and `--regex` is off; else the last 30 days | Sessions active in this range |
-| `-p, --project P` | directory or text, repeatable | all projects | Only these projects, see Projects below. Several: any of them |
+| `-p, --project P` | directory or text, repeatable | all projects | Only these projects, see Projects below. Several: any of them. The next word is always P, also one starting with `-` (an encoded directory name) |
 | `--model M` | model, e.g. `opus-5-5` or `claude-opus-5-5` | all | Only sessions whose main model (the one that cost the most, as in `asm cost --model`) is M |
 | `--favorites` | — | off | Only favorite sessions |
 | `--include-self` | — | off | Include the current session (see The current session) |
@@ -290,12 +300,17 @@ Projects (`--project P`):
   It selects the project at that directory and the projects inside it. Paths are compared both
   as written and with symlinks resolved, on either side, so `/tmp/x` and `/private/tmp/x` are
   the same project. For a directory that no longer exists, the symlinks in the part of its path
-  that still exists are resolved (a deleted `/tmp/x` is still `/private/tmp/x`). Every path
-  `asm projects` prints works as P.
+  that still exists are resolved (a deleted `/tmp/x` is still `/private/tmp/x`). Only a
+  relative path reads the current directory: when it cannot be read (it was deleted since the
+  shell went there), the command fails (exit 1) and says so; other values of P, and no P, work
+  from such a directory.
 - Anything else is text: projects whose path, or encoded directory name under `projects/`,
   contains it (case-insensitive).
-- When no project matches, the result is 0 sessions with `try: without --project`, not an error
-  (unlike `asm list`).
+- Every value `asm projects` prints works as P as printed, with `-p` too: a path, or the encoded
+  directory name (`-Users-me-Code-x`) of a project whose path is unknown.
+- When no project matches (no session in the index is in a project P selects, at any time), the
+  result is 0 sessions, not an error (unlike `asm list`), and `try:` is only `without --project`:
+  widening anything else would find nothing either.
 
 Counting: a hit is one item (see Items) that contains at least one TERM. `hits` counts them per
 kind; their sum is what `--sort hits` sorts by.
@@ -349,6 +364,7 @@ Text output:
   kind was searched), `fewer terms` (more than one TERM), `without --same-message`,
   `without --project` / `--tool` / `--model` / `--favorites` (each one given). When none of
   these applies (all time, every kind, one TERM, no filter), it is `other ways of saying each TERM`.
+  When no project matches `--project`, it is only `without --project` (see Projects).
 
 JSON output (`--json`):
 
@@ -427,7 +443,7 @@ JSON output (`--json`):
 | `meta.total`, `meta.shown`, `meta.truncated` | Sessions found, sessions in `results`, whether the limit cut the list |
 | `meta.hints` | The `try:` suggestions of an empty result, each as a string; empty otherwise |
 | `title` | The session's title, else the first line of its first prompt, cut as in the text output (one line, at most 120 characters); `null` when there is neither |
-| `first_prompt` | The first prompt, cleaned of injected tags, at most 2,000 characters (`…` when cut) |
+| `first_prompt` | The first prompt as `asm session` defines it (the first user line with text, cleaned of injected tags), at most 2,000 characters (`…` when cut); `null` when there is none |
 | `project` | Last component of `project_path` (else of `cwd`, else the encoded directory name under `projects/`) |
 | `project_path`, `cwd` | The project directory and the working directory the session started in |
 | `turns` | Number of turns, counted where the snippets' turn numbers come from (the index, or the transcript as the scan read it), so no snippet's turn is above it |
@@ -459,7 +475,7 @@ asm session ID [--json] [--no-scan]
 
 | Option | Values | Default | Meaning |
 |---|---|---|---|
-| `ID` | full session ID or a unique prefix | required | The session |
+| `ID` | full session ID or a unique prefix | required | The session. An empty or blank ID is an invalid argument (exit 2, `error: ID is empty`), not a prefix of every session |
 | `--json` | — | off | JSON output |
 | `--no-scan` | — | off | Do not refresh the index first |
 
@@ -490,6 +506,11 @@ Text output:
 ```
 
 - Prompts are one line of at most 300 characters. A missing value is `—`.
+- `first prompt`: the first user line with text, cleaned of injected tags, as the app's table
+  and `asm list` show it. `last prompt`: the last prompt (see Text kinds) with text, cleaned of
+  injected tags, so never a task notification, a compact summary or an interruption marker; for a
+  history-only session, the last prompt in `history.jsonl`. The app's Last prompt can differ:
+  it takes the last user line with text, the reference script's way.
 - `turns`: turns as defined above, then in parentheses the Prompts count of the app's table and
   of `asm list`, which counts user-side lines the reference script's way (task notifications and
   compact summaries included, images pasted without text not), so the two differ either way.
@@ -561,7 +582,7 @@ JSON output:
 
 | Field | Meaning |
 |---|---|
-| `first_prompt`, `last_prompt` | Cleaned of injected tags, at most 2,000 characters (`…` when cut) |
+| `first_prompt`, `last_prompt` | As in the text lines, at most 2,000 characters (`…` when cut); `null` when there is none |
 | `turns`, `prompts` | As in the `turns` line |
 | `tools` | Every tool with its call count |
 | `files` | Every file written or edited, as in the `files` line but not cut |
@@ -577,7 +598,8 @@ The other fields are as in `asm search`. With an ambiguous prefix, stderr has on
 `{ "error": { "code": "ambiguous", "message": "...", "candidates": [{ "session_id": "...", "updated_at": "...", "title": "..." }] } }`
 (all candidates, not only 20); with no match, `code` is `not_found`.
 
-Exit codes: 0; 1 when no session or several sessions match; 2 for invalid arguments.
+Exit codes: 0; 1 when no session or several sessions match; 2 for invalid arguments, an empty ID
+included.
 
 ### asm projects
 
@@ -608,7 +630,8 @@ Text output:
 - First line: `N projects`, `(showing M)` when cut, the range label, the elapsed time.
 - One line per project: last activity, the number of sessions active in the range (all of the
   project's sessions without a range, history-only ones included), and the project path (the
-  encoded directory name when the path is unknown). The path works as a `--project` value.
+  encoded directory name, starting with `-`, when the path is unknown). Either works as a
+  `--project` value as printed, `-p -Users-me-Code-x` included.
 - Ties in last activity go by path. When the limit cut the list, the last line is
   `showing 50 of 216 projects, use -n for more`.
 - The current session is left out of the counts and of the last activity unless

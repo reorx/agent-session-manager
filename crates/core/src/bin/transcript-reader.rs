@@ -22,6 +22,10 @@ fn main() -> ExitCode {
     let claude = cli.claude_dir.map(ClaudeDir::new).unwrap_or_else(ClaudeDir::from_env);
     match transcript::run(cli.args, &claude, &agent_session_core::claude::paths::default_db_path(), &mut std::io::stdout().lock()) {
         Ok(()) => ExitCode::SUCCESS,
+        // the reader of stdout went away (`transcript-reader ID | head`): not a failure
+        Err(error) if error.chain().any(|c| c.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)) => {
+            ExitCode::SUCCESS
+        }
         Err(error) if error.is::<transcript::UsageError>() => {
             eprintln!("error: {error}");
             ExitCode::from(2)

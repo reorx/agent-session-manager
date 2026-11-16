@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use agent_session_core::claude::paths::{ClaudeDir, default_db_path};
+use agent_session_core::claude::paths::{ClaudeDir, default_cli_db_path};
 use agent_session_core::index::{Db, Indexer, Progress, ScanReport, is_busy};
 use agent_session_core::search::Highlighted;
 use anyhow::Result;
@@ -40,7 +40,8 @@ struct Cli {
     /// Claude data directory (default: $CLAUDE_CONFIG_DIR or ~/.claude)
     #[arg(long, env = "ASM_CLAUDE_DIR", global = true)]
     claude_dir: Option<PathBuf>,
-    /// SQLite index file (default: ~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite)
+    /// SQLite index file (default: index-cli.sqlite in ~/Library/Application Support/dev.reorx.AgentSessionManager,
+    /// next to the app's index.sqlite)
     #[arg(long, env = "ASM_DB", global = true)]
     db: Option<PathBuf>,
     /// When to print ANSI colors; auto: only when stdout is a terminal and NO_COLOR is unset or empty
@@ -153,7 +154,7 @@ fn main() -> ExitCode {
         Some(dir) => ClaudeDir::new(dir),
         None => ClaudeDir::from_env(),
     };
-    let db_path = cli.db.clone().unwrap_or_else(default_db_path);
+    let db_path = cli.db.clone().unwrap_or_else(default_cli_db_path);
     let mut app = App { claude, db_path, pal: Palette::new(color), out: std::io::BufWriter::new(std::io::stdout()) };
     let result = match cli.cmd {
         Cmd::Search(args) => app.find_sessions(args),
@@ -173,6 +174,7 @@ fn main() -> ExitCode {
     let _ = app.out.flush();
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        Err(e) if is_broken_pipe(&e) => ExitCode::SUCCESS,
         // invalid arguments found after parsing: exit 2, worded like clap's own
         Err(e) if e.is::<agent::UsageError>() || e.is::<transcript::UsageError>() => {
             eprintln!("error: {e}");
@@ -183,6 +185,12 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// The reader of stdout went away before the output ended (`asm … | head`): it has what it
+/// wanted, so the command succeeded.
+fn is_broken_pipe(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| cause.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe))
 }
 
 /// What happened to the index before a command answered (`meta.index_refresh`).

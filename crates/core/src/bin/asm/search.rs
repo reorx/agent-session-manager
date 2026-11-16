@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use agent_session_core::claude::clean::one_line;
@@ -57,8 +58,9 @@ pub struct SearchArgs {
     same_message: bool,
     #[command(flatten)]
     range: RangeArgs,
-    /// Only these projects: a directory, or text in project paths (repeatable)
-    #[arg(short = 'p', long = "project", value_name = "P")]
+    /// Only these projects: a directory, or text in project paths (repeatable). The next word is
+    /// the value even when it starts with `-`, as an encoded directory name does
+    #[arg(short = 'p', long = "project", value_name = "P", allow_hyphen_values = true)]
     projects: Vec<String>,
     /// Only sessions whose main model is this, e.g. opus-5-5
     #[arg(long, value_name = "M")]
@@ -93,6 +95,8 @@ struct Found<'a> {
     kinds: &'a KindSet,
     range: Range,
     excluded: Option<String>,
+    /// `--project` was given and selects no session at all, at any time.
+    no_such_project: bool,
     refresh: Refresh,
     outcome: SearchOutcome,
     sessions: HashMap<&'a str, &'a SessionSummary>,
@@ -116,7 +120,7 @@ impl App {
             eprintln!("term {} is not a valid regular expression, matched as literal text", i + 1);
         }
         let excluded = excluded_session(args.include_self);
-        let (cwd, home) = (std::env::current_dir()?, home_dir());
+        let (cwd, home) = (current_dir_for(&args.projects)?, home_dir());
         let filter = SessionFilter {
             projects: args.projects.iter().map(|p| ProjectMatcher::parse(p, &cwd, &home)).collect(),
             since_ms: range.since_ms,
@@ -133,8 +137,22 @@ impl App {
         };
         let opts = SearchOptions { snippets: args.snippets, sort, limit: args.limit, ..SearchOptions::default() };
         let outcome = search(&db, &selected, &query, &kinds, &opts)?;
+        let no_such_project = outcome.total == 0
+            && !filter.projects.is_empty()
+            && select_sessions(&db, &SessionFilter { projects: filter.projects.clone(), ..SessionFilter::default() })?.is_empty();
         let sessions = selected.iter().map(|s| (s.id.as_str(), s)).collect();
-        let found = Found { args, query: &query, kinds: &kinds, range, excluded, refresh, outcome, sessions, elapsed_ms: started.elapsed().as_millis() };
+        let found = Found {
+            args,
+            query: &query,
+            kinds: &kinds,
+            range,
+            excluded,
+            no_such_project,
+            refresh,
+            outcome,
+            sessions,
+            elapsed_ms: started.elapsed().as_millis(),
+        };
         match args.json {
             true => self.search_json(&found),
             false => self.search_text(&found),
@@ -310,8 +328,19 @@ fn snippet_label(hit: &Hit) -> String {
     label
 }
 
-/// What an empty result could widen, in the order of the spec.
+/// The current directory, read only when a `--project` is relative to it: a search run from a
+/// directory deleted since needs it for nothing else.
+fn current_dir_for(projects: &[String]) -> Result<PathBuf> {
+    let Some(relative) = projects.iter().find(|p| ProjectMatcher::needs_cwd(p)) else { return Ok(PathBuf::new()) };
+    std::env::current_dir().map_err(|e| anyhow::anyhow!("--project {relative} is relative, and the current directory cannot be read: {e}"))
+}
+
+/// What an empty result could widen, in the order of the spec. A project that does not exist
+/// leaves only that to drop: widening anything else finds nothing either.
 fn hints(f: &Found) -> Vec<String> {
+    if f.no_such_project {
+        return vec!["without --project".into()];
+    }
     let a = f.args;
     let mut out: Vec<&str> = Vec::new();
     if f.range.limited() {

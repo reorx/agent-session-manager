@@ -17,7 +17,7 @@ use chrono::{Local, NaiveDate, SecondsFormat, TimeZone};
 use clap::Args;
 use serde_json::{Value, json};
 
-use crate::{App, Palette};
+use crate::{App, Palette, is_broken_pipe};
 
 /// Characters of a title in text output.
 pub const TITLE_LEN: usize = 120;
@@ -283,17 +283,19 @@ impl std::fmt::Display for LookupError {
 impl std::error::Error for LookupError {}
 
 impl App {
+    /// Serialized first, so that a failed write is an I/O error (`main` tells a closed pipe).
     pub(crate) fn write_json(&mut self, value: &Value) -> Result<()> {
-        serde_json::to_writer_pretty(&mut self.out, value)?;
-        writeln!(self.out)?;
+        let text = serde_json::to_string_pretty(value)?;
+        writeln!(self.out, "{text}")?;
         Ok(())
     }
 
     /// With `--json`, a failure (exit 1) also goes to stdout as `{ "error": … }`; stderr gets
-    /// the same message. Invalid arguments (exit 2) only go to stderr.
+    /// the same message. Invalid arguments (exit 2) only go to stderr, and a closed stdout is
+    /// left to `main`.
     pub(crate) fn fail_as_json(&mut self, json: bool, result: Result<()>) -> Result<()> {
         let Err(e) = result else { return Ok(()) };
-        if !json || e.is::<UsageError>() {
+        if !json || e.is::<UsageError>() || is_broken_pipe(&e) {
             return Err(e);
         }
         let (error, message) = match e.downcast_ref::<LookupError>() {

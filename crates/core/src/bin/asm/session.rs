@@ -10,13 +10,13 @@ use agent_session_core::cost::primary_model;
 use agent_session_core::format::{fmt_datetime, fmt_tokens, fmt_usd};
 use agent_session_core::model::SessionSummary;
 use agent_session_core::pricing::context_window;
-use agent_session_core::search::sessions::turn_count;
+use agent_session_core::search::sessions::{last_prompt, turn_count};
 use agent_session_core::session::{SessionKind, files_touched};
 use anyhow::Result;
 use clap::Args;
 use serde_json::{Map, Value, json};
 
-use crate::agent::{LookupError, favorite_copy_only, json_prompt, plural, project_name, resume, resume_text, rfc3339, title};
+use crate::agent::{LookupError, favorite_copy_only, json_prompt, plural, project_name, resume, resume_text, rfc3339, title, usage};
 use crate::App;
 
 /// Characters of a prompt in text output.
@@ -41,6 +41,9 @@ pub struct SessionArgs {
 /// What the card shows beyond the index row.
 struct Card {
     turns: u32,
+    /// The last prompt with text (see `last_prompt`); from `history.jsonl` for a history-only
+    /// session, which has no prompt rows.
+    last_prompt: Option<String>,
     /// Context window of the model of the last main-thread call.
     window: Option<u64>,
     favorite_copy: bool,
@@ -55,6 +58,10 @@ impl App {
 
     fn session_card_inner(&mut self, args: &SessionArgs) -> Result<()> {
         let started = Instant::now();
+        // an empty prefix would match every session (an unset shell variable, say)
+        if args.id.trim().is_empty() {
+            return Err(usage("ID is empty"));
+        }
         let (db, refresh) = self.open_db_refreshed(!args.no_scan)?;
         let mut found = db.find_by_prefix(&args.id)?;
         let s = match found.len() {
@@ -68,6 +75,7 @@ impl App {
         let catalog = ModelCatalog::load(&self.claude);
         let card = Card {
             turns: turn_count(&db, &s.id)?,
+            last_prompt: if s.history_only() { s.last_prompt.clone() } else { last_prompt(&db, &s.id)? },
             window: s.context_model.as_deref().and_then(|m| context_window(&catalog, m)),
             favorite_copy: favorite_copy_only(&s, &self.claude),
         };
@@ -87,7 +95,7 @@ impl App {
         let mut rows: Vec<(&str, String)> = vec![
             ("title", title(s).unwrap_or_else(|| NONE.into())),
             ("first prompt", prompt(Some(&s.first_prompt))),
-            ("last prompt", prompt(s.last_prompt.as_deref())),
+            ("last prompt", prompt(card.last_prompt.as_deref())),
             ("project", or_none(s.project_path.as_deref())),
             ("cwd", or_none(s.cwd.as_deref())),
             ("branch", or_none(s.git_branch.as_deref())),
@@ -131,7 +139,7 @@ impl App {
             "session_id": s.id,
             "title": title(s),
             "first_prompt": json_prompt(Some(&s.first_prompt)),
-            "last_prompt": json_prompt(s.last_prompt.as_deref()),
+            "last_prompt": json_prompt(card.last_prompt.as_deref()),
             "project": project_name(s),
             "project_path": s.project_path,
             "cwd": s.cwd,
