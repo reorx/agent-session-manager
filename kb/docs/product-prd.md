@@ -46,7 +46,7 @@ tags:
 | Preview 展示模式切换 | ✅ | 工具栏 Preview 下拉或 `cmd-1..4`，四种模式即时切换 |
 | 详情面板 | ✅ Metadata / ✅ Conversation / ✅ Cost / ✅ 操作入口 | 头部 + 三个 tab（Cost 见上方「成本分析」）；Metadata 为真实数据（含自算费用与 Claude Code 记录的费用、token 用量、context、时长、模型、权限模式、top 工具、修改过的文件）；Conversation 2026-10-27 完成 M4a：直接读记录文件，按回合卡显示全部对话（工具调用、thinking、AUTO、compact、打断与 API 错误），命中在哪都能跳过去，扫描期间照常显示，70MB 的 session 首帧 45–79ms（release，页缓存热；冷的一般 150–160ms）。M4b 同日完成：标题行操作按钮（收藏、复制 resume 命令、复制 ID、在 Finder 中显示、打开项目目录、导出 TXT），表格右键菜单提供同一组操作，`⌘C` / `⇧⌘C`；History session 显示 history.jsonl 里的 prompt 卡片；代码块是等宽框、行内代码等宽浅灰底；`[` / `]` 按回合跳转（`../plans/2026-10-26-m4-detail-panel.md`）。2026-11-12：Metadata 的 Tokens 行带一位小数的缓存命中率；Conversation 标出缓存失效的回合（重写了多少 token、花了多少、原因是空闲超时 / compact / 换模型 / 不明），顶部摘要给出次数（`../plans/2026-11-12-columns-and-cache-breaks.md`） |
 | 分栏与折叠 | ✅ | 拖拽调宽，快捷键折叠 |
-| 状态栏 | ✅ | 左：显示数 / 总数 · 显示行的费用合计 · 今天的费用（2026-11-16，`Today $X`，4:00 起全部调用，来自用量账本，不受过滤影响）；中：操作状态 + 索引状态（loading / indexing n / m / 完成摘要 / 错误）；右：消息数、DB 大小、首批行上屏耗时 |
+| 状态栏 | ✅ | 左：显示数 / 总数 · 显示行的费用合计 · 今天的费用（2026-11-16，`Today $X`，4:00 起全部调用，来自用量账本，不受过滤影响；点它打开 Usage 的 Today；Usage 视图里左侧只有它，右侧是口径 `by API response time · day starts 04:00`）；中：操作状态 + 索引状态（loading / indexing n / m / 完成摘要 / 错误）；右：消息数、DB 大小、首批行上屏耗时 |
 | 搜索框与范围切换 | ✅ | 搜索框（`cmd-f` 聚焦、Enter 回到表格、`esc` 清空）、Scope 多选、`.*` 正则开关、`Aa` 大小写、Labels 多选；选项重启后保留 |
 | 时间范围过滤 | ✅ | Updated 下拉：Today / 3 / 7 / 30 days / Any time / This month / Last month / 自定义起止日期，即时过滤；2026-11-16 起一天从本地 4:00 开始，应用开着跨过 4:00 时自动换到新的一天 |
 | 项目过滤 | ✅ 单选 + 隐藏项目 | Project 下拉按最近活动列出真实项目与 session 数；可把噪音项目（如 CodexBar 的 `ClaudeProbe`）整个隐藏并随时恢复；多选、可搜索、worktree 聚合待做 |
@@ -55,8 +55,9 @@ tags:
 | 全文搜索、正则搜索 | ✅ | 文本模式 FTS5（2–40ms，两字 CJK 走 LIKE 约 20ms）、正则模式流式扫描 transcript（2GB 记录文件，260–530ms，带 Tools 范围时已到 500ms 的目标线）；Matches 列、高亮片段、详情内命中跳转（命中在工具输入输出、thinking 里也能跳到）。`asm search` 命令行同样可用 |
 | 真实数据读取与索引 | ✅ | 解析器、增量 SQLite 索引、history.jsonl 补位、损坏自动重建；界面热启动约 200ms 出表（5488 行），冷索引 1.27GB 约 4s 且表格流式填充；Index 菜单可手动 Scan / Rebuild |
 | 实时更新 | 🟡 定时 | 2026-11-16：应用开着时自动增量扫描（窗口回到前台、每 10 分钟，30 秒内只扫一次），有变化才刷新表格；关掉窗口后照常扫描；不监听文件。用量账本见 `../plans/2026-11-16-usage-stats/usage-ledger.md` |
-| 常驻菜单栏 | ✅ | 2026-11-16：启动后菜单栏有一个图标和今天的费用（取整到美元）；红色按钮和 `⌘W` 只隐藏窗口，Dock 图标随之消失，应用留在菜单栏继续扫描；菜单里有今天的费用、In / Out、上次扫描的时刻，Open Sessions、Scan Now、Quit；从菜单或 Finder 重开时窗口和关掉前一样。见 4.10 与 `../plans/2026-11-16-usage-stats/menubar-resident.md` |
-| 快捷键与菜单 | ✅ 部分 | 退出、`cmd-w` 关窗（留在菜单栏）、折叠详情面板、`cmd-f`、`cmd-1..4`、`cmd-shift-r` 重建索引、`cmd-c` / `cmd-shift-c` 复制 ID / resume 命令、`[` / `]` 按回合跳转；File 菜单的 Close Window；View 菜单可显示 / 隐藏没有 prompt 的空 session；表格行有右键菜单。启动后和窗口重开后焦点在表格上，不需要先点击就能用快捷键 |
+| 常驻菜单栏 | ✅ | 2026-11-16：启动后菜单栏有一个图标和今天的费用（取整到美元）；红色按钮和 `⌘W` 只隐藏窗口，Dock 图标随之消失，应用留在菜单栏继续扫描；菜单里有今天的费用、In / Out、上次扫描的时刻，Open Sessions、Open Usage、Scan Now、Quit；从 Finder 重开时窗口和关掉前一样。见 4.10 与 `../plans/2026-11-16-usage-stats/menubar-resident.md` |
+| Usage 视图 | 🟡 图表待做 | 2026-11-16：`⌃2` / 工具栏 `Usage` 切到用量视图：范围（Today / Yesterday / 7 / 30 days / This month / Last month / Custom），和会话表共用 Project / Kind / Model 过滤；五张指标卡（Cost / In / Out / Calls / Sessions，与上一段时间对比）、钱花在哪（按 token 种类）、按模型、按项目（点一行按项目过滤）、费用最高的 session；Usage 开着时每分钟扫描一次。按小时 / 按天的柱状图还是空白区域，点柱子看某一天待图表一起做。见 4.11 与 `../plans/2026-11-16-usage-stats/usage-view.md` |
+| 快捷键与菜单 | ✅ 部分 | 退出、`cmd-w` 关窗（留在菜单栏）、`ctrl-1` / `ctrl-2` 切换会话表与 Usage、折叠详情面板、`cmd-f`、`cmd-1..4`、`cmd-shift-r` 重建索引、`cmd-c` / `cmd-shift-c` 复制 ID / resume 命令、`[` / `]` 按回合跳转；File 菜单的 Close Window；View 菜单可显示 / 隐藏没有 prompt 的空 session；表格行有右键菜单。启动后和窗口重开后焦点在表格上，不需要先点击就能用快捷键 |
 | 设置与状态持久化 | ✅ 视图状态 / ⬜ 设置页 | 项目与时间过滤（含自定义区间）、排序、Preview 模式、空 session 开关、详情面板开合、选中行存 `state.json`，下次启动恢复 |
 | 安装与自动更新 | ✅ | 2026-10-28 发布 1.0：Homebrew cask（`brew install --cask reorx/tap/agent-session-manager`）或 GitHub Release 的 dmg，Apple Silicon、macOS 14 起，Developer ID 签名并经 Apple 公证；应用内每天检查一次更新（也可菜单 Check for Updates…），用户确认后安装并重启；About 面板显示版本。见 `release.md` |
 | 精简 TXT 导出 | ✅ CLI / ✅ GUI | 2026-10-10 完成 Transcript Reader：通过 Session ID、唯一前缀或文件路径导出用户输入、最终回复与工具计数，去掉思考和工具结果，见 `../notes/2026-10-10-transcript-reader.md`；2026-10-27 GUI 完成：详情标题行的导出按钮或右键菜单弹出系统保存对话框，内容与 CLI 相同；同日起被用户打断留下的 `[Request interrupted by user]` 不再当成用户输入导出 |
@@ -174,7 +175,7 @@ Branch、Tools、ID 不作为列，只在详情面板的 Metadata 里显示（�
 
 ### 4.7 快捷键与菜单 ✅ 部分
 
-已实现：`cmd-q` 退出、`cmd-w` 关掉窗口（应用留在菜单栏，File 菜单的 Close Window 同样）、`cmd-\` 折叠 / 展开详情面板、`cmd-f` 聚焦搜索框、`cmd-1..4` 切换展示模式，对应 App 菜单与 View 菜单。M4 新增（表格有焦点时）：`cmd-c` 复制 session ID、`cmd-shift-c` 复制 resume 命令（搜索框里的 `cmd-c` 仍是复制文字）、`[` / `]` 按回合跳转。
+已实现：`cmd-q` 退出、`cmd-w` 关掉窗口（应用留在菜单栏，File 菜单的 Close Window 同样）、`ctrl-1` / `ctrl-2` 切到会话表 / Usage（View 菜单最上面两项，搜索框里也能用；Usage 里 `cmd-f` 先回会话表再聚焦搜索框，会话表专用的快捷键不起作用）、`cmd-\` 折叠 / 展开详情面板、`cmd-f` 聚焦搜索框、`cmd-1..4` 切换展示模式，对应 App 菜单与 View 菜单。M4 新增（表格有焦点时）：`cmd-c` 复制 session ID、`cmd-shift-c` 复制 resume 命令（搜索框里的 `cmd-c` 仍是复制文字）、`[` / `]` 按回合跳转。
 
 M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebuild Index），View 菜单的空 session 开关。
 
@@ -182,7 +183,7 @@ M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebui
 
 ### 4.8 状态栏 ✅ 部分
 
-22px 等宽字体。左：当前显示 N / 总 M 个 session 与这 N 个 session 的费用合计（搜索时只合计命中的），再加今天的费用：`42 / 5488 sessions · $123.45 · Today $203.69`。Today 是今天 4:00 以来全部 API 调用按当前价格表算的费用，来自用量账本（记录文件删了也还在），不受过滤和搜索影响；每次扫描后更新，过了 4:00 归零；有价格表里没有的模型时加 `(N unpriced)`，账本读不了时是 `Today —`；点击没有反应（Usage 视图在后续一期）。中：最近一次操作状态（过滤耗时等）+ 索引状态（`loading index…` / `indexing 598 / 941 files` / `index up to date · 941 files checked in 0.07s` / 错误信息）；右：已索引消息数、DB 大小、首批行上屏耗时。搜索时中间显示「N sessions · M matches」，右侧最前面是搜索耗时。待补充：生效过滤 chip。
+22px 等宽字体。左：当前显示 N / 总 M 个 session 与这 N 个 session 的费用合计（搜索时只合计命中的），再加今天的费用：`42 / 5488 sessions · $123.45 · Today $203.69`。Today 是今天 4:00 以来全部 API 调用按当前价格表算的费用，来自用量账本（记录文件删了也还在），不受过滤和搜索影响；每次扫描后更新，过了 4:00 归零；有价格表里没有的模型时加 `(N unpriced)`，账本读不了时是 `Today —`；点击切到 Usage 视图的 Today（两个视图里都可以点）；Usage 视图里左侧只显示 Today，右侧是口径说明。中：最近一次操作状态（过滤耗时等）+ 索引状态（`loading index…` / `indexing 598 / 941 files` / `index up to date · 941 files checked in 0.07s` / 错误信息）；右：已索引消息数、DB 大小、首批行上屏耗时。搜索时中间显示「N sessions · M matches」，右侧最前面是搜索耗时。待补充：生效过滤 chip。
 
 ### 4.9 设置 ⬜
 
@@ -193,11 +194,22 @@ M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebui
 2026-11-16 完成（`../plans/2026-11-16-usage-stats/menubar-resident.md`）。目的：应用开着就一直记账，关掉窗口也不停。
 
 - **菜单栏项**：一个单色的柱状图图标，后面是今天的费用取整到美元（`$204`，满千加逗号 `$1,204`），口径同状态栏的 Today。每次扫描后更新，过了 4:00 归零。账本读不了时只有图标。点它弹出菜单，不直接开窗口。
-- **菜单**：只读三行 `Today  $203.69`（有没有价格的模型时同状态栏加 `(N unpriced)`）、`In 492.7M · Out 2.4M`、`Scanned 15:53`（扫描中是 `Scanning…`，连续两次扫描失败或被 `asm` 的锁跳过时是 `Scan failed 16:13`）；然后 Open Sessions、Scan Now（扫描中置灰）、Quit Agent Session Manager。Open Usage 一项随 Usage 视图一起加。
+- **菜单**：只读三行 `Today  $203.69`（有没有价格的模型时同状态栏加 `(N unpriced)`）、`In 492.7M · Out 2.4M`、`Scanned 15:53`（扫描中是 `Scanning…`，连续两次扫描失败或被 `asm` 的锁跳过时是 `Scan failed 16:13`）；然后 Open Sessions、Open Usage（窗口打开并停在 Usage）、Scan Now（扫描中置灰）、Quit Agent Session Manager。
 - **关窗**：红色按钮、`⌘W`、File > Close Window 都只隐藏窗口；Dock 图标消失，`⌘Tab` 里也没有，菜单栏换回别的应用的菜单。后台线程、定时扫描、表格里的数据都还在。第一次关窗弹一个系统对话框说明「会留在菜单栏继续记录用量，要完全退出请按 ⌘Q」，按钮「好」/「立即退出」，选过之后不再弹（记在 `state.json`）。
 - **重开**：菜单的 Open Sessions，或在 Finder / Spotlight 里再打开应用。Dock 图标回来，窗口到最前，视图、过滤、排序、选中、搜索词、滚动位置都和关掉前一样，关掉期间扫到的变化已经在表格里；焦点在表格上，快捷键马上能用。
 - **退出**：`⌘Q`、应用菜单的 Quit、菜单栏菜单的 Quit；Sparkle 的 Install and Relaunch、注销、关机照常退出。
 - 用 Thaw / Bartender 这类菜单栏管理工具时，新的菜单栏项可能先被收进隐藏区，要在工具里把它拖到可见区。
+
+### 4.11 Usage 视图 🟡 图表待做
+
+和会话表共用一个窗口：工具栏最左边是 `Sessions | Usage` 切换（`⌃1` / `⌃2`、View 菜单同样），重启后停在上次的视图。数据来自用量账本，记录文件删了也还在。口径见 `../plans/2026-11-16-usage-stats/index.md`（按 API 响应时间归日，一天从 4:00 开始）。
+
+- **工具栏**：范围按钮 Today / Yesterday / 7 days / 30 days / This month / Last month，`Custom…` 后出现日期区间选择器；Project / Kind / Model 三个下拉和会话表是同一组过滤（Project 列出账本里所有有调用的项目，包括被隐藏的；Kind 只有 CLI / SDK / BG；Model 按调用数列出账本里所有模型）；右侧是数据的时刻 `as of 16:44`（扫描中是 `scanning…`）和立即扫描按钮。
+- **指标卡**：Cost（与上一段时间对比，今天比的是昨天的同一时刻之前；有没有价格的模型时注明多少调用未计价）、In（缓存读取占比、缓存写入、未缓存）、Out（对比）、Calls（每次调用的平均费用）、Sessions（涉及的项目数）。
+- **图表**：按小时（单天）或按天（多天），可切 Cost / In / Out / Hit rate，图例按模型着色；本期只有标题、指标切换和图例，绘图区域留白，点柱子看那一天的小时（Escape 返回）随图表一起做。
+- **下方四块**：钱花在哪（Cache read / Cache write / Output / Uncached input 的费用和占比，有 web search 时加一行）、按模型、按项目（前 7 个，其余合成一行；点一行按项目过滤，再点取消）、费用最高的 6 个 session（范围内的费用）。窗口窄于 960 时两列改成上下排列，整个视图可纵向滚动。
+- **空状态**：账本还没有数据时卡片是 `—`、图的位置写 `No usage recorded yet`；范围内没有调用时卡片是 `$0.00` / `0`，各表写 `No calls in this range`；账本不可用时整个视图只有一句说明。
+- **刷新**：切到 Usage 时扫一次（30 秒内扫过就不扫），Usage 开着时每分钟扫一次，回到会话表或关掉窗口后恢复每 10 分钟；没有变化时界面不动。Usage 显示期间搜索结果不重跑，回到会话表时才补上。
 
 ## 5. 核心使用流程
 

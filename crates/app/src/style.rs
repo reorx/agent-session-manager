@@ -297,3 +297,37 @@ pub fn cost_up() -> Hsla {
 pub fn cost_down() -> Hsla {
     hex(0x15803d)
 }
+
+/// Usage view: the chart's model colors by `usage::model_slot` (Opus 5.5, Sonnet 5.5, Fable 5.2,
+/// Haiku 5.5, earlier models), also the swatches of the legend and the model table.
+pub fn model_color(slot: usize) -> Hsla {
+    hex([0x2a78d6, 0xeb6834, 0x1baf7a, 0xeda100, 0xa3a3ab][slot.min(4)])
+}
+/// Usage view, "Where the money goes": a kind of token.
+pub fn token_cache_read() -> Hsla {
+    hex(0x6250d6)
+}
+pub fn token_cache_write() -> Hsla {
+    hex(0xe87ba4)
+}
+pub fn token_output() -> Hsla {
+    hex(0x008300)
+}
+pub fn token_input() -> Hsla {
+    hex(0xb8b8be)
+}
+pub fn token_web_search() -> Hsla {
+    hex(0x0e7490)
+}
+/// Usage view: the dashed box of the day before behind an hour's bar, the moving average.
+pub fn chart_ghost() -> Hsla {
+    hex(0xa9a9b0)
+}
+/// Usage view: a project's share bar on its track (`row_border`).
+pub fn share_bar() -> Hsla {
+    hex(0x9a9ca6)
+}
+/// Usage view: a card's note that some calls have no price.
+pub fn warn() -> Hsla {
+    hex(0xa16207)
+}

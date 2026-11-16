@@ -37,6 +37,7 @@ mod table;
 mod toolbar;
 mod turn_cards;
 mod updater;
+mod usage_view;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -48,26 +49,28 @@ use agent_session_core::format::{fmt_change, fmt_usd, human_size};
 use agent_session_core::pricing::display_name;
 use agent_session_core::index::ScanReport;
 use agent_session_core::search::Matcher;
-use agent_session_core::usage::{Totals, UsageData, day_start_ms};
+use agent_session_core::usage::{Totals, UsageData, UsageRange, day_start_ms};
 
 use chrono::{Local, NaiveDate};
 use gpui_kit::component::date_picker::{DatePickerEvent, DatePickerState};
 use gpui_kit::component::input::{Escape, InputEvent, InputState};
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::table::{ColumnSort, DataTable, TableEvent, TableState};
-use gpui_kit::component::{ResizableState, Root, Sizable, h_resizable, resizable_panel, v_flex};
+use gpui_kit::component::{ResizableState, Root, Sizable, h_flex, h_resizable, resizable_panel, v_flex};
 use gpui_kit::*;
 
 use crate::actions::{CopyResume, CopySessionId, ExportTranscript, HideProject, OpenProjectFolder, RevealTranscript};
 use crate::conversation::{Card, ConversationView};
 use crate::detail::{DETAIL_W, DetailState, DetailTab, Load};
-use crate::model::{DisplayMode, Filter, Kind, ModelEntry, ProjectEntry, RangePreset, SessionRow, kind_counts, model_entries, project_entries, split_hidden, today_at};
+use crate::model::{DisplayMode, Filter, Kind, MainView, ModelEntry, ProjectEntry, RangePreset, SessionRow, kind_counts, model_entries, project_entries, split_hidden, today_at};
 use crate::resident::{Resident, ResidentCommand, ResidentView, ScanRecord};
 use crate::search::{RowHit, SearchMode, SearchOptions, SearchSummary, Searcher};
 use crate::settings::{SortDir, ViewState, default_state_path};
 use crate::store::{Store, StoreEvent, StoreRequest};
 use crate::table::{PREVIEW_MIN_W, ROW_H, SessionTableDelegate, ShowAllColumns, ToggleColumn};
 use crate::updater::{About, CheckForUpdates};
+use crate::style::FluentBuilder;
+use crate::usage_view::UsageState;
 
 gpui_kit::actions!(
     app,
@@ -92,7 +95,10 @@ gpui_kit::actions!(
         Rescan,
         RebuildIndex,
         ToggleEmptySessions,
-        CloseWindow
+        CloseWindow,
+        ShowSessions,
+        ShowUsage,
+        LeaveDay
     ]
 );
 
@@ -104,6 +110,8 @@ const TABLE_CHROME_W: f32 = 16.;
 const AUTO_SCAN_MIN_GAP: Duration = Duration::from_secs(30);
 /// While the app is open and nothing else scanned, it scans this often.
 const AUTO_SCAN_IDLE: Duration = Duration::from_secs(600);
+/// … and this often while the Usage view is on screen.
+const USAGE_SCAN_IDLE: Duration = Duration::from_secs(60);
 /// The status bar when a scan cannot start because the store thread is gone (and no earlier
 /// error is on it).
 const STORE_GONE: &str = "cannot scan: the index is not open, restart the app";
@@ -120,6 +128,15 @@ enum IndexStatus {
     Scanning { done: usize, total: usize },
     Idle(SharedString),
     Failed(SharedString),
+}
+
+/// Why the search has to run again once the session table is back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum StaleSearch {
+    /// A scan reloaded the table: the same search, swapped in silently (`refresh_search`).
+    Refresh,
+    /// The filters changed: the sessions searched are others (`run_search`).
+    Rerun,
 }
 
 /// A session being opened in the detail panel, for the `detail:` timing line: from
@@ -214,6 +231,12 @@ pub struct AppRoot {
     quitting: bool,
     /// What the menu bar item shows, last pushed to it by `sync_resident`.
     resident_view: Option<ResidentView>,
+    /// The session table or the Usage view.
+    view: MainView,
+    usage_view: UsageState,
+    /// The search results are out of date and were not searched again while Usage was shown:
+    /// that happens on the way back to the session table (`set_view`).
+    search_stale: Option<StaleSearch>,
     launched: Instant,
     first_rows_ms: Option<u128>,
     state_path: PathBuf,
@@ -299,6 +322,12 @@ impl AppRoot {
             picker.set_date(shown_range, window, cx);
             picker
         });
+        let usage_shown_range = saved.usage_custom_range.unwrap_or_else(|| RangePreset::default_custom(usage_day));
+        let usage_picker = cx.new(|cx| {
+            let mut picker = DatePickerState::range(window, cx).date_format("%Y-%m-%d");
+            picker.set_date(usage_shown_range, window, cx);
+            picker
+        });
 
         let mut observed_sort = table.read(cx).delegate().sort_state();
         let subscriptions = vec![
@@ -329,6 +358,13 @@ impl AppRoot {
                     this.set_custom_range(start, end, cx);
                 }
                 this.focus_table(window, cx);
+            }),
+            cx.subscribe_in(&usage_picker, window, |this, _, ev: &DatePickerEvent, window, cx| {
+                let DatePickerEvent::Change(date) = ev;
+                if let (Some(start), Some(end)) = (date.start(), date.end()) {
+                    this.set_usage_custom_range(start, end, cx);
+                }
+                this.focus_view(window, cx);
             }),
             // back to the window after working elsewhere: show what happened meanwhile
             cx.observe_window_activation(window, |this, window, cx| {
@@ -372,18 +408,8 @@ impl AppRoot {
             false
         });
 
-        let auto_scan = cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(AUTO_SCAN_IDLE).await;
-                let alive = this.update(cx, |this, cx| {
-                    this.roll_day(now_ms(), cx);
-                    this.auto_scan("timer", cx);
-                });
-                if alive.is_err() {
-                    break;
-                }
-            }
-        });
+        let auto_scan = Self::spawn_auto_scan(cx);
+        let usage_view = UsageState::new(&saved, usage_picker, cx.focus_handle());
 
         let mut this = Self {
             claude: paths.claude,
@@ -441,6 +467,9 @@ impl AppRoot {
             notice_open: false,
             quitting: false,
             resident_view: None,
+            view: saved.view,
+            usage_view,
+            search_stale: None,
             launched: Instant::now(),
             first_rows_ms: None,
             state_path,
@@ -456,7 +485,7 @@ impl AppRoot {
             selection_event_count: None,
         };
         // a fresh window has no focus, and without one no key binding or menu action reaches the app
-        this.focus_table(window, cx);
+        this.focus_view(window, cx);
         this.sync_resident(cx);
         if std::env::var_os("ASM_FAVORITES_AUTOPLAY").is_some() {
             this._autoplay = Some(this.favorites_autoplay(window, cx));
@@ -572,8 +601,12 @@ impl AppRoot {
             self.roll_day(now_ms(), cx);
         }
         // a reload follows a scan that changed the index: the results on screen may be out of date
+        // (not searched while Usage is shown: Usage scans every minute, a regex search takes a while)
         if reloaded && self.searching() {
-            self.refresh_search(cx);
+            match self.view {
+                MainView::Sessions => self.refresh_search(cx),
+                MainView::Usage => self.search_went_stale(StaleSearch::Refresh),
+            }
         }
         self.sync_resident(cx);
         cx.notify();
@@ -720,6 +753,11 @@ impl AppRoot {
             selected_id: self.selected.as_ref().map(|r| r.id.to_string()).or_else(|| self.wanted_id.as_ref().map(|id| id.to_string())),
             search: self.search_opts.clone(),
             resident_notice_shown: self.resident_notice_shown,
+            view: self.view,
+            // a day clicked on the chart is not kept: the range it came from is
+            usage_range: if self.usage_view.range == UsageRange::Day { self.usage_view.back } else { self.usage_view.range },
+            usage_custom_range: self.usage_view.custom,
+            usage_metric: self.usage_view.metric,
         }
     }
 
@@ -788,6 +826,7 @@ impl AppRoot {
             self.set_range(self.range, cx);
         }
         self.refresh_today(now_ms);
+        self.refresh_usage(cx);
         self.sync_resident(cx);
         cx.notify();
     }
@@ -868,6 +907,8 @@ impl AppRoot {
         }
         self.window_hidden = true;
         println!("window: hidden");
+        // a hidden Usage view is not worth a scan a minute: back to every ten
+        self._auto_scan = Self::spawn_auto_scan(cx);
         cx.notify();
     }
 
@@ -886,16 +927,26 @@ impl AppRoot {
         if std::mem::take(&mut self.window_hidden) {
             println!("window: shown");
         }
-        self.focus_table(window, cx);
+        self.focus_view(window, cx);
         self.roll_day(now_ms(), cx);
         self.auto_scan("window shown", cx);
+        // back to every minute if Usage is on screen
+        self._auto_scan = Self::spawn_auto_scan(cx);
         cx.notify();
     }
 
     pub(crate) fn on_resident_command(&mut self, command: ResidentCommand, window: &mut Window, cx: &mut Context<Self>) {
         println!("menu bar: {command:?}");
         match command {
-            ResidentCommand::OpenSessions => self.show_window(window, cx),
+            ResidentCommand::OpenSessions => {
+                self.show_window(window, cx);
+                self.set_view(MainView::Sessions, window, cx);
+            }
+            ResidentCommand::OpenUsage => {
+                self.show_window(window, cx);
+                self.set_view(MainView::Usage, window, cx);
+            }
+            ResidentCommand::Reopen => self.show_window(window, cx),
             ResidentCommand::ScanNow => self.rescan(false, cx),
             ResidentCommand::Quit => self.quit(cx),
         }
@@ -1471,6 +1522,74 @@ impl AppRoot {
         handle.focus(window, cx);
     }
 
+    /// Keyboard focus to what is on screen: the table, or the Usage view.
+    pub(crate) fn focus_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.view {
+            MainView::Sessions => self.focus_table(window, cx),
+            MainView::Usage => self.usage_view.focus.focus(window, cx),
+        }
+    }
+
+    /// `⌃1` / `⌃2`, the View menu, the toolbar's switch: show the session table or the Usage
+    /// view, with the keys going to it. Usage is built again and scanned for (unless a scan ran
+    /// less than 30 s ago); back on the session table a search that went stale meanwhile runs.
+    pub(crate) fn set_view(&mut self, view: MainView, window: &mut Window, cx: &mut Context<Self>) {
+        if self.view != view {
+            println!("view: {view:?}");
+            self.view = view;
+            match view {
+                MainView::Usage => {
+                    self.refresh_usage(cx);
+                    self.auto_scan("usage shown", cx);
+                }
+                MainView::Sessions => match self.search_stale.take() {
+                    Some(StaleSearch::Refresh) if self.searching() => self.refresh_search(cx),
+                    Some(_) if self.searching() => self.run_search(cx),
+                    _ => {}
+                },
+            }
+            // the next timer scan in a minute (Usage) or ten (the table)
+            self._auto_scan = Self::spawn_auto_scan(cx);
+            self.persist(cx);
+        }
+        self.focus_view(window, cx);
+        cx.notify();
+    }
+
+    /// Remember that the search has to run again once the session table is back.
+    fn search_went_stale(&mut self, stale: StaleSearch) {
+        self.search_stale = self.search_stale.max(Some(stale));
+    }
+
+    /// A click on `Today $…` in the status bar: today in the Usage view.
+    pub(crate) fn show_todays_usage(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_usage_range(UsageRange::Today, cx);
+        self.set_view(MainView::Usage, window, cx);
+    }
+
+    /// How long the idle timer sleeps: a minute while the Usage view is on screen.
+    fn auto_scan_interval(&self) -> Duration {
+        if self.view == MainView::Usage && !self.window_hidden { USAGE_SCAN_IDLE } else { AUTO_SCAN_IDLE }
+    }
+
+    /// The idle timer: scans every `auto_scan_interval` (read again each time). Replacing the
+    /// task restarts the wait.
+    fn spawn_auto_scan(cx: &mut Context<Self>) -> Task<()> {
+        cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(wait) = this.update(cx, |this, _| this.auto_scan_interval()) else { break };
+                cx.background_executor().timer(wait).await;
+                let alive = this.update(cx, |this, cx| {
+                    this.roll_day(now_ms(), cx);
+                    this.auto_scan("timer", cx);
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+    }
+
     /// Escape in the search box: drop the search and go back to the table.
     fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search.update(cx, |input, cx| input.set_value("", window, cx));
@@ -1512,38 +1631,55 @@ impl AppRoot {
         }
     }
 
-    /// `42 / 5488 sessions · $123.45 · Today $203.69`: the listed sessions, what they cost (and
-    /// would cost on another model), what today cost.
-    fn status_left(&self, cx: &App) -> String {
+    /// `42 / 5488 sessions · $123.45`: the listed sessions, what they cost (and would cost on
+    /// another model).
+    fn status_counts(&self, cx: &App) -> String {
         let delegate = self.table.read(cx).delegate();
         let (shown, total, cost) = (delegate.ix.len(), delegate.rows.len(), delegate.shown_cost);
         let projection = delegate.projection().map(|p| format!(" · {} {} ({})", display_name(&p.target), fmt_usd(p.predicted), fmt_change(p.actual, p.predicted))).unwrap_or_default();
-        let today = if self.today_label.is_empty() { String::new() } else { format!(" · {}", self.today_label) };
-        format!("{shown} / {total} sessions · {}{projection}{today}", fmt_usd(cost))
+        format!("{shown} / {total} sessions · {}{projection}", fmt_usd(cost))
+    }
+
+    /// What the status bar's left end reads: `42 / 5488 sessions · $123.45 · Today $203.69` on
+    /// the session table; only `Today $203.69` in the Usage view, where the table's counts mean
+    /// nothing. `render_status_bar` draws the same, with Today clickable.
+    #[cfg(test)]
+    fn status_left(&self, cx: &App) -> String {
+        match self.view {
+            MainView::Usage => self.today_label.to_string(),
+            MainView::Sessions if self.today_label.is_empty() => self.status_counts(cx),
+            MainView::Sessions => format!("{} · {}", self.status_counts(cx), self.today_label),
+        }
     }
 
     fn render_status_bar(&self, cx: &mut Context<Self>) -> StatusBar {
-        let index = match &self.index_status {
+        let index: SharedString = match &self.index_status {
             IndexStatus::Loading => "loading index…".into(),
             IndexStatus::Scanning { done, total } => format!("indexing {done} / {total} files").into(),
             IndexStatus::Idle(summary) => summary.clone(),
             IndexStatus::Failed(message) => format!("index error: {message}").into(),
         };
+        let bar = StatusBar::new().h(px(22.)).py_0().px(px(10.)).font_family(style::mono(cx)).text_size(px(11.)).text_color(style::head_fg());
+        // `Today $…` opens today's usage, from either view
+        let today = (!self.today_label.is_empty()).then(|| {
+            div()
+                .id("status-today")
+                .cursor_pointer()
+                .text_color(style::text_secondary())
+                .hover(|s| s.text_color(style::accent()))
+                .child(self.today_label.clone())
+                .on_click(cx.listener(|this, _, window, cx| this.show_todays_usage(window, cx)))
+        });
+        if self.view == MainView::Usage {
+            return bar.left(h_flex().children(today)).child(index).right(crate::usage_view::BASIS);
+        }
         let (found, took) = self.search_status().unwrap_or_default();
         let status = if found.is_empty() { self.status.clone() } else { found };
         let center: SharedString = if status.is_empty() { index } else { format!("{status} · {index}").into() };
         let took = if took.is_empty() { String::new() } else { format!("{took} · ") };
         let first_rows = self.first_rows_ms.map(|ms| format!(" · first rows in {ms}ms")).unwrap_or_default();
-        StatusBar::new()
-            .h(px(22.))
-            .py_0()
-            .px(px(10.))
-            .font_family(style::mono(cx))
-            .text_size(px(11.))
-            .text_color(style::head_fg())
-            .left(self.status_left(cx))
-            .child(center)
-            .right(format!("{took}{}{first_rows}", self.db_info))
+        let counts = format!("{}{}", self.status_counts(cx), if today.is_some() { " · " } else { "" });
+        bar.left(h_flex().child(counts).children(today)).child(center).right(format!("{took}{}{first_rows}", self.db_info))
     }
 }
 
@@ -1556,13 +1692,23 @@ impl Render for AppRoot {
             .text_color(style::text())
             .text_size(px(12.))
             .line_height(px(16.))
+            .on_action(cx.listener(|this, _: &ShowSessions, window, cx| this.set_view(MainView::Sessions, window, cx)))
+            .on_action(cx.listener(|this, _: &ShowUsage, window, cx| this.set_view(MainView::Usage, window, cx)))
+            .on_action(cx.listener(|this, _: &LeaveDay, _, cx| this.leave_day(cx)))
             .on_action(cx.listener(|this, _: &ToggleDetail, _, cx| {
+                if this.view == MainView::Usage {
+                    return;
+                }
                 this.detail_visible = !this.detail_visible;
                 this.sync_projection(cx);
                 this.persist(cx);
                 cx.notify();
             }))
-            .on_action(cx.listener(|this, _: &ToggleFavorite, window, cx| this.toggle_favorite(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleFavorite, window, cx| {
+                if this.view == MainView::Sessions {
+                    this.toggle_favorite(window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, action: &favorites::FavoriteSession, window, cx| this.favorite_session(&action.id, window, cx)))
             .on_action(cx.listener(|this, _: &RevealFavoritesFolder, _, cx| cx.reveal_path(&this.favorites.root)))
             .on_action(cx.listener(|this, _: &ChangeFavoritesFolder, window, cx| this.change_favorites_folder(window, cx)))
@@ -1570,8 +1716,16 @@ impl Render for AppRoot {
             .on_action(cx.listener(|this, _: &CloseWindow, window, cx| this.close_requested(window, cx)))
             .on_action(cx.listener(|this, _: &Rescan, _, cx| this.rescan(false, cx)))
             .on_action(cx.listener(|this, _: &RebuildIndex, _, cx| this.rescan(true, cx)))
-            .on_action(cx.listener(|this, _: &ToggleEmptySessions, _, cx| this.toggle_empty_sessions(cx)))
-            .on_action(cx.listener(|this, action: &HideProject, _, cx| this.hide_project_of(action.id.as_deref(), cx)))
+            .on_action(cx.listener(|this, _: &ToggleEmptySessions, _, cx| {
+                if this.view == MainView::Sessions {
+                    this.toggle_empty_sessions(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, action: &HideProject, _, cx| {
+                if this.view == MainView::Sessions {
+                    this.hide_project_of(action.id.as_deref(), cx);
+                }
+            }))
             .on_action(cx.listener(|this, action: &ToggleColumn, _, cx| this.update_columns(|d| d.toggle_column(&action.key), cx)))
             .on_action(cx.listener(|this, _: &ShowAllColumns, _, cx| this.update_columns(|d| d.set_hidden_columns([]), cx)))
             .on_action(cx.listener(|this, action: &CopySessionId, window, cx| this.copy_session_id(action.id.as_deref(), window, cx)))
@@ -1579,20 +1733,68 @@ impl Render for AppRoot {
             .on_action(cx.listener(|this, action: &RevealTranscript, window, cx| this.reveal_transcript(action.id.as_deref(), window, cx)))
             .on_action(cx.listener(|this, action: &OpenProjectFolder, window, cx| this.open_project_folder(action.id.as_deref(), window, cx)))
             .on_action(cx.listener(|this, action: &ExportTranscript, window, cx| this.export_transcript(action.id.as_deref(), window, cx)))
-            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)))
-            .on_action(cx.listener(|this, _: &Escape, window, cx| this.clear_search(window, cx)))
-            .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| this.toggle_regex(cx)))
-            .on_action(cx.listener(|this, _: &ToggleCase, _, cx| this.toggle_case(cx)))
-            .on_action(cx.listener(|this, _: &NextHit, _, cx| this.step_hit(true, cx)))
-            .on_action(cx.listener(|this, _: &PrevHit, _, cx| this.step_hit(false, cx)))
-            .on_action(cx.listener(|this, _: &NextTurn, _, cx| this.step_turn(true, cx)))
-            .on_action(cx.listener(|this, _: &PrevTurn, _, cx| this.step_turn(false, cx)))
-            .on_action(cx.listener(|this, _: &Preview1, _, cx| this.set_mode(DisplayMode::Title, cx)))
-            .on_action(cx.listener(|this, _: &Preview2, _, cx| this.set_mode(DisplayMode::FirstPrompt, cx)))
-            .on_action(cx.listener(|this, _: &Preview3, _, cx| this.set_mode(DisplayMode::LastPrompt, cx)))
-            .on_action(cx.listener(|this, _: &Preview4, _, cx| this.set_mode(DisplayMode::LastMessage, cx)))
+            // ⌘F in Usage: back to the table, into the search box
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                this.set_view(MainView::Sessions, window, cx);
+                this.focus_search(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &Escape, window, cx| match this.view {
+                MainView::Sessions => this.clear_search(window, cx),
+                MainView::Usage => this.leave_day(cx),
+            }))
+            .on_action(cx.listener(|this, _: &ToggleRegex, _, cx| {
+                if this.view == MainView::Sessions {
+                    this.toggle_regex(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleCase, _, cx| {
+                if this.view == MainView::Sessions {
+                    this.toggle_case(cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &NextHit, _, cx| {
+                if this.view == MainView::Sessions {
+                    this.step_hit(true, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PrevHit, _, cx| {
+                if this.view == MainView::Sessions {
+                    this.step_hit(false, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &NextTurn, _, cx| {
+                if this.view == MainView::Sessions {
+                    this.step_turn(true, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &PrevTurn, _, cx| {
+                if this.view == MainView::Sessions {
+                    this.step_turn(false, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Preview1, _, cx| {
+                if this.view == MainView::Sessions {
+                    this.set_mode(DisplayMode::Title, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Preview2, _, cx| {
+                if this.view == MainView::Sessions {
+                    this.set_mode(DisplayMode::FirstPrompt, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Preview3, _, cx| {
+                if this.view == MainView::Sessions {
+                    this.set_mode(DisplayMode::LastPrompt, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Preview4, _, cx| {
+                if this.view == MainView::Sessions {
+                    this.set_mode(DisplayMode::LastMessage, cx);
+                }
+            }))
             .child(self.render_toolbar(cx))
-            .child(
+            .when(self.view == MainView::Usage, |el| el.child(self.render_usage(window, cx)))
+            .when(self.view == MainView::Sessions, |el| el.child(
                 div().flex_1().min_h_0().w_full().child(
                     h_resizable("main")
                         .with_state(&self.resizable)
@@ -1616,7 +1818,7 @@ impl Render for AppRoot {
                                 .child(self.render_detail(cx)),
                         ),
                 ),
-            )
+            ))
             .child(self.render_status_bar(cx))
             .children(Root::render_sheet_layer(window, cx))
             .children(Root::render_dialog_layer(window, cx))
@@ -1712,6 +1914,10 @@ fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-3", Preview3, None),
         KeyBinding::new("cmd-4", Preview4, None),
         KeyBinding::new("cmd-shift-r", RebuildIndex, None),
+        // not ⌘1–⌘4: those are the Preview modes. In the search box too.
+        KeyBinding::new("ctrl-1", ShowSessions, None),
+        KeyBinding::new("ctrl-2", ShowUsage, None),
+        KeyBinding::new("escape", LeaveDay, Some(crate::usage_view::KEY_CONTEXT)),
     ]);
 }
 
@@ -1734,7 +1940,7 @@ fn main() {
     let reopen = menu.clone();
     app.on_reopen(move |_| {
         resident::bring_forward();
-        let _ = reopen.try_send(ResidentCommand::OpenSessions);
+        let _ = reopen.try_send(ResidentCommand::Reopen);
     });
     app.run(move |cx| {
         gpui_kit::init(cx);
@@ -1748,6 +1954,9 @@ fn main() {
             Menu::new("Agent Session Manager").items(app_menu_items(updates)),
             Menu::new("File").items(vec![MenuItem::action("Close Window", CloseWindow)]),
             Menu::new("View").items(vec![
+                MenuItem::action("Sessions", ShowSessions),
+                MenuItem::action("Usage", ShowUsage),
+                MenuItem::separator(),
                 MenuItem::action("Find", FocusSearch),
                 MenuItem::action("Find Next Hit", NextHit),
                 MenuItem::action("Find Previous Hit", PrevHit),

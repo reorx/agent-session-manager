@@ -1210,3 +1210,359 @@ fn scan_now_from_the_menu_scans_while_hidden(cx: &mut TestAppContext) {
         assert!(app.window_hidden);
     });
 }
+
+// ---- the Usage view ---------------------------------------------------------------------------
+
+/// (the Usage view has the focus, the table has the focus)
+fn view_focus(cx: &mut TestAppContext, h: &Harness) -> (bool, bool) {
+    let app = h.app.clone();
+    in_window(cx, h, |window, cx| {
+        let app = app.read(cx);
+        (app.usage_view.focus.is_focused(window), app.table.read(cx).focus_handle(cx).is_focused(window))
+    })
+}
+
+fn view(cx: &mut TestAppContext, h: &Harness) -> crate::model::MainView {
+    h.app.read_with(cx, |app, _| app.view)
+}
+
+/// The fixture's calls were all made in September 2026.
+fn september() -> (chrono::NaiveDate, chrono::NaiveDate) {
+    (chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(), chrono::NaiveDate::from_ymd_opt(2026, 9, 30).unwrap())
+}
+
+#[gpui_kit::test]
+fn control_2_shows_usage_and_control_1_goes_back_with_the_focus_following(cx: &mut TestAppContext) {
+    use crate::model::MainView;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    press(cx, &h, "ctrl-2");
+    assert_eq!(view(cx, &h), MainView::Usage);
+    assert_eq!(view_focus(cx, &h), (true, false), "the keys go to the Usage view");
+    assert_eq!(saved_state(&h).view, MainView::Usage, "remembered for the next launch");
+    h.app.read_with(cx, |app, _| {
+        let cards: Vec<&str> = app.usage_view.snapshot.cards.iter().map(|c| c.label.as_ref()).collect();
+        assert_eq!(cards, ["Cost", "In", "Out", "Calls", "Sessions"], "the view was built on the way in");
+    });
+
+    press(cx, &h, "ctrl-1");
+    assert_eq!(view(cx, &h), MainView::Sessions);
+    assert_eq!(view_focus(cx, &h), (false, true), "the table has the focus again");
+    let selected = h.app.read_with(cx, |app, cx| app.table.read(cx).selected_row());
+    press(cx, &h, "down");
+    assert_ne!(h.app.read_with(cx, |app, cx| app.table.read(cx).selected_row()), selected, "its keys work without a click");
+    assert_eq!(saved_state(&h).view, MainView::Sessions);
+
+    // the View menu's items are the same actions
+    in_window(cx, &h, |window, cx| window.dispatch_action(Box::new(crate::ShowUsage), cx));
+    cx.run_until_parked();
+    assert_eq!((view(cx, &h), view_focus(cx, &h)), (MainView::Usage, (true, false)));
+}
+
+#[gpui_kit::test]
+fn the_view_shortcuts_work_from_the_search_box(cx: &mut TestAppContext) {
+    use crate::model::MainView;
+    let h = launch(cx);
+    press(cx, &h, "cmd-f");
+    type_text(cx, &h, "parser");
+    press(cx, &h, "ctrl-2");
+    assert_eq!(view(cx, &h), MainView::Usage);
+    assert_eq!(view_focus(cx, &h), (true, false));
+    assert_eq!(search_box(cx, &h), "parser", "typing in the box did not eat the shortcut, nor the shortcut the text");
+}
+
+#[gpui_kit::test]
+fn command_1_to_4_still_switch_the_preview_mode(cx: &mut TestAppContext) {
+    use crate::model::{DisplayMode, MainView};
+    let h = launch(cx);
+    let mode = |cx: &mut TestAppContext| h.app.read_with(cx, |app, cx| app.table.read(cx).delegate().mode);
+    for (key, expected) in [("cmd-1", DisplayMode::Title), ("cmd-3", DisplayMode::LastPrompt), ("cmd-4", DisplayMode::LastMessage), ("cmd-2", DisplayMode::FirstPrompt)] {
+        press(cx, &h, key);
+        assert_eq!(mode(cx), expected, "{key}");
+    }
+    assert_eq!(view(cx, &h), MainView::Sessions, "⌘1–⌘4 are not the view shortcuts");
+}
+
+#[gpui_kit::test]
+fn command_f_in_usage_goes_to_sessions_and_focuses_the_search(cx: &mut TestAppContext) {
+    use crate::model::MainView;
+    let h = launch(cx);
+    press(cx, &h, "ctrl-2");
+    press(cx, &h, "cmd-f");
+    assert_eq!(view(cx, &h), MainView::Sessions);
+    assert_eq!(focus(cx, &h), (true, false), "the cursor is in the search box");
+    type_text(cx, &h, "parser");
+    assert_eq!(search_box(cx, &h), "parser");
+}
+
+#[gpui_kit::test]
+fn session_only_shortcuts_do_nothing_in_usage(cx: &mut TestAppContext) {
+    use crate::actions::HideProject;
+    use crate::{NextHit, ToggleEmptySessions, ToggleFavorite};
+    let h = launch(cx);
+    select(cx, &h, S1);
+    let state = |cx: &mut TestAppContext| {
+        h.app.read_with(cx, |app, cx| {
+            let f = app.current_filter(cx);
+            (app.table.read(cx).delegate().mode, app.detail_visible, f.hidden_projects.clone(), f.show_empty, app.selected.as_ref().map(|r| (r.id.clone(), r.favorite)))
+        })
+    };
+    let before = state(cx);
+    press(cx, &h, "ctrl-2");
+    for key in ["cmd-d", "cmd-\\", "cmd-1", "cmd-4", "cmd-g", "alt-cmd-r"] {
+        press(cx, &h, key);
+    }
+    // the menu items of the same actions
+    for action in [Box::new(ToggleFavorite) as Box<dyn gpui_kit::Action>, Box::new(HideProject { id: None }), Box::new(ToggleEmptySessions), Box::new(NextHit)] {
+        in_window(cx, &h, |window, cx| window.dispatch_action(action, cx));
+    }
+    cx.run_until_parked();
+    std::thread::sleep(Duration::from_millis(100));
+    cx.run_until_parked();
+    assert_eq!(state(cx), before, "preview mode, detail panel, hidden projects and favorites as they were");
+    assert_eq!(h.app.read_with(cx, |app, _| app.search_opts.mode), crate::search::SearchMode::Text);
+    assert_eq!(view_focus(cx, &h), (true, false));
+}
+
+#[gpui_kit::test]
+fn escape_leaves_a_drilled_day(cx: &mut TestAppContext) {
+    use agent_session_core::usage::UsageRange;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    append_response(&h._dir.path().join("claude"), S1, "msg_today", "claude-opus-5", now_ms());
+    h.app.update(cx, |app, cx| app.rescan(false, cx));
+    wait_until(cx, &h, "today's call", |app, _| app.today.responses == 1);
+    press(cx, &h, "ctrl-2");
+    h.app.update(cx, |app, cx| app.set_usage_range(UsageRange::Days7, cx));
+    let today = h.app.read_with(cx, |app, _| app.usage_day);
+    let empty_day = today.pred_opt().unwrap();
+    assert!(!h.app.update(cx, |app, cx| app.drill_into_day(empty_day, cx)), "a day without calls does not open");
+    assert!(h.app.update(cx, |app, cx| app.drill_into_day(today, cx)));
+    h.app.read_with(cx, |app, _| {
+        assert_eq!((app.usage_view.range, app.usage_view.day), (UsageRange::Day, Some(today)));
+        assert!(app.usage_view.snapshot.chart.hourly, "the day by the hour");
+        assert_eq!(app.usage_view.snapshot.cards[3].value, "1");
+    });
+    assert_eq!(saved_state(&h).usage_range, UsageRange::Days7, "a clicked day is not saved: the range it came from is");
+
+    press(cx, &h, "escape");
+    h.app.read_with(cx, |app, _| {
+        assert_eq!((app.usage_view.range, app.usage_view.day), (UsageRange::Days7, None), "back to the 7 days");
+        assert!(!app.usage_view.snapshot.chart.hourly);
+    });
+    press(cx, &h, "escape");
+    assert_eq!(h.app.read_with(cx, |app, _| app.usage_view.range), UsageRange::Days7, "nothing more to leave");
+}
+
+#[gpui_kit::test]
+fn a_filter_set_in_usage_is_still_set_in_sessions(cx: &mut TestAppContext) {
+    use agent_session_core::usage::UsageRange;
+    use crate::model::{Kind, MainView};
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    press(cx, &h, "ctrl-2");
+    let (first, last) = september();
+    h.app.update(cx, |app, cx| app.set_usage_custom_range(first, last, cx));
+    let all = h.app.read_with(cx, |app, _| app.usage_view.snapshot.totals);
+    assert!(all.responses > 0, "the fixture's calls are in September");
+
+    // hidden projects still cost money: Usage counts them
+    h.app.update(cx, |app, cx| app.hide_project("-Users-me-Code-beta".into(), cx));
+    assert_eq!(h.app.read_with(cx, |app, _| app.usage_view.snapshot.totals), all);
+
+    h.app.update(cx, |app, cx| {
+        app.show_project("-Users-me-Code-beta", cx);
+        app.set_project(Some("-Users-me-Code-alpha".into()), cx);
+        app.toggle_kind(Kind::Sdk, cx);
+    });
+    let alpha = h.app.read_with(cx, |app, _| {
+        let snap = &app.usage_view.snapshot;
+        assert!(snap.projects.iter().all(|p| p.key.as_deref() == Some("-Users-me-Code-alpha")));
+        assert!(snap.projects[0].selected);
+        assert_eq!(snap.cards[0].value, snap.projects[0].cost, "Cost is the picked project's cost");
+        snap.totals
+    });
+    assert!(alpha.responses > 0 && alpha.responses < all.responses);
+    assert_eq!(h.app.read_with(cx, |app, _| app.usage_view.range), UsageRange::Custom);
+
+    press(cx, &h, "ctrl-1");
+    assert_eq!(view(cx, &h), MainView::Sessions);
+    h.app.read_with(cx, |app, cx| {
+        let filter = app.current_filter(cx);
+        assert_eq!(filter.project.as_deref(), Some("-Users-me-Code-alpha"));
+        assert!(!filter.kinds.sdk);
+        let delegate = app.table.read(cx).delegate();
+        assert!((0..delegate.ix.len()).all(|i| delegate.row(i).project_key == "-Users-me-Code-alpha"), "the table shows the project picked in Usage");
+    });
+}
+
+#[gpui_kit::test]
+fn picking_a_custom_range_in_usage_hands_the_focus_back_to_usage(cx: &mut TestAppContext) {
+    use agent_session_core::usage::UsageRange;
+    use gpui_kit::component::calendar::Date;
+    use gpui_kit::component::date_picker::DatePickerEvent;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    press(cx, &h, "ctrl-2");
+    h.app.update(cx, |app, cx| app.set_usage_range(UsageRange::Custom, cx));
+    let picker = h.app.read_with(cx, |app, _| app.usage_view.date_picker.clone());
+    in_window(cx, &h, |window, cx| picker.read(cx).focus_handle(cx).focus(window, cx));
+    assert_eq!(view_focus(cx, &h), (false, false), "the picker has the focus while the user clicks through it");
+
+    let (first, last) = september();
+    picker.update(cx, |_, cx| cx.emit(DatePickerEvent::Change(Date::Range(Some(first), Some(last)))));
+    cx.run_until_parked();
+    h.app.read_with(cx, |app, _| {
+        assert_eq!((app.usage_view.range, app.usage_view.custom), (UsageRange::Custom, Some((first, last))));
+        assert!(app.usage_view.snapshot.totals.responses > 0);
+        assert_eq!(app.usage_view.snapshot.range_label, "Sep 1 – Sep 30");
+    });
+    assert_eq!(view_focus(cx, &h), (true, false), "the Usage view has the focus again");
+    assert_eq!(saved_state(&h).usage_custom_range, Some((first, last)));
+    press(cx, &h, "ctrl-1");
+    assert_eq!(view(cx, &h), crate::model::MainView::Sessions, "so its shortcuts work right away");
+    assert_eq!(h.app.read_with(cx, |app, _| app.range), crate::model::RangePreset::Any, "the table's own range is another one");
+}
+
+#[gpui_kit::test]
+fn usage_scans_every_minute_and_sessions_every_ten(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    let done = |cx: &mut TestAppContext| h.app.read_with(cx, |app, _| app.scans_done);
+    let base = done(cx);
+    cx.executor().advance_clock(crate::AUTO_SCAN_MIN_GAP);
+    press(cx, &h, "ctrl-2");
+    wait_until(cx, &h, "the scan on showing Usage", |app, _| app.scans_done == base + 1);
+
+    let quiet = |cx: &mut TestAppContext| {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(150));
+        cx.run_until_parked();
+    };
+    cx.executor().advance_clock(crate::USAGE_SCAN_IDLE - Duration::from_secs(1));
+    quiet(cx);
+    assert_eq!(done(cx), base + 1, "not before the minute is up");
+    cx.executor().advance_clock(Duration::from_secs(1));
+    wait_until(cx, &h, "the scan a minute later", |app, _| app.scans_done == base + 2);
+    cx.executor().advance_clock(crate::USAGE_SCAN_IDLE);
+    wait_until(cx, &h, "and the next minute", |app, _| app.scans_done == base + 3);
+
+    press(cx, &h, "ctrl-1");
+    cx.executor().advance_clock(crate::USAGE_SCAN_IDLE);
+    quiet(cx);
+    assert_eq!(done(cx), base + 3, "the session table scans every ten minutes");
+    cx.executor().advance_clock(crate::AUTO_SCAN_IDLE - crate::USAGE_SCAN_IDLE);
+    wait_until(cx, &h, "the scan ten minutes later", |app, _| app.scans_done == base + 4);
+}
+
+#[gpui_kit::test]
+fn a_reload_in_usage_defers_the_search_until_sessions_is_shown(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    press(cx, &h, "cmd-f");
+    type_text(cx, &h, "parser");
+    press(cx, &h, "enter");
+    wait_until(cx, &h, "the search", search_done);
+    let (seq, matches) = h.app.read_with(cx, |app, _| (app.search_seq, app.search_summary.as_ref().unwrap().matches));
+
+    press(cx, &h, "ctrl-2");
+    let base = h.app.read_with(cx, |app, _| app.scans_done);
+    append_response(&h._dir.path().join("claude"), S1, "msg_search", "claude-opus-5", now_ms());
+    h.app.update(cx, |app, cx| app.rescan(false, cx));
+    wait_until(cx, &h, "the scan and its reload", |app, _| app.scans_done > base && !app.scan_in_flight);
+    cx.run_until_parked();
+    assert_eq!(h.app.read_with(cx, |app, _| app.search_seq), seq, "no search while Usage is shown");
+
+    press(cx, &h, "ctrl-1");
+    assert!(h.app.read_with(cx, |app, _| app.search_seq) > seq, "searched again on the way back");
+    wait_until(cx, &h, "the repeated search", |app, cx| search_done(app, cx) && !app.search_pending);
+    h.app.read_with(cx, |app, _| assert_eq!(app.search_summary.as_ref().unwrap().matches, matches, "the same hits (the appended reply says no 'parser')"));
+}
+
+#[gpui_kit::test]
+fn the_view_its_range_and_the_chart_metric_come_back_after_a_restart(cx: &mut TestAppContext) {
+    use agent_session_core::usage::{Metric, UsageRange};
+    use crate::model::MainView;
+    let (first, last) = september();
+    let h = launch_with(cx, |dir| {
+        crate::settings::ViewState {
+            view: MainView::Usage,
+            usage_range: UsageRange::Custom,
+            usage_custom_range: Some((first, last)),
+            usage_metric: Metric::HitRate,
+            ..Default::default()
+        }
+        .save(&dir.join("state.json"))
+        .unwrap()
+    });
+    wait_until(cx, &h, "the ledger in the Usage view", |app, _| app.usage_view.snapshot.totals.responses > 0);
+    assert_eq!(view(cx, &h), MainView::Usage);
+    assert_eq!(view_focus(cx, &h), (true, false), "the keys go to the Usage view from the start");
+    h.app.read_with(cx, |app, _| {
+        assert_eq!((app.usage_view.range, app.usage_view.custom, app.usage_view.metric), (UsageRange::Custom, Some((first, last)), Metric::HitRate));
+        assert_eq!(app.usage_view.snapshot.chart.metric, Metric::HitRate);
+    });
+    h.app.update(cx, |app, cx| app.set_usage_metric(Metric::Out, cx));
+    assert_eq!(saved_state(&h).usage_metric, Metric::Out);
+}
+
+#[gpui_kit::test]
+fn todays_cost_in_the_status_bar_opens_todays_usage_and_matches_it(cx: &mut TestAppContext) {
+    use agent_session_core::usage::UsageRange;
+    use crate::model::MainView;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    append_response(&h._dir.path().join("claude"), S1, "msg_today", "claude-opus-5", now_ms());
+    h.app.update(cx, |app, cx| app.rescan(false, cx));
+    let paid = today_of_one_appended("claude-opus-5");
+    wait_until(cx, &h, "today's cost", |app, _| app.today_label == paid.as_str());
+    h.app.update(cx, |app, cx| app.set_usage_range(UsageRange::Days30, cx));
+
+    // what a click on `Today $…` does
+    in_window(cx, &h, |window, cx| h.app.update(cx, |app, cx| app.show_todays_usage(window, cx)));
+    assert_eq!(view(cx, &h), MainView::Usage);
+    assert_eq!(view_focus(cx, &h), (true, false));
+    h.app.read_with(cx, |app, cx| {
+        assert_eq!(app.usage_view.range, UsageRange::Today);
+        assert_eq!(format!("Today {}", app.usage_view.snapshot.cards[0].value), paid, "the Cost card is the status bar's Today");
+        assert_eq!(app.status_left(cx), paid, "in Usage the status bar's left is only today");
+    });
+}
+
+#[gpui_kit::test]
+fn open_usage_in_the_menu_bar_menu_shows_the_window_on_usage(cx: &mut TestAppContext) {
+    use crate::model::MainView;
+    use crate::resident::ResidentCommand::{OpenSessions, OpenUsage, Reopen};
+    let h = launch_noticed(cx);
+    press(cx, &h, "cmd-w");
+    assert!(hidden(cx, &h));
+    menu_command(cx, &h, OpenUsage);
+    assert!(!hidden(cx, &h));
+    assert_eq!((view(cx, &h), view_focus(cx, &h)), (MainView::Usage, (true, false)));
+
+    // opened again from Finder: the window as it was
+    press(cx, &h, "cmd-w");
+    menu_command(cx, &h, Reopen);
+    assert_eq!((view(cx, &h), view_focus(cx, &h)), (MainView::Usage, (true, false)));
+
+    press(cx, &h, "cmd-w");
+    menu_command(cx, &h, OpenSessions);
+    assert_eq!((view(cx, &h), view_focus(cx, &h)), (MainView::Sessions, (false, true)));
+}
+
+#[gpui_kit::test]
+fn a_hidden_usage_view_scans_every_ten_minutes(cx: &mut TestAppContext) {
+    let h = launch_noticed(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    press(cx, &h, "ctrl-2");
+    press(cx, &h, "cmd-w");
+    assert!(hidden(cx, &h));
+    wait_until(cx, &h, "no scan under way", |app, _| !app.scan_in_flight);
+    let base = h.app.read_with(cx, |app, _| app.scans_done);
+    cx.executor().advance_clock(crate::USAGE_SCAN_IDLE);
+    cx.run_until_parked();
+    std::thread::sleep(Duration::from_millis(150));
+    cx.run_until_parked();
+    assert_eq!(h.app.read_with(cx, |app, _| app.scans_done), base, "no scan a minute after the window went away");
+    cx.executor().advance_clock(crate::AUTO_SCAN_IDLE - crate::USAGE_SCAN_IDLE);
+    wait_until(cx, &h, "the scan ten minutes later", |app, _| app.scans_done == base + 1);
+}

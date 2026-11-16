@@ -306,7 +306,9 @@ clicked() { [ "$(count "^menu bar: $1\$")" -gt "$2" ] || fail_check "click: the 
 
 # --- the menu, Scan Now -------------------------------------------------------------------
 before=$(count '^menu bar: ScanNow$')
-if menu_step 3-menu && [ "${RESIDENT_CLICK:-0}" = 1 ] && click_item "Scan Now" 124; then
+# Open Usage (2026-11-16) sits between Open Sessions (100) and Scan Now: one 24-point row down,
+# inferred from the measured 100 / 124, not measured again
+if menu_step 3-menu && [ "${RESIDENT_CLICK:-0}" = 1 ] && click_item "Scan Now" 148; then
   step wait-scan
   clicked ScanNow "$before"
 else

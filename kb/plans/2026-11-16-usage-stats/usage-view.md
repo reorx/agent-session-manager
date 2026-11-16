@@ -288,3 +288,24 @@ app：
 实现取舍：保留公开可变的 `UsageData.sessions`，不另存费用缓存，避免现有调用方直接修改数据时缓存过期。`summary_with` / `series_with` 可注入价格表，默认入口使用当前价格；旧 API 不变。将来确有性能压力时应先封装 sessions 再引入缓存。
 
 真实账本只读 backup 副本（3,361 sessions、5,510 桶），release 模式连续 1,000 次「30 天 summary + 30 个日槽 series」平均 **2.512 ms**（不含加载，包含定价、分组和排序）。证据：`tmp/2026-11-12-usage-stats/usage-p3-core/bench.log`。目前无需为费用缓存破坏公开 API。
+
+### App 实现与差异（usage-p3-view，2026-11-16）
+
+实施步骤 2–6、8 已实现（图表 7 和 autoplay / 截图脚本 9 未做）。交接见 [P3 view 总结](../../sessions/2026-11-16-usage-p3-view.md)。与上文不同或上文没写的地方：
+
+- **`UsageSnapshot::build` 的参数**：`build(&UsageData, available: Option<bool>, &UsageQuery, now_ms, today, &tz)`，`UsageQuery` 收拢了 range、custom、day、metric 和 `UsageFilter`。多一个 `available`，因为「账本不可用」和「账本还没到」都要从快照里分出来。时区作参数是为了测试用 +8。
+- **`search_stale` 是一个枚举不是 bool**（`StaleSearch::Refresh` / `Rerun`）：扫描后的重读只要静默地换结果（`refresh_search`，不滚回顶部），在 Usage 里改过滤才要当新搜索跑（`run_search`）；两种都发生时取后者。
+- **`refresh_usage` 在会话表显示时直接返回**，`set_view(Usage)` 时重算。快照内容和上一次相同就不 `notify`。真实账本副本上重算 1.5–4.5ms（debug 构建，日志 `usage view: … built in …`）。
+- **Finder 再次打开不再发 `OpenSessions`**：`OpenSessions` 现在会切回会话表，所以加了 `ResidentCommand::Reopen`（不是菜单项），只显示窗口、保持关窗前的视图。菜单项的序号随之变成 Open Sessions 4、Open Usage 5、Scan Now 6、Quit 8。
+- **扫描节奏随窗口**：窗口隐藏和重新显示时也换一个新的计时任务，所以停在 Usage 时关窗，下一次定时扫描在 10 分钟后（不是 1 分钟后）；重开后回到每分钟。
+- **会话表专用的动作**除了上文列的，`⌥⌘R` / `⌥⌘C`（正则、大小写）和 `[` / `]`（回合跳转）在 Usage 下也直接返回。
+- **Escape**：Usage 视图有 key context `Usage`，`escape` 在里面绑到 `LeaveDay`；根上的 `Escape` 处理在 Usage 下也调 `leave_day`（搜索框里的 Escape 是输入框自己的 action，到不了这里）。
+- **点选某一天**：`drill_into_day` 返回 bool，在按小时的图上或那天没有调用时返回 false、什么都不改。保存视图状态时 `Day` 存成点之前的范围；万一读到 `Day`，按 Today 打开。
+- **Kind 下拉**只有 CLI / SDK / BG，后面的数字是账本里有调用的 session 数；**Project 下拉**列账本里所有有调用的项目（按名字排序，包括会话表里隐藏的），选中的项目在账本里没有调用时也列在最上面，好取消；**Model 下拉**按调用数从多到少，值用 `display_name`。
+- **窄窗口的阈值是 960pt**（窗口内容宽度），小于它时两组 `grid2` 改成上下排列。
+- **Cost 卡的数字用两位小数加千分位**（`$8,010.62`，`usage_view::fmt_money`），没有用 core 的 `fmt_usd`（它对大数省掉小数）；In / Out 用 `fmt_tokens`。比较的说法：Today `yesterday by HH:MM`、Yesterday 和点进的那一天 `day before`、`prior 7 days` / `prior 30 days` / `prior N days`（Custom）、This month `same days last month`、Last month `month before`。上一段没有调用时整段小字是 `no earlier data`。
+- **范围内没有调用时**「钱花在哪」只画表头和 `No calls in this range`，不列四行 0。
+- **刷新按钮**在扫描进行中置灰；`as of HH:MM` 取最近一次扫描结束的时刻，扫描中是 `scanning…`。
+- **图表区**：`render_chart_panel` 画标题、副标题、指标切换和图例，下面是 `id("usage-chart")`、高 236 的空容器（`usage_view::CHART_ID` / `CHART_H`），账本为空时里面写 `No usage recorded yet`。副标题：单天是 `Today, Mon Nov 16` / `Fri Nov 13`，多天是 `Last 30 days · click a bar to see its hours`。
+- 颜色按上文加在 `style.rs`，另加 `token_web_search()`、`share_bar()`（项目占比条）和 `warn()`（未计价的提示）；涨跌直接用 `cost_up()` / `cost_down()`，没有另加 `delta_up` / `delta_down`。
+- 测试名与上文一致；另加 `usage_view.rs` 的 `the_cost_breakdown_and_the_model_table_add_up_to_the_cost`（6）、`sessions_are_listed_by_their_cost_inside_the_range`、`a_range_s_bounds_follow_the_four_o_clock_days`（4），`keyboard_tests.rs` 的 `the_view_its_range_and_the_chart_metric_come_back_after_a_restart`（2）、`todays_cost_in_the_status_bar_opens_todays_usage_and_matches_it`（1、3）、`open_usage_in_the_menu_bar_menu_shows_the_window_on_usage`（1）、`a_hidden_usage_view_scans_every_ten_minutes`。点击类入口（工具栏切换、状态栏 Today、项目行）在测试里直接调点击处理函数调用的方法，没有模拟点击：gpui-kit 的 `click(id)` 只认登记了 `.test_support()` 的元素。

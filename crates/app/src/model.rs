@@ -333,6 +333,16 @@ impl SessionRow {
     }
 }
 
+/// What fills the window between the toolbar and the status bar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub enum MainView {
+    /// The session table and the detail panel.
+    #[default]
+    Sessions,
+    /// What the calls cost and how many tokens they took, by hour or day.
+    Usage,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum DisplayMode {
     Title,

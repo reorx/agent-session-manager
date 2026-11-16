@@ -1,6 +1,6 @@
 //! The menu bar item that keeps the app around once its window is closed: an icon and today's
-//! cost in the menu bar, a menu with today's numbers, the last scan, Open Sessions, Scan Now and
-//! Quit. Closing the window only hides it (`AppRoot::close_requested`), so the store thread,
+//! cost in the menu bar, a menu with today's numbers, the last scan, Open Sessions, Open Usage,
+//! Scan Now and Quit. Closing the window only hides it (`AppRoot::close_requested`), so the store thread,
 //! the automatic scans and everything on screen stay as they were.
 //!
 //! Neither GPUI nor gpui-component wraps `NSStatusItem`, so the item is built here with
@@ -42,7 +42,12 @@ const AUTOSAVE_NAME: &str = "AgentSessionManagerToday";
 /// task hands it to `AppRoot::on_resident_command`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResidentCommand {
+    /// The window, on the session table.
     OpenSessions,
+    /// The window, on the Usage view.
+    OpenUsage,
+    /// The window as it was: the app opened again from Finder or Spotlight (not a menu item).
+    Reopen,
     ScanNow,
     Quit,
 }
@@ -80,7 +85,7 @@ pub fn title(today_usd: Option<f64>) -> String {
 }
 
 /// `1,234,567`
-fn thousands(n: u64) -> String {
+pub(crate) fn thousands(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (ix, digit) in digits.chars().enumerate() {
@@ -173,6 +178,12 @@ define_class!(
             self.send(ResidentCommand::OpenSessions);
         }
 
+        #[unsafe(method(openUsage:))]
+        fn open_usage(&self, _sender: Option<&AnyObject>) {
+            bring_forward();
+            self.send(ResidentCommand::OpenUsage);
+        }
+
         #[unsafe(method(scanNow:))]
         fn scan_now(&self, _sender: Option<&AnyObject>) {
             self.send(ResidentCommand::ScanNow);
@@ -243,8 +254,9 @@ impl Global for Resident {}
 
 /// Menu items by index (`Resident::perform`), in the order `install` adds them.
 const OPEN_SESSIONS_ITEM: isize = 4;
-const SCAN_NOW_ITEM: isize = 5;
-const QUIT_ITEM: isize = 7;
+const OPEN_USAGE_ITEM: isize = 5;
+const SCAN_NOW_ITEM: isize = 6;
+const QUIT_ITEM: isize = 8;
 
 /// Puts the item into the menu bar and stores the `Resident` global. Menu items send their
 /// commands to `commands`.
@@ -280,6 +292,7 @@ pub fn install(cx: &mut App, commands: Sender<ResidentCommand>) {
         scanned.clone(),
         NSMenuItem::separatorItem(mtm),
         action_item(mtm, "Open Sessions", sel!(openSessions:), &target),
+        action_item(mtm, "Open Usage", sel!(openUsage:), &target),
         scan_now.clone(),
         NSMenuItem::separatorItem(mtm),
         action_item(mtm, "Quit Agent Session Manager", sel!(quit:), &target),
@@ -373,11 +386,15 @@ impl Resident {
 
     /// Autoplay: what a click on a menu item does (the target sends the command).
     pub fn perform(&self, command: ResidentCommand) {
-        self.menu.performActionForItemAtIndex(match command {
+        let item = match command {
             ResidentCommand::OpenSessions => OPEN_SESSIONS_ITEM,
+            ResidentCommand::OpenUsage => OPEN_USAGE_ITEM,
             ResidentCommand::ScanNow => SCAN_NOW_ITEM,
             ResidentCommand::Quit => QUIT_ITEM,
-        });
+            // not a menu item
+            ResidentCommand::Reopen => return,
+        };
+        self.menu.performActionForItemAtIndex(item);
     }
 }
 

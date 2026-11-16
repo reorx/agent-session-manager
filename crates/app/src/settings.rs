@@ -9,7 +9,9 @@ use chrono::NaiveDate;
 use gpui_kit::component::table::ColumnSort;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{DisplayMode, KindSet, RangePreset};
+use agent_session_core::usage::{Metric, UsageRange};
+
+use crate::model::{DisplayMode, KindSet, MainView, RangePreset};
 use crate::search::SearchOptions;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -63,6 +65,15 @@ pub struct ViewState {
     pub search: SearchOptions,
     /// The first close of the window explained that the app stays in the menu bar.
     pub resident_notice_shown: bool,
+    /// The session table or the Usage view.
+    pub view: MainView,
+    /// The Usage view's range; a day clicked on its chart is saved as the range it came from.
+    pub usage_range: UsageRange,
+    /// Start and end day of the Usage view's Custom range, both included; `None` until one is
+    /// picked (Custom is then this month so far).
+    pub usage_custom_range: Option<(NaiveDate, NaiveDate)>,
+    /// What the Usage view's chart shows.
+    pub usage_metric: Metric,
 }
 
 impl Default for ViewState {
@@ -84,6 +95,10 @@ impl Default for ViewState {
             selected_id: None,
             search: SearchOptions::default(),
             resident_notice_shown: false,
+            view: MainView::default(),
+            usage_range: UsageRange::default(),
+            usage_custom_range: None,
+            usage_metric: Metric::default(),
         }
     }
 }
@@ -115,6 +130,7 @@ mod tests {
     use super::*;
     use crate::model::{Kind, ScopeSet};
     use crate::search::SearchMode;
+    use agent_session_core::usage::{Metric, UsageRange};
 
     #[test]
     fn a_saved_state_comes_back_unchanged() {
@@ -144,6 +160,10 @@ mod tests {
                 labels: vec!["tool_use:Bash".into()],
             },
             resident_notice_shown: true,
+            view: MainView::Usage,
+            usage_range: UsageRange::Custom,
+            usage_custom_range: Some((NaiveDate::from_ymd_opt(2026, 11, 2).unwrap(), NaiveDate::from_ymd_opt(2026, 11, 8).unwrap())),
+            usage_metric: Metric::HitRate,
         };
         state.save(&path).unwrap();
         assert_eq!(ViewState::load(&path), state);
@@ -177,6 +197,10 @@ mod tests {
         assert_eq!(state.search, SearchOptions::default(), "a file written before search: text mode, prompts and replies");
         assert_eq!(state.search.scope.label(), "Both");
         assert!(!state.resident_notice_shown, "a file written before the menu bar item: the first close still explains it");
+        assert_eq!(state.view, MainView::Sessions, "a file written before the Usage view opens on the session table");
+        assert_eq!(state.usage_range, UsageRange::Today);
+        assert_eq!(state.usage_custom_range, None);
+        assert_eq!(state.usage_metric, Metric::Cost);
     }
 
     #[test]

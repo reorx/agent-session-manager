@@ -116,9 +116,19 @@ Rebuild
 - **用量日**（`AppRoot::usage_day`，4:00 起）是会话表时间预设、日期选择器快捷项和今天的唯一依据。它不在 render 里算：`roll_day` 在收到用量或扫描结束、窗口激活、定时器醒来时检查，换了日就重新应用时间过滤（`set_range`），再重算今天。所以跨过 4:00 后，最迟到下一次检查（不超过 10 分钟）才换日
 - 账本不可用（`UsageUnavailable`）时状态栏是 `Today —`，其余照常。还没收到账本时状态栏不显示这一段
 
+## Usage 视图
+
+主窗口有两个视图（`AppRoot::view`，`model.rs` 的 `MainView`）：会话表和 Usage。切换只有一个入口 `AppRoot::set_view`（`⌃1` / `⌃2`、View 菜单、工具栏左端的 `Sessions | Usage`、状态栏的 `Today $…`、菜单栏菜单的 Open Sessions / Open Usage 都走它）。
+
+- **Usage 屏幕上的一切来自一份快照**（`usage_view.rs` 的 `UsageSnapshot`），由纯函数 `UsageSnapshot::build(UsageData, 账本是否可用, 查询, 现在, 用量日, 时区)` 生成，render 只取其中的字符串。快照只在 Usage 显示时重算（`refresh_usage`）：切到 Usage、`roll_day`（收到用量、扫描结束、窗口激活、定时器醒来都会经过它）、过滤变化（`apply_filter`，只在 Project / Kind / Model 变了时）、范围 / 指标 / 点选某天变化。会话表显示时调用它直接返回；内容和上一份相同就不 `notify`，所以没有变化的扫描界面不动。在真实账本副本上重算一次 1.5–4.5ms
+- **过滤与会话表共用**：Project、Kind（CLI / SDK / BG）、Model 就是会话表的那几个，在 Usage 里改了，回到会话表照样生效。隐藏的项目、空 session、收藏、History、会话表的时间范围不影响 Usage（花掉的钱都要算）。Usage 的时间范围是自己的一套（`UsageState::range` / `custom`），和会话表的 Updated 互不影响
+- **Usage 显示时不搜索**：扫描后的整表重读在 Usage 下只记下 `search_stale = Refresh`，在 Usage 里改过滤只记下 `Rerun`（取较重的那个）；回到会话表时 `set_view` 按记下的跑 `refresh_search` 或 `run_search`。原因是 Usage 每分钟扫一次，正则搜索一次可能要几秒，看不见的结果没必要跟着重跑
+- **只属于会话表的动作在 Usage 下直接返回**：Toggle Detail、收藏、Preview 1–4、隐藏项目、显示空 session、命中 / 回合跳转、正则 / 大小写开关。`⌘F` 先切回会话表再聚焦搜索框；Escape 在 Usage 下是 `leave_day`（退出点进去的那一天）
+- **点选某一天**（`drill_into_day`）只在多天的图上、那天有调用时生效，`range` 变成 `Day`，记下来的 `back` 是点之前的范围；Escape 或小标签的 ✕ 调 `leave_day` 回去。保存视图状态时 `Day` 存成 `back`
+
 ## 自动扫描
 
-应用开着时自己做增量扫描（`AppRoot::auto_scan`），触发有三个：窗口变为激活（`observe_window_activation`），窗口从菜单栏重新显示（`show_window`，日志 `auto-scan: window shown`），和一个每 `AUTO_SCAN_IDLE`（600 秒）醒一次的循环任务（`_auto_scan`）。菜单的 Scan for Changes / Rebuild Index 和菜单栏菜单的 Scan Now 照旧是手动扫描（`rescan`）。
+应用开着时自己做增量扫描（`AppRoot::auto_scan`），触发有四个：窗口变为激活（`observe_window_activation`），窗口从菜单栏重新显示（`show_window`，日志 `auto-scan: window shown`），切到 Usage 视图（`set_view`，日志 `auto-scan: usage shown`），和一个循环任务（`_auto_scan`，`spawn_auto_scan`）：每次睡之前读 `auto_scan_interval`，Usage 显示且窗口没有隐藏时是 `USAGE_SCAN_IDLE`（60 秒），否则 `AUTO_SCAN_IDLE`（600 秒）。切换视图、窗口隐藏和重新显示时换一个新任务（旧任务 drop 即取消），等待从头算，所以切回会话表后不会再在一分钟内扫一次。菜单的 Scan for Changes / Rebuild Index 和菜单栏菜单的 Scan Now 照旧是手动扫描（`rescan`）。
 
 | 规则 | 原因 |
 |---|---|
@@ -140,7 +150,7 @@ Rebuild
 | 部分 | 窗口隐藏时 |
 |---|---|
 | store / 读取 / 搜索线程 | 照常运行，请求和事件照常进出 |
-| 自动扫描的定时器 | 照常每 600 秒醒一次（是 `AppRoot` 的任务，实体还在） |
+| 自动扫描的定时器 | 每 600 秒醒一次（是 `AppRoot` 的任务，实体还在）；隐藏前停在 Usage 也是 600 秒，重新显示后回到每分钟 |
 | 事件的应用 | 照常：行、用量、今天的费用都更新到 `AppRoot` 里 |
 | 渲染 | 不发生：GPUI 在窗口被遮挡时停掉 display link，`cx.notify()` 只标脏，重开时一次重绘（usage-p2-probe 实测隐藏期间 `render` 调用 0 次）。所以 `on_store_events` 不需要为隐藏的窗口跳过任何计算 |
 | 菜单栏项 | `sync_resident` 在扫描开始 / 结束、收到用量、换日时把标题和三行信息推过去，内容没变就不推 |
@@ -271,16 +281,17 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 
 | 时刻 | 焦点 |
 |---|---|
-| 启动 | 表格 |
-| `cmd-f` | 搜索框 |
+| 启动 | 当前视图：表格，或上次停在 Usage 时 Usage 视图（`focus_view`） |
+| `ctrl-1` / `ctrl-2`、View 菜单的 Sessions / Usage、工具栏的切换、状态栏的 `Today $…` | 切到的视图：表格或 Usage 视图（`usage_view.focus`，key context `Usage`） |
+| `cmd-f` | 搜索框（在 Usage 里先切回会话表） |
 | 搜索框里按 Enter 或 Escape | 表格 |
-| 在日期区间选择器里选完区间（或点了快捷项） | 表格 |
+| 在日期区间选择器里选完区间（或点了快捷项） | 表格；Usage 工具栏的那个选择器还给 Usage 视图 |
 | 导出 TXT 的保存对话框关闭（保存或取消） | 表格 |
-| 窗口重新显示（菜单栏菜单的 Open Sessions、Finder 再次打开），不管关窗前焦点在哪 | 表格 |
+| 窗口重新显示，不管关窗前焦点在哪 | Open Sessions：表格；Open Usage：Usage 视图；Finder / Spotlight 再次打开（`ResidentCommand::Reopen`）：关窗前的那个视图 |
 
 新增会拿走焦点的界面（弹出层、对话框）时，关闭后要把焦点还给表格或搜索框。
 
-单键快捷键都绑在表格的上下文（`"DataTable"`）上，搜索框里打字不受影响：`n` / `shift-n` 在命中之间跳，`[` / `]` 在卡片之间跳。`[` / `]` 只在详情面板显示、且停在 Conversation tab 时起作用（`AppRoot::step_turn`）：把下一张卡（回合或 AUTO，不含 compact 分隔线）的卡头滚到顶端，`[` 先回到当前卡的开头；到第一张或最后一张不动，不改变展开状态（`DetailState::step_turn`，`keyboard_tests.rs` 的 `brackets_*` 两个测试）。
+`ctrl-1` / `ctrl-2` 不绑上下文，搜索框里也能切（`⌘1`–`⌘4` 已是 Preview 模式）。单键快捷键都绑在表格的上下文（`"DataTable"`）上，搜索框里打字不受影响：`n` / `shift-n` 在命中之间跳，`[` / `]` 在卡片之间跳。`[` / `]` 只在详情面板显示、且停在 Conversation tab 时起作用（`AppRoot::step_turn`）：把下一张卡（回合或 AUTO，不含 compact 分隔线）的卡头滚到顶端，`[` 先回到当前卡的开头；到第一张或最后一张不动，不改变展开状态（`DetailState::step_turn`，`keyboard_tests.rs` 的 `brackets_*` 两个测试）。
 
 ## 视图状态的保存
 
@@ -294,6 +305,8 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 | 选中的 session | |
 | 搜索选项（模式、大小写、Scope、Labels） | |
 | 第一次关窗的说明是否已经显示过（`resident_notice_shown`） | |
+| 停在哪个视图（`view`） | Usage 里点进去的那一天（存成点之前的范围） |
+| Usage 的范围（`usage_range`）、自定义区间的起止日（`usage_custom_range`）、图的指标（`usage_metric`） | Usage 的滚动位置 |
 
 规则：
 
@@ -317,11 +330,12 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 - `crates/app/src/turn_cards.rs` — 回合卡的绘制（`list` 的每一行），刻度的悬停与点击
 - `crates/app/src/search.rs` — 搜索线程、取代机制、结果上限
 - `crates/app/src/main.rs` — 两个接收任务、事件的成批应用、选中规则（`after_rows_changed`）、对话的请求与采用（`open_conversation`、`show_conversation`）、保存（`persist`）
-- `crates/app/src/toolbar.rs` — 过滤条件的应用、搜索的防抖与重跑
+- `crates/app/src/toolbar.rs` — 过滤条件的应用、搜索的防抖与重跑；视图切换和 Usage 的工具栏（范围、`Custom…`、三个下拉、`as of`、立即扫描）
+- `crates/app/src/usage_view.rs` — Usage 视图：`UsageState`、`UsageSnapshot::build`（纯函数，测试断言它的字符串）、`refresh_usage`、范围 / 指标 / 点选某天、各区块的绘制
 - `crates/app/src/table.rs` — 全部行与过滤排序后的顺序、搜索对象的生成
 - `crates/app/src/settings.rs` — 视图状态的读写与容错测试
 - `crates/app/src/resident.rs` — 菜单栏项与菜单（`install`、`Resident`、`MenuTarget`）、隐藏窗口与 activation policy、菜单文字的纯函数（标题取整、三行信息、连续失败的判定）
-- `crates/app/src/keyboard_tests.rs` — 启动焦点与搜索的键盘路径（`cmd-f`、Enter、Escape、`n`、`cmd-g`）、`cmd-c` / `cmd-shift-c` 复制（用测试平台的剪贴板）的行为测试；状态栏的 Today、自动扫描（定时、窗口激活、30 秒节流、不改摘要、不滚回选中行）、跨过 4:00 换日；关窗即隐藏（红色按钮、`cmd-w`）、隐藏时定时扫描与 Scan Now、重开后视图不变且焦点在表格、第一次关窗的说明只弹一次
+- `crates/app/src/keyboard_tests.rs` — 启动焦点与搜索的键盘路径（`cmd-f`、Enter、Escape、`n`、`cmd-g`）、`cmd-c` / `cmd-shift-c` 复制（用测试平台的剪贴板）的行为测试；状态栏的 Today、自动扫描（定时、窗口激活、30 秒节流、不改摘要、不滚回选中行）、跨过 4:00 换日；关窗即隐藏（红色按钮、`cmd-w`）、隐藏时定时扫描与 Scan Now、重开后视图不变且焦点在表格、第一次关窗的说明只弹一次；Usage 视图的切换与焦点、只属于会话表的快捷键在 Usage 下无效、点选某天与 Escape、共用的过滤、每分钟扫描与隐藏后回到十分钟、Usage 下推迟的搜索、重启后恢复视图
 - `crates/core/src/ledger.rs`、`crates/core/src/usage.rs` — 账本与 4:00 分日、`UsageData` 的合计；表结构与迁移规则见 [数据层设计](data-layer-design.md)
 - `crates/core/src/index/indexer.rs` — 流式扫描与单事务写入
 - `kb/notes/2026-09-21-m2-real-data.md`、`kb/notes/2026-09-21-m3-search.md` — 上述数字的来源与当时的取舍

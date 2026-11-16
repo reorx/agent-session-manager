@@ -1,5 +1,7 @@
-//! Toolbar: `Label value ▾` dropdowns (Project / Scope / Updated / Kind / Preview), the search box
-//! with its mode toggles, and the search life cycle (debounce → `Searcher` → hits into the table).
+//! Toolbar: the `Sessions | Usage` switch, then for the session table `Label value ▾` dropdowns
+//! (Project / Scope / Updated / Kind / Preview), the search box with its mode toggles, and the
+//! search life cycle (debounce → `Searcher` → hits into the table); for the Usage view its ranges,
+//! the three filters it shares with the table, and when its data is from.
 
 use std::time::Duration;
 
@@ -8,11 +10,13 @@ use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::date_picker::{DatePicker, DateRangePreset};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
-use gpui_kit::component::{ActiveTheme, Icon, IconName, Sizable, h_flex};
+use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_flex};
 use gpui_kit::*;
 
-use crate::model::{DisplayMode, Filter, Kind, ModelEntry, RangePreset, ScopeSet};
-use agent_session_core::pricing::display_name;
+use crate::model::{DisplayMode, Filter, Kind, MainView, ModelEntry, RangePreset, ScopeSet};
+use crate::usage_view::{RANGE_BUTTONS, fmt_day};
+use agent_session_core::pricing::{display_name, normalize};
+use agent_session_core::usage::UsageRange;
 use crate::search::{LABELS, MAX_RESULT_SESSIONS, SearchEvent, SearchMode};
 use crate::style::{self, FluentBuilder};
 use crate::AppRoot;
@@ -48,6 +52,48 @@ pub(crate) fn trigger(id: &'static str, label: &'static str, value: SharedString
                 .child(div().text_color(style::label()).child(label))
                 .child(div().font_weight(FontWeight::MEDIUM).child(value)),
         )
+}
+
+/// A button of a segmented control (`Sessions | Usage`, the Usage ranges, the chart metric): the
+/// picked one is white on the control's grey.
+pub(crate) fn segment(id: impl Into<ElementId>, label: impl Into<SharedString>, on: bool) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h_full()
+        .px(px(9.))
+        .flex()
+        .items_center()
+        .rounded(px(4.))
+        .text_size(px(12.))
+        .cursor_pointer()
+        .when(on, |el| el.bg(style::white()).text_color(style::text()).font_weight(FontWeight::SEMIBOLD).border_1().border_color(style::control_border()))
+        .when(!on, |el| el.text_color(style::text_secondary()).hover(|s| s.text_color(style::text())))
+        .child(label.into())
+}
+
+/// The grey frame of a segmented control.
+pub(crate) fn segmented() -> Div {
+    h_flex().flex_none().h(px(CONTROL_H)).p(px(2.)).gap(px(1.)).rounded(px(6.)).bg(style::segment_bg())
+}
+
+/// A thin upright line between groups of controls.
+fn separator() -> Div {
+    div().flex_none().w(px(1.)).h(px(16.)).mx(px(2.)).bg(style::border())
+}
+
+/// A button in the toolbar with a word or an icon on it (`Custom…`, rescan): lit like the search
+/// box's toggles while it is on.
+fn tool_button(id: &'static str, on: bool, cx: &App) -> Button {
+    let (bg, fg) = if on { (style::toggle_on_bg(), style::toggle_on_fg()) } else { (style::white(), style::text()) };
+    let hover = if on { bg } else { style::control_hover() };
+    Button::new(id)
+        .custom(ButtonCustomVariant::new(cx).color(bg).foreground(fg).hover(hover).active(hover))
+        .small()
+        .h(px(CONTROL_H))
+        .px(px(8.))
+        .border_1()
+        .border_color(if on { style::toggle_on_fg().opacity(0.35) } else { style::control_border() })
+        .rounded(px(5.))
 }
 
 /// Square on / off button next to the search box (`.*`, `Aa`).
@@ -160,6 +206,8 @@ impl AppRoot {
     }
 
     pub(crate) fn apply_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
+        // Project, Kind and Model are the Usage view's filters too
+        let usage_changed = !crate::usage_view::same_filter(&crate::usage_view::usage_filter(&filter), &crate::usage_view::usage_filter(&self.current_filter(cx)));
         let (changed, ms, shown) = self.table.update(cx, |table, cx| {
             let changed = table.delegate_mut().set_filter(filter);
             if changed {
@@ -173,10 +221,17 @@ impl AppRoot {
             self.status = format!("filtered {shown} sessions in {ms}ms").into();
             self.after_rows_changed(cx);
             self.persist(cx);
-            // the search looks into the filtered sessions only, so it has to look again
+            // the search looks into the filtered sessions only, so it has to look again (once the
+            // table is back, when this came from the Usage view)
             if self.searching() {
-                self.run_search(cx);
+                match self.view {
+                    MainView::Sessions => self.run_search(cx),
+                    MainView::Usage => self.search_went_stale(crate::StaleSearch::Rerun),
+                }
             }
+        }
+        if usage_changed {
+            self.refresh_usage(cx);
         }
         cx.notify();
     }
@@ -550,7 +605,34 @@ impl AppRoot {
         }
     }
 
+    /// `Sessions | Usage`, then the controls of the view on screen.
     pub fn render_toolbar(&self, cx: &mut Context<Self>) -> Div {
+        let bar = h_flex()
+            .w_full()
+            .h(px(TOOLBAR_H))
+            .flex_none()
+            .items_center()
+            .gap(px(6.))
+            .px(px(10.))
+            .bg(style::toolbar_bg())
+            .border_b_1()
+            .border_color(style::border_soft())
+            .child(self.render_view_switch(cx))
+            .child(separator());
+        match self.view {
+            MainView::Sessions => self.render_session_controls(bar, cx),
+            MainView::Usage => self.render_usage_controls(bar, cx),
+        }
+    }
+
+    fn render_view_switch(&self, cx: &mut Context<Self>) -> Div {
+        let item = |id: &'static str, label: &'static str, view: MainView| {
+            segment(id, label, self.view == view).on_click(cx.listener(move |this, _, window, cx| this.set_view(view, window, cx)))
+        };
+        segmented().child(item("view-sessions", "Sessions", MainView::Sessions)).child(item("view-usage", "Usage", MainView::Usage))
+    }
+
+    fn render_session_controls(&self, bar: Div, cx: &mut Context<Self>) -> Div {
         let filter = self.current_filter(cx);
         let project_label: SharedString = match (&filter.project, filter.hidden_projects.len()) {
             (Some(key), _) => self.projects.iter().find(|p| p.key == *key).map_or_else(|| key.clone(), |p| p.name.clone()),
@@ -562,17 +644,7 @@ impl AppRoot {
         let this = cx.entity().downgrade();
         let on_regex = this.clone();
 
-        h_flex()
-            .w_full()
-            .h(px(TOOLBAR_H))
-            .flex_none()
-            .items_center()
-            .gap(px(6.))
-            .px(px(10.))
-            .bg(style::toolbar_bg())
-            .border_b_1()
-            .border_color(style::border_soft())
-            .child(trigger("project", "Project", project_label, cx).dropdown_menu(self.project_menu(cx)))
+        bar.child(trigger("project", "Project", project_label, cx).dropdown_menu(self.project_menu(cx)))
             .child(trigger("scope", "Scope", self.search_opts.scope.label().into(), cx).dropdown_menu(self.scope_menu(cx)))
             .child(trigger("range", "Updated", self.range.label().into(), cx).dropdown_menu(self.range_menu(cx)))
             .when(self.range == RangePreset::Custom, |el| {
@@ -627,4 +699,145 @@ fn date_presets(today: NaiveDate) -> Vec<DateRangePreset> {
         DateRangePreset::range("Last 7 days", back(6), today),
         DateRangePreset::range("Last 30 days", back(29), today),
     ]
+}
+
+impl AppRoot {
+    /// The Usage view's toolbar: ranges, `Custom…` (and its picker), Project / Kind / Model, and
+    /// on the right when the data is from and a button that scans now.
+    fn render_usage_controls(&self, bar: Div, cx: &mut Context<Self>) -> Div {
+        let u = &self.usage_view;
+        let filter = self.current_filter(cx);
+        let mut ranges = segmented();
+        for (ix, (range, label)) in RANGE_BUTTONS.iter().copied().enumerate() {
+            ranges = ranges.child(segment(("usage-range", ix), label, u.range == range).on_click(cx.listener(move |this, _, _, cx| this.set_usage_range(range, cx))));
+        }
+        // a day clicked on the chart: its chip, ✕ goes back
+        if let (UsageRange::Day, Some(day)) = (u.range, u.day) {
+            ranges = ranges.child(
+                segment("usage-day", format!("{} ✕", fmt_day(day)), true)
+                    .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Back to the range before (Esc)").build(window, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.leave_day(cx))),
+            );
+        }
+        let custom = u.range == UsageRange::Custom;
+        let project = match &filter.project {
+            Some(key) => u.projects.iter().find(|p| p.key == key.as_ref()).map_or_else(|| key.clone(), |p| p.name.clone().into()),
+            None => "All".into(),
+        };
+        let as_of: SharedString = match (self.scan_in_flight, self.scan_record.done_at) {
+            (true, _) => "scanning…".into(),
+            (false, Some(at)) => format!("as of {}", at.format("%H:%M")).into(),
+            (false, None) => "".into(),
+        };
+        bar.child(ranges)
+            .child(
+                tool_button("usage-custom", custom, cx)
+                    .tooltip("Pick the first and last day")
+                    .child(div().text_size(px(12.)).child("Custom…"))
+                    .on_click(cx.listener(|this, _, _, cx| this.set_usage_range(UsageRange::Custom, cx))),
+            )
+            .when(custom, |el| {
+                el.child(div().w(px(DATE_PICKER_W)).child(DatePicker::new(&u.date_picker).small().number_of_months(2).presets(date_presets(self.usage_day))))
+            })
+            .child(separator())
+            .child(trigger("usage-project", "Project", project, cx).dropdown_menu(self.usage_project_menu(cx)))
+            .child(trigger("usage-kind", "Kind", usage_kind_label(&filter).into(), cx).dropdown_menu(self.usage_kind_menu(cx)))
+            .child(trigger("usage-model", "Model", filter.model.as_ref().map_or_else(|| "All".into(), |m| display_name(m).into()), cx).dropdown_menu(self.usage_model_menu(cx)))
+            .child(div().flex_1())
+            .child(div().flex_none().text_size(px(11.)).text_color(style::muted()).child(as_of))
+            .child(
+                tool_button("usage-rescan", false, cx)
+                    .w(px(26.))
+                    .px(px(0.))
+                    .tooltip("Scan for new calls now")
+                    .child(Icon::new(IconName::RotateCw).size(px(13.)).text_color(style::label()))
+                    .disabled(self.scan_in_flight)
+                    .on_click(cx.listener(|this, _, _, cx| this.rescan(false, cx))),
+            )
+    }
+
+    /// Every project with calls in the ledger, including those whose transcripts are all gone;
+    /// hidden ones too (Usage counts them).
+    fn usage_project_menu(&self, cx: &Context<Self>) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let this = cx.entity().downgrade();
+        let current = self.current_filter(cx).project;
+        let mut projects: Vec<(SharedString, SharedString, usize)> = self.usage_view.projects.iter().map(|p| (p.key.clone().into(), p.name.clone().into(), p.sessions)).collect();
+        // a pick without calls in the ledger stays listed, so it can be undone
+        if let Some(key) = current.as_ref().filter(|k| !projects.iter().any(|p| p.0 == **k)) {
+            projects.insert(0, (key.clone(), key.clone(), 0));
+        }
+        let total: usize = projects.iter().map(|p| p.2).sum();
+        move |menu, _, _| {
+            let all = this.clone();
+            let mut menu = menu.min_w(px(248.)).max_h(px(420.)).scrollable(true).item(menu_item("All projects".into(), total.to_string().into(), true, current.is_none(), move |cx| {
+                all.update(cx, |app, cx| app.set_project(None, cx)).ok();
+            }));
+            if !projects.is_empty() {
+                menu = menu.separator();
+            }
+            for (key, name, sessions) in &projects {
+                let (this, pick) = (this.clone(), key.clone());
+                menu = menu.item(menu_item(name.clone(), sessions.to_string().into(), true, current.as_ref() == Some(key), move |cx| {
+                    let pick = pick.clone();
+                    this.update(cx, |app, cx| app.set_project(Some(pick), cx)).ok();
+                }));
+            }
+            menu
+        }
+    }
+
+    /// CLI, SDK and BG with their sessions in the ledger; History means nothing here.
+    fn usage_kind_menu(&self, cx: &Context<Self>) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let this = cx.entity().downgrade();
+        let kinds = self.current_filter(cx).kinds;
+        let counts = self.usage_view.kind_counts;
+        move |menu, _, _| {
+            let mut menu = menu.min_w(px(160.));
+            for (ix, kind) in [Kind::Cli, Kind::Sdk, Kind::Background].into_iter().enumerate() {
+                let this = this.clone();
+                menu = menu.item(menu_item(kind.short().into(), counts[ix].to_string().into(), true, kinds.contains(kind), move |cx| {
+                    this.update(cx, |app, cx| app.toggle_kind(kind, cx)).ok();
+                }));
+            }
+            menu
+        }
+    }
+
+    /// Every model in the ledger and its calls: Usage filters each call by its own model.
+    fn usage_model_menu(&self, cx: &Context<Self>) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
+        let this = cx.entity().downgrade();
+        let current = self.current_filter(cx).model;
+        let picked = current.as_ref().map(|m| normalize(m).to_string());
+        let mut entries: Vec<(String, u64)> = self.usage_view.models.clone();
+        if let Some(model) = picked.as_ref().filter(|m| !entries.iter().any(|e| e.0 == **m)) {
+            entries.push((model.clone(), 0));
+        }
+        move |menu, _, _| {
+            let all = this.clone();
+            let mut menu = menu.min_w(px(200.)).max_h(px(420.)).scrollable(true).item(menu_item("All".into(), "".into(), false, current.is_none(), move |cx| {
+                all.update(cx, |app, cx| app.set_model_filter(None, cx)).ok();
+            }));
+            if !entries.is_empty() {
+                menu = menu.separator();
+            }
+            for (model, calls) in &entries {
+                let (this, pick) = (this.clone(), SharedString::from(model.clone()));
+                let hint = format!("{} calls", crate::resident::thousands(*calls));
+                menu = menu.item(menu_item(display_name(model).into(), hint.into(), true, picked.as_ref() == Some(model), move |cx| {
+                    this.update(cx, |app, cx| app.set_model_filter(Some(pick.clone()), cx)).ok();
+                }));
+            }
+            menu
+        }
+    }
+}
+
+/// The Kind button's value in the Usage view: CLI, SDK, BG only.
+fn usage_kind_label(filter: &Filter) -> String {
+    let on: Vec<&str> = [Kind::Cli, Kind::Sdk, Kind::Background].into_iter().filter(|k| filter.kinds.contains(*k)).map(|k| k.short()).collect();
+    match on.len() {
+        0 => "None".into(),
+        3 => "All".into(),
+        _ => on.join(", "),
+    }
 }
