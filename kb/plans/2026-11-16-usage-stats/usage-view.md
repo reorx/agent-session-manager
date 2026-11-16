@@ -221,16 +221,16 @@ app 新增 `usage_view.rs`：`UsageState`（范围、指标、点进来的那一
 
 ### 实施步骤
 
-- [ ] 1. core `usage.rs`：范围、上一段、槽位、`summary`、`series`、`moving_average`、条目。先写 `crates/core/tests/usage.rs` 里的用例，再实现
-- [ ] 2. `settings.rs` 的新字段和往返测试
-- [ ] 3. `UsageSnapshot::build` 的测试与实现
-- [ ] 4. `keyboard_tests.rs` 的视图切换与焦点用例；`MainView`、`set_view`、绑定、菜单、会话表专用 action 的判断
-- [ ] 5. 工具栏的两种形态、范围按钮、三个下拉、Custom
-- [ ] 6. `render_usage`：指标卡、三张表、session 列表、空状态
-- [ ] 7. `usage_chart.rs`：先写几何的测试，再实现绘制、悬停、点击
-- [ ] 8. 状态栏、60 秒的间隔、`search_stale`、`Open Usage`
-- [ ] 9. `ASM_USAGE_AUTOPLAY`、截图脚本；用 `agent-inspect-session.sh` 看 context 占用后做实机验收；对照界面稿检查布局
-- [ ] 10. 文档（`gpui-kit-guide.md` 加图表一节、`app-architecture.md` 的焦点表和保存表、`product-prd.md`、`AGENTS.md`）、commit
+- [x] 1. core `usage.rs`：范围、上一段、槽位、`summary`、`series`、`moving_average`、条目。先写 `crates/core/tests/usage.rs` 里的用例，再实现
+- [x] 2. `settings.rs` 的新字段和往返测试
+- [x] 3. `UsageSnapshot::build` 的测试与实现
+- [x] 4. `keyboard_tests.rs` 的视图切换与焦点用例；`MainView`、`set_view`、绑定、菜单、会话表专用 action 的判断
+- [x] 5. 工具栏的两种形态、范围按钮、三个下拉、Custom
+- [x] 6. `render_usage`：指标卡、三张表、session 列表、空状态
+- [x] 7. `usage_chart.rs`：先写几何的测试，再实现绘制、悬停、点击
+- [x] 8. 状态栏、60 秒的间隔、`search_stale`、`Open Usage`
+- [x] 9. `ASM_USAGE_AUTOPLAY`、截图脚本；用 `agent-inspect-session.sh` 看 context 占用后做实机验收；对照界面稿检查布局
+- [x] 10. 文档（`gpui-kit-guide.md` 加图表一节、`app-architecture.md` 的焦点表和保存表、`product-prd.md`、`AGENTS.md`）、commit
 
 ### 测试与验证
 

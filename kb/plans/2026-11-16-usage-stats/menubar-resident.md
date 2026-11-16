@@ -158,15 +158,15 @@ tags:
 
 ### 实施步骤
 
-- [ ] 1. 试验（不进主线代码）：一个最小的 GPUI 窗口加 `resident.rs` 的雏形，验证四件事并把结论写进本 spec 的「风险与待定」：(a) `orderOut:` 之后 `activate_window()` 能把窗口带回来且能收到键盘输入；(b) Regular → Accessory → Regular 切换后，Dock 图标和应用菜单栏都恢复；(c) status item 的菜单项经 `define_class!` 的 target 能把命令送到 GPUI 的任务；(d) 菜单开着时更新菜单项标题是否即时生效（不生效也可以接受）。(b) 不稳定时停下来告诉用户，按「Dock 图标一直在」继续
-- [ ] 2. `resident.rs` 的纯函数：先写测试，再实现
-- [ ] 3. `settings.rs` 加字段和往返测试
-- [ ] 4. `keyboard_tests.rs` 写关窗、重开、焦点的用例，再实现 `close_requested` / `show_window` / `CloseWindow`
-- [ ] 5. `resident::install`、命令任务、`on_reopen`、`sync_resident`
-- [ ] 6. 第一次关窗的对话框
-- [ ] 7. `ASM_RESIDENT_AUTOPLAY` 和 `scripts/screenshot-resident.sh`（下节），实机验收；先读 `~/.claude/docs/DESKTOP_APP_TESTING.md`
-- [ ] 8. `make release-local` 出一个本地包，验收标准 10 在包上做
-- [ ] 9. 文档、commit
+- [x] 1. 试验（不进主线代码）：一个最小的 GPUI 窗口加 `resident.rs` 的雏形，验证四件事并把结论写进本 spec 的「风险与待定」：(a) `orderOut:` 之后 `activate_window()` 能把窗口带回来且能收到键盘输入；(b) Regular → Accessory → Regular 切换后，Dock 图标和应用菜单栏都恢复；(c) status item 的菜单项经 `define_class!` 的 target 能把命令送到 GPUI 的任务；(d) 菜单开着时更新菜单项标题是否即时生效（不生效也可以接受）。(b) 不稳定时停下来告诉用户，按「Dock 图标一直在」继续
+- [x] 2. `resident.rs` 的纯函数：先写测试，再实现
+- [x] 3. `settings.rs` 加字段和往返测试
+- [x] 4. `keyboard_tests.rs` 写关窗、重开、焦点的用例，再实现 `close_requested` / `show_window` / `CloseWindow`
+- [x] 5. `resident::install`、命令任务、`on_reopen`、`sync_resident`
+- [x] 6. 第一次关窗的对话框
+- [x] 7. `ASM_RESIDENT_AUTOPLAY` 和 `scripts/screenshot-resident.sh`（下节），实机验收；先读 `~/.claude/docs/DESKTOP_APP_TESTING.md`
+- [x] 8. `make release-local` 出一个本地包，验收标准 10 在包上做
+- [x] 9. 文档、commit
 
 ### 测试与验证
 

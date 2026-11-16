@@ -104,8 +104,8 @@ usage-ledger ──┬── menubar-resident
 ### 实施步骤
 
 - [x] 1. [usage-ledger](usage-ledger.md)
-- [ ] 2. [menubar-resident](menubar-resident.md)
-- [ ] 3. [usage-view](usage-view.md)
+- [x] 2. [menubar-resident](menubar-resident.md)
+- [x] 3. [usage-view](usage-view.md)
 - [ ] 4. [usage-drilldown](usage-drilldown.md)
 - [ ] 5. 跨期验收（上面 PRD 的验收标准），证据归档到 `tmp/2026-11-12-usage-stats/`
 

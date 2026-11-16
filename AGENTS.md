@@ -6,7 +6,7 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格列出本机所有 Cla
 
 M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监听、subagent 查看、设置页；打包和图标已随 1.0 做完），定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3（开发任务的总入口，需求 R1–R13 也在里面；§2 架构未随实现更新）。各功能的实现状态在 `kb/docs/product-prd.md` §2，未解决的问题在 `kb/known-issues.md`。
 
-用量统计（`kb/plans/2026-11-16-usage-stats/`，四期）进行中：第 1 期用量账本已完成（2026-11-16，含状态栏 Today、4:00 分日、自动扫描，真实账本已从索引备份导入），第 2 期常驻菜单栏、第 3 期 Usage 视图、第 4 期从 Usage 下钻未完成。
+用量统计（`kb/plans/2026-11-16-usage-stats/`，四期）进行中：第 1 期用量账本（含状态栏 Today、4:00 分日、自动扫描，真实账本已从索引备份导入）、第 2 期常驻菜单栏、第 3 期 Usage 视图已完成（2026-11-16），第 4 期从 Usage 下钻进行中。
 
 ## 结构
 
@@ -20,7 +20,9 @@ M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监�
 
 - 详情面板：`detail.rs` 用 GPUI 的 `list` + `ListState` 按行表渲染回合卡（`turn_cards.rs`），一行是卡片的一段
 - 用量账本：用量一旦被读到就永久留在账本里，删记录文件、重建索引、索引损坏都不影响；会话表的费用仍来自索引。store 线程在第一次 `Loaded` 之后发账本的全部用量（`StoreEvent::Usage { full: true }`），之后每次扫描只发写过的 session；`AppRoot` 在主线程算状态栏的 Today（`roll_day` / `refresh_today`）。用量日从本地 4:00 开始，全应用（时间预设、Today）只用 core `usage.rs` 的 `usage_day` / `day_start_ms`
-- 自动扫描：应用开着时窗口激活和每 10 分钟各触发一次安静的增量扫描（30 秒节流）。安静的扫描不发进度，写过的行等事务提交后才发，遇到索引或账本被锁只发 `ScanSkipped`；菜单发起的扫描照旧流式更新
+- 自动扫描：应用开着时窗口激活和每 10 分钟（Usage 视图开着时 60 秒）各触发一次安静的增量扫描（30 秒节流）。安静的扫描不发进度，写过的行等事务提交后才发，遇到索引或账本被锁只发 `ScanSkipped`；菜单发起的扫描照旧流式更新
+- 常驻菜单栏（`resident.rs`，NSStatusItem + NSMenu）：关窗（`⌘W`、红色按钮）只隐藏窗口并切到 Accessory，Dock 图标消失，应用留在菜单栏；第一次关窗弹说明框（`state.json` 的 `resident_notice_shown`）。`⌘Q` 或菜单 Quit 才退出，Open Sessions / Open Usage、Finder 重开把窗口带回前台。macOS 26 上用户把状态项拖出菜单栏，系统会关掉「系统设置 › 菜单栏 › 允许在菜单栏中显示」里的本应用，之后启动也不显示
+- Usage 视图：`usage_view.rs`（`UsageSnapshot::build` 在主线程按范围、过滤、用量日现算，`render` 只取预格式化内容）、`usage_chart.rs`（自定义 `Plot`，绘制、悬停、点击共用 `slot_at`）。`⌃1` / `⌃2`、View 菜单、状态栏 Today 切换视图；Usage 下不重跑搜索，切回 Sessions 时按 `search_stale` 重搜。Project / Kind / Model 过滤两个视图共用，Model 存 `pricing::normalize` 之后的名字（Usage 按调用比，Sessions 按 session 的主模型比）
 - 会话操作（复制 resume 命令 / ID、Finder、导出 TXT、收藏等）都在 `actions.rs`，可用性由纯函数按行的事实算出；标题行按钮、右键菜单、`⌘C` / `⇧⌘C` 派发同一组 action
 - History 行读 `history.jsonl` 显示 prompt 卡片，不参与搜索（与 Python 脚本一致）
 - 费用由 core 按 `message.usage` × `pricing.rs` 价格表自算，按 `message.id` 去重，subagent 计入父 session；Claude Code 记录的 `cost-state` 只作对照
@@ -35,14 +37,14 @@ M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监�
 
 `make help` 列出全部命令。要点：
 
-- `make dev`：编译并启动 app（`run` 会先 pkill 旧实例）。手动起的 app 验证后必须 kill，用 `pgrep -fl agent-session-manager` 检查
+- `make dev`：编译并启动 app（`run` 会先 pkill 旧实例）。手动起的 app 验证后必须 kill，用 `pgrep -fl agent-session-manager` 检查。关窗不会退出（常驻菜单栏），用菜单 Quit 或 `pkill -f agent-session-manager`
 - 测试：`cargo test -p agent-session-core`、`cargo test -p agent-session-manager`（纯逻辑，加上无界面窗口里的键盘测试）、`make test` 全跑
 - `make asm ARGS="…"` 跑 `asm` CLI，`make transcript-reader ARGS="SESSION_ID -o session.txt"` 导出精简 TXT；子命令和参数看 `--help`。改价格表或用量解析后跑一次 `asm cost --compare`（自算费用与 `cost-state` 的偏差）
 - `make parity`：在真实 `~/.claude` 上把 `asm` 与 Python 脚本（`~/Code/scripts/claude_session_search.py`，本项目的行为基准）逐字比对；改解析器、清理逻辑、`regex.rs` 或输出格式后必须跑。两边的列表顺序一致（开始时间降序，并列时按更新时间降序、再按 id），改排序要两边一起改（脚本的测试在它旁边的 `tests/test_claude_session_search.py`）。比对期间有 session 正在写入时 search 组偶尔失败，重跑即过
-- 截图：`make screenshot`、`screenshot-search`、`screenshot-detail`、`screenshot-cost` 由 app 的 autoplay 自己走流程；`screenshot-clicks` 用 cliclick 真点击，坐标写在 `scripts/screenshot-clicks.sh`，改布局后要校对。都跑在真实索引上，输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）。各脚本截哪些图、怎么用 `ASM_AUTOPLAY_*` 指定 session 和查询，见 `kb/docs/gpui-kit-guide.md`「脚本化交互与截图」。`make screenshot-usage`（状态栏 Today、文件驱动的扫描 / 重建）例外：必须设 `ASM_DB`、`ASM_CLAUDE_DIR` 指向副本
+- 截图：`make screenshot`、`screenshot-search`、`screenshot-detail`、`screenshot-cost` 由 app 的 autoplay 自己走流程；`screenshot-clicks` 用 cliclick 真点击，坐标写在 `scripts/screenshot-clicks.sh`，改布局后要校对。都跑在真实索引上，输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）。各脚本截哪些图、怎么用 `ASM_AUTOPLAY_*` 指定 session 和查询，见 `kb/docs/gpui-kit-guide.md`「脚本化交互与截图」。`make screenshot-usage`（状态栏 Today、文件驱动的扫描 / 重建）例外：必须设 `ASM_DB`、`ASM_CLAUDE_DIR` 指向副本。`make screenshot-usage-view`（Usage 视图导览：范围、按小时 / 按天、悬停、点进某天、窄窗口、空状态）要设 `ASM_DB`，账本放在它旁边。`make screenshot-resident`（菜单栏常驻：关窗、重开、菜单；`RESIDENT_CLICK=1` 改用真点击）和它的行为测试 `make test-screenshot-resident`：验收以退出码为准，不看日志里的 passed
 - 量耗时：搜索用 `ASM_BENCH_DB=<索引副本> cargo test -p agent-session-manager real_index_timings -- --ignored --nocapture`（`ASM_BENCH_QUERIES`、`ASM_BENCH_REGEX` 可换查询）；详情打开速度看 app 日志的 `detail:` 行（read / build / first frame），量的时候要停在 Conversation tab，停在 Metadata 上首帧要等切回来才打点。不要用截图脚本日志里的耗时，刚唤醒屏幕后的数字可以偏高 4–8 倍
 - 构建产物在 `~/Library/Caches/cargo-target`（全局 cargo 配置），不在 `./target`；`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒
-- 环境变量：`ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（默认 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`）、`ASM_STATE`（仅 app，默认为索引同目录的 `state.json`）、`ASM_FAVORITES_DIR`（覆盖共享配置中的收藏目录）、`ASM_TRASH_DIR`（取消收藏改用此目录，测试必设）、`ASM_USAGE_AUTOPLAY`（gate 目录，用文件驱动扫描 / 重建，见 gpui-kit-guide）。验收时把 `ASM_DB` / `ASM_STATE` 指到 `tmp/`，可反复测冷启动而不动真实索引；账本跟着 `ASM_DB` 在同一目录，所以也不会动真实账本
+- 环境变量：`ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（默认 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`）、`ASM_STATE`（仅 app，默认为索引同目录的 `state.json`）、`ASM_FAVORITES_DIR`（覆盖共享配置中的收藏目录）、`ASM_TRASH_DIR`（取消收藏改用此目录，测试必设）、`ASM_USAGE_AUTOPLAY`（gate 目录，用文件驱动扫描 / 重建，见 gpui-kit-guide）、`ASM_USAGE_VIEW_AUTOPLAY`（Usage 视图导览）、`ASM_RESIDENT_AUTOPLAY`（菜单栏常驻流程）。验收时把 `ASM_DB` / `ASM_STATE` 指到 `tmp/`，可反复测冷启动而不动真实索引；账本跟着 `ASM_DB` 在同一目录，所以也不会动真实账本
 - Rust 由 mise 管理（版本锁在 `mise.toml`）；新机器先 `make setup`（含 Metal Toolchain）
 - 发布：`make release-local` 在本地走完整条链（产物在 `dist/release/`，不上传），`make test-release` 是发布脚本的行为测试。名字、最低系统、Sparkle 公钥集中在 `scripts/release/config.sh`。Sparkle 私钥（`~/Sync/apple-developer/sparkle/agent-session-manager_ed25519.key`）永远不要重新生成
 - `make icon`：把 `assets/icon/` 的两张 SVG 渲染成 `AppIcon.icns`；改了 SVG 要重跑，并提交生成的 `.icns`
@@ -51,7 +53,7 @@ M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监�
 
 1. 熄屏时截图是黑的：截图脚本自带 `wake-screen`，手动截图前先跑一次
 2. 截图必须用 `Read` 打开看过再下结论，不要只看文件大小
-3. **不要用 System Events / osascript / cliclick 发按键，也不要动剪贴板**：全局按键只进最前台的 app，会打进用户正在用的窗口，GPUI 也收不到 cliclick 的按键。交互用环境变量驱动的 autoplay（app 每步稳定后打日志标记，脚本等到标记再按窗口 ID 截图）；cliclick 鼠标点击只用于无法程序化打开的弹出层
+3. **不要用 System Events / osascript / cliclick 发按键，也不要动剪贴板**。cliclick 点击前用 `scripts/winid.swift --at` 确认点击处最上层窗口属于本应用（点菜单栏坐标还要确认前台 pid），每次点击前都重新确认；要把应用拉到前台时先确认用户空闲（`HIDIdleTime` ≥ 25 秒），在控件上停 ≥ 0.8 秒再点。agent-desktop 只看得到主菜单栏和少数窗口元素，Usage 视图和状态项都看不到（gpui-kit-guide「agent-desktop 能做什么」）。：全局按键只进最前台的 app，会打进用户正在用的窗口，GPUI 也收不到 cliclick 的按键。交互用环境变量驱动的 autoplay（app 每步稳定后打日志标记，脚本等到标记再按窗口 ID 截图）；cliclick 鼠标点击只用于无法程序化打开的弹出层
 4. 通过后把截图归档到 `tmp/<date>-<task>/`（已 gitignore）并在报告里给出路径
 5. 里程碑完成后更新本文件的「当前状态」和 `kb/docs/product-prd.md` 的状态表，然后 commit
 
@@ -83,7 +85,8 @@ M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监�
 - `Task` drop 即取消：`cx.spawn` 的结果要 `.detach()` 或存进字段；`this.update(cx, ..)` 返回 Result，用 `.ok()` 不要 unwrap
 - 测试模块里要写 `use core::prelude::v1::test;`，否则 `use gpui_kit::*` 带进的 `test` 宏会让 `#[test]` 展开递归超限
 - 表格的 `TableEvent::SelectRow` 是延后送达的通知：`on_table_event` 只处理与 `selected_row()` 一致的那个。照做旧事件会让两次选中互相触发、主线程空转（原因见 `kb/docs/app-architecture.md`「选中」）
-- 焦点必须始终在应用的某个元素上：没有焦点时快捷键和菜单动作到不了 `AppRoot`。启动时焦点给表格；新增弹出层，关闭后要把焦点还回去
+- 焦点必须始终在应用的某个元素上：没有焦点时快捷键和菜单动作到不了 `AppRoot`。启动时焦点给表格；新增弹出层，关闭后把焦点还给当前视图（`focus_view`），不要固定还给表格：Usage 视图下表格没有渲染，等于没有焦点
+- 不要在 GPUI 的 `update`（action、事件处理）里同步调 `NSWindow performClose:`（AppKit 同步回调 `windowShouldClose:`，借用冲突让进程 abort）或打开 NSMenu（嵌套 run loop）：`⌘W` 走自己的 `CloseWindow` action，打开菜单经 `performSelector:withObject:afterDelay:0` 推迟（gpui-kit-guide）
 - 改快捷键、焦点或搜索框的按键处理，先在 `keyboard_tests.rs` 写行为测试（整个应用跑在无界面窗口里，按键走 GPUI 的分发）
 - 程序化 `InputState::set_value` 不发 `InputEvent::Change`，之后要自己触发后续逻辑（如 `AppRoot::set_query` 直接调 `run_search`）
 - 扫描引起的刷新不把表格滚回选中的行（`relocate_selection(false)`）；搜索模式下扫描后的重搜走 `refresh_search`（结果攒齐后一次替换），不走 `run_search`。新加的刷新入口照这个走
@@ -121,7 +124,7 @@ plans / notes / sessions（当时的方案、实测与取舍），改到对应�
 - `kb/plans/2026-11-10-cost-analysis.md` — 主模型定义、换模型计价口径、分组用量存表的原因；改 Cost tab、Model 过滤或 `asm cost --as` 前读
 - `kb/plans/2026-11-03-context-window-from-catalog.md` — 模型目录格式、合并优先级、刷新；改模型目录读取或窗口来源前读
 - `kb/plans/2026-11-12-columns-and-cache-breaks.md` — 列开关、命中率、缓存失效的判定与原因；改表格列、`conversation.rs::cache_check` 或回合卡说明行前读
-- `kb/plans/2026-11-16-usage-stats/` — 用量统计四期（账本、常驻菜单栏、Usage 视图、下钻）：各期共用的口径（4:00 分日、按调用时间归日、In 的定义、账本只增不删）在 `index.md`，各期一份 spec；改账本、`usage.rs`、自动扫描、状态栏 Today 或会话表的时间预设前读。第 1 期的实现与验收在 `kb/sessions/2026-11-16-usage-p1-*.md`
+- `kb/plans/2026-11-16-usage-stats/` — 用量统计四期（账本、常驻菜单栏、Usage 视图、下钻）：各期共用的口径（4:00 分日、按调用时间归日、In 的定义、账本只增不删）在 `index.md`，各期一份 spec；改账本、`usage.rs`、自动扫描、状态栏 Today、会话表的时间预设、常驻菜单栏（`resident.rs`）或 Usage 视图前读。各期的实现与验收在 `kb/sessions/2026-11-16-usage-p*-*.md`
 - `kb/plans/2026-11-16-cache-break-accuracy.md` — 失效判定的新规则：用量明细（`iterations`）、按 rewind 的祖先调用比较、请求记录（`api-request`）给出的原因、分段的缓存时长；改用量解析、失效判定（实现后在 `claude/cache.rs`）或回合卡失效文案前读
 - `kb/plans/2026-10-26-favorites.md` — 收藏快照、目录迁移、去重优先级、索引根目录守卫；改收藏流程前读
 - `kb/notes/2026-10-10-transcript-reader-xml.md`（导出格式）、`kb/notes/2026-10-10-transcript-reader.md`（压缩规则）；改导出内容前读

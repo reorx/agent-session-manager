@@ -2,6 +2,24 @@
 
 > 当前 app 已知、待后续处理的问题：缺陷、简化实现、未验收项、待建流程。只反映最新状态——解决了就删掉条目，经过记到 `kb/sessions/`。
 
+## 常驻菜单栏：菜单栏项被系统关掉后，关窗就找不到应用了
+
+- 记录：2026-11-16（用户手动检查第 2 期时发现，`tmp/2026-11-12-usage-stats/status.md` 日志）
+- macOS 26 上用户把状态项拖出菜单栏（或在 Thaw 这类工具里拖动时误拖出去），系统会关掉「系统设置 › 菜单栏 › 允许在菜单栏中显示」里的本应用（Control Center 的 `trackedApplications` 里 `isAllowed: false`），之后每次启动都不显示，Thaw 里也看不到。这时按 `⌘W` 关窗，Dock 图标也跟着消失，应用没有任何可见入口，只能从 Finder 双击或 `open` 把窗口叫回来。
+- 处理方向：关窗前判断状态项是否真的显示着（macOS 26 是否给得出这个信号要实测），不显示就保留 Dock 图标或直接退出；至少在说明框里写一句怎么在系统设置里恢复。
+
+## 发版：`make notarize` 不能重跑
+
+- 记录：2026-11-16（usage-p2-accept2 跑 `make release-local` 时发现）
+- dmg 公证遇到网络超时后，重跑 `make notarize` 会因为 dmg 已经签过名直接失败，只能从头出包。
+- 处理方向：签名前检查是否已签名（或先删掉旧签名），让 notarize 这一步可以单独重跑。
+
+## 费用：同一模型带日期和不带日期的名字混用时，主模型可能判错
+
+- 记录：2026-11-16（usage-p3-chart 返工时发现，`kb/sessions/2026-11-16-usage-p3-chart.md`「协调者摘要（usage-p3-app-r1）」）
+- core `cost::primary_model` 按原始模型名分组算花费，同一个 session 里 `claude-haiku-4-5-20251001` 和 `claude-haiku-4-5` 都出现时，花费被拆成两组，主模型（Cost tab、按模型换算、会话表的 Model 过滤）可能落到另一个模型上。很少见。
+- 处理方向：分组前先 `pricing::normalize`，会改主模型的结果，要提升 `SCHEMA_VERSION` 或确认它不进索引。
+
 ## 工具栏：Custom 日期选择器的默认区间跨月后不更新
 
 - 记录：2026-11-16（usage-p1-app 发现，`kb/sessions/2026-11-16-usage-p1-app.md`「交给协调者」）
