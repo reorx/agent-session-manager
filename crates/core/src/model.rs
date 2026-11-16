@@ -500,3 +500,34 @@ pub struct Marked {
 pub enum Part { Prompt, Step(usize), Reply, Summary }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HitPlace { pub item: usize, pub part: Part }
+
+/// UTC-hour usage grouped by all price determinants.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HourlyUsage {
+    pub hour: i64,
+    pub model: String,
+    pub fast: bool,
+    pub long_prompt: bool,
+    pub sub: bool,
+    pub responses: u64,
+    pub tokens: Tokens,
+}
+
+/// Durable metadata: survives transcript deletion and index rebuilds.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LedgerSession {
+    pub id: String,
+    pub project_key: String,
+    pub project_path: Option<String>,
+    pub title: String,
+    pub entrypoint: Option<String>,
+    pub is_background: bool,
+    pub started_at: Option<i64>,
+    pub updated_at: i64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SessionUsage {
+    pub session: LedgerSession,
+    pub hours: Vec<HourlyUsage>,
+}

@@ -1,13 +1,16 @@
-//! The SQLite index: one connection, owned by whoever indexes or queries (never shared across
-//! threads). Schema in `schema.sql`; a version mismatch or an unreadable file rebuilds it.
+//! The SQLite index and its separate durable usage ledger, owned by one indexing thread.
+//! Schema in `schema.sql`; a version mismatch or an unreadable index rebuilds only the index.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, TransactionBehavior, params};
 
-use crate::model::{MessageRow, ModelUsage, Role, SessionSummary, Source, TextKind, Tokens, UsageRow};
+use crate::ledger::{self, Ledger, LedgerBatch, LedgerFailure, NewerVersion};
+use crate::claude::paths::ledger_path;
+use crate::model::{SessionUsage, MessageRow, ModelUsage, Role, SessionSummary, Source, TextKind, Tokens, UsageRow};
 
 /// Also bump this when a price in `pricing.rs` changes: stored costs are computed at index time.
 /// Likewise when the parser derives something else from the same records (6: which user records
@@ -20,6 +23,9 @@ const SCHEMA: &str = include_str!("schema.sql");
 pub struct Db {
     conn: Connection,
     path: Option<PathBuf>,
+    ledger: RefCell<Option<Ledger>>,
+    ledger_required: bool,
+    pending: RefCell<LedgerBatch>,
 }
 
 /// True when `error` comes from SQLite finding the database locked by another connection
@@ -154,12 +160,12 @@ impl Db {
              PRAGMA cache_size = -65536;",
         )?;
         conn.busy_timeout(std::time::Duration::from_secs(2))?;
-        Ok(Db { conn, path: Some(path.to_path_buf()) })
+        Ok(Db { conn, path: Some(path.to_path_buf()), ledger: RefCell::new(None), ledger_required: false, pending: RefCell::default() })
     }
 
     pub fn open_in_memory() -> Result<Db> {
         let conn = Connection::open_in_memory()?;
-        let mut db = Db { conn, path: None };
+        let mut db = Db { conn, path: None, ledger: RefCell::new(Some(Ledger::open_in_memory()?)), ledger_required: true, pending: RefCell::default() };
         db.configure()?;
         db.ensure_schema()?;
         Ok(db)
@@ -168,14 +174,22 @@ impl Db {
     fn open_checked(path: &Path, busy_timeout: std::time::Duration) -> Result<Db> {
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         conn.busy_timeout(busy_timeout)?;
-        let mut db = Db { conn, path: Some(path.to_path_buf()) };
+        let mut db = Db { conn, path: Some(path.to_path_buf()), ledger: RefCell::new(None), ledger_required: false, pending: RefCell::default() };
         db.use_wal(busy_timeout).map_err(|e| match is_busy(&e) {
             true => e.context(format!("{}: another connection kept it locked", path.display())),
             // a read-only file, a full disk, an I/O error: report it as it is
             false => e.context(format!("open {}", path.display())),
         })?;
         db.configure()?;
+        let ledger = match Ledger::open(&ledger_path(path)) {
+            Ok(ledger) => Some(ledger),
+            Err(e) if e.downcast_ref::<NewerVersion>().is_some() => { eprintln!("{e}"); None }
+            Err(e) => return Err(anyhow::anyhow!("open usage ledger: {e:#}")),
+        };
+        db.ledger_required = ledger.is_some();
+        db.ledger.replace(ledger);
         db.ensure_schema()?;
+        db.reconcile_ledger()?;
         Ok(db)
     }
 
@@ -230,8 +244,9 @@ impl Db {
     /// Build the schema in one write transaction, unless another connection built it while this
     /// one waited for the lock.
     fn build_schema(&mut self) -> Result<()> {
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         if schema_mismatch(&tx)?.is_some() {
+            self.salvage_into_ledger(&tx)?;
             reset_schema(&tx)?;
         }
         tx.commit()?;
@@ -282,9 +297,105 @@ impl Db {
     /// write at once as busy instead of waiting.
     pub fn transaction<T>(&self, f: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let out = f(self)?;
+        let result = f(self).and_then(|out| { self.flush_ledger()?; Ok(out) });
+        // Clear even on a failed ledger write: the index transaction is about to roll back.
+        self.pending.take();
+        let out = result?;
         tx.commit()?;
         Ok(out)
+    }
+
+    /// Durable usage, independent of the current index and transcript availability.
+    pub fn ledger_usage(&self, ids: Option<&[String]>) -> Result<Option<Vec<SessionUsage>>> {
+        self.read_ledger(|ledger| ledger.usage(ids))
+    }
+
+    /// Preserve readable usage before resetting an old index; also accepts a backup connection.
+    pub fn salvage_into_ledger(&self, source: &Connection) -> Result<()> {
+        self.check_ledger_available()?;
+        if self.ledger.borrow().is_none() { return Ok(()); }
+        let batch = ledger::read_responses(source, None)?;
+        self.write_ledger(&batch, source)
+    }
+
+    fn reconcile_ledger(&self) -> Result<()> {
+        let Some(counts) = self.read_ledger(Ledger::response_counts)? else { return Ok(()); };
+        let mut stmt = self.conn.prepare("SELECT session_id,sum(responses) FROM session_model_usage GROUP BY session_id")?;
+        let mut missing = BTreeSet::new();
+        for row in stmt.query_map([], |r| Ok((r.get::<_,String>(0)?, r.get::<_,i64>(1)? as u64)))? {
+            let (sid, count) = row?;
+            if counts.get(&sid).copied().unwrap_or(0) < count { missing.insert(sid); }
+        }
+        if !missing.is_empty() {
+            let batch = ledger::read_responses(&self.conn, Some(&missing))?;
+            self.write_ledger(&batch, &self.conn)?;
+        }
+        Ok(())
+    }
+
+    fn flush_if_autocommit(&self) -> Result<()> {
+        if self.conn.is_autocommit() { self.flush_ledger()?; }
+        Ok(())
+    }
+
+    fn flush_ledger(&self) -> Result<()> {
+        let batch = self.pending.take();
+        if batch.is_empty() { return Ok(()); }
+        self.write_ledger(&batch, &self.conn)
+    }
+
+    fn write_ledger(&self, batch: &LedgerBatch, source: &Connection) -> Result<()> {
+        self.check_ledger_available()?;
+        let result = match self.ledger.borrow().as_ref() {
+            None => return Ok(()),
+            Some(ledger) => ledger.write(batch, source),
+        };
+        match result {
+            Err(e) if e.downcast_ref::<LedgerFailure>().is_some() && ledger::corrupt(&e) => {
+                self.recover_ledger(source)?;
+                self.ledger.borrow().as_ref().unwrap().write(batch, source)
+                    .map_err(ledger_write_error)
+            }
+            Err(e) => Err(ledger_write_error(e)),
+            result => result,
+        }
+    }
+
+    fn recover_ledger(&self, source: &Connection) -> Result<()> {
+        // Close before moving the damaged file and all its sidecars.
+        self.ledger.take();
+        let path = self.path.as_ref().map(|p| ledger_path(p))
+            .ok_or_else(|| anyhow::anyhow!("in-memory usage ledger is corrupt"))?;
+        Ledger::quarantine(&path).map_err(|e| anyhow::anyhow!("preserve corrupt ledger: {e:#}"))?;
+        let ledger = Ledger::open(&path).map_err(|e| anyhow::anyhow!("recreate ledger: {e:#}"))?;
+        // Read in full: uncommitted rows are visible, and old indexes need not have
+        // session_model_usage. A second failure is returned, never an unbounded retry.
+        let batch = ledger::read_responses(source, None)?;
+        ledger.write(&batch, source).map_err(ledger_write_error)?;
+        self.ledger.replace(Some(ledger));
+        Ok(())
+    }
+
+    fn check_ledger_available(&self) -> Result<()> {
+        // None means intentionally disabled only for read-only/newer-version opens.
+        // A failed recovery must keep subsequent scans from committing unrecorded usage.
+        anyhow::ensure!(!self.ledger_required || self.ledger.borrow().is_some(),
+            "usage ledger recovery failed; reopen the index before scanning again");
+        Ok(())
+    }
+
+    fn read_ledger<T>(&self, read: impl Fn(&Ledger) -> Result<T>) -> Result<Option<T>> {
+        self.check_ledger_available()?;
+        let result = self.ledger.borrow().as_ref().map(&read).transpose();
+        match result {
+            Err(e) if ledger::corrupt(&e) => {
+                self.recover_ledger(&self.conn)?;
+                self.ledger.borrow().as_ref().map(read).transpose()
+                    .map_err(|e| anyhow::anyhow!("read recovered usage ledger: {e:#}"))
+            }
+            Err(e) => Err(anyhow::anyhow!("read usage ledger: {e:#}")),
+            result => result,
+        }
     }
 
     // ---- projects -------------------------------------------------------------------------
@@ -296,6 +407,8 @@ impl Db {
              ON CONFLICT(encoded_dir) DO UPDATE SET path = COALESCE(excluded.path, projects.path)",
             params![key, path],
         )?;
+        self.pending.borrow_mut().projects.push((key.to_owned(), path.map(str::to_owned)));
+        self.flush_if_autocommit()?;
         Ok(self.conn.query_row("SELECT id FROM projects WHERE encoded_dir = ?1", [key], |r| r.get(0))?)
     }
 
@@ -625,7 +738,8 @@ impl Db {
                 u.cost_usd,
             ])?;
         }
-        Ok(())
+        self.pending.borrow_mut().responses.extend(rows.iter().cloned().map(|u| (session_id.to_owned(), agent.to_owned(), u)));
+        self.flush_if_autocommit()
     }
 
     /// Drop a session's usage: all of it, or only what one file (`agent`) contributed.
@@ -659,7 +773,8 @@ impl Db {
              WHERE id = ?1",
         )?;
         stmt.execute([session_id])?;
-        Ok(())
+        self.pending.borrow_mut().sessions.insert(session_id.to_owned());
+        self.flush_if_autocommit()
     }
 
     /// Every stored API response of a session, in time order.
@@ -744,6 +859,15 @@ impl Db {
             files: count("SELECT count(*) FROM index_state")?,
             db_bytes,
         })
+    }
+}
+
+// Strip only ledger SQLite errors so open_with cannot mistake them for index damage.
+fn ledger_write_error(error: anyhow::Error) -> anyhow::Error {
+    if error.downcast_ref::<LedgerFailure>().is_some() {
+        anyhow::anyhow!("write usage ledger: {error:#}")
+    } else {
+        error
     }
 }
 
@@ -888,6 +1012,7 @@ fn row_to_model_usage(r: &Row) -> rusqlite::Result<(String, ModelUsage)> {
     Ok((r.get(0)?, group))
 }
 
+// The durable usage-ledger.sqlite is intentionally absent from this list.
 fn remove_db_files(path: &Path) {
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let mut p = path.as_os_str().to_owned();

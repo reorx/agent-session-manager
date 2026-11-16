@@ -1,6 +1,6 @@
 ---
 created: 2026-09-08
-updated: 2026-10-23
+updated: 2026-11-16
 tags:
   - data-layer
   - sqlite
@@ -17,6 +17,8 @@ tags:
 > **实现状态（2026-09-17）**：M1 已按本文实现，代码在 `crates/core`。与本文的差异（未用 grep-searcher、chrono 代替 jiff、暂无 `history_prompts` 表、`messages_session_ts` 改按 byte_offset）、字节预过滤的最终规则和真实数据实测见 `../notes/2026-09-17-m1-core-crate.md`；改 schema 时以 `crates/core/src/index/schema.sql` 为准。
 >
 > **2026-10-23**：新增 `api_usage` 表（每次 API 响应一行，subagent 的记录文件也进增量扫描，只取用量），`sessions` 加了费用 / token / context 列，本文没有这部分；口径与理由见 `../plans/2026-10-23-cost-context-columns.md`，运行时行为见 [运行时架构](app-architecture.md) 的「subagent 的记录文件」。
+>
+> **用量账本**：应用与 CLI 的索引同目录共享 `usage-ledger.sqlite`。它保留已读到的调用、session 标题和项目路径，不存对话内容；删记录、删 subagent、重建索引都不会删除账本里的调用。费用由小时汇总中的 token 按当前价格表计算。账本有独立版本与逐步迁移，不能像索引一样删掉重建；损坏时先改名保留原文件，再从可读索引补齐。扫描事务先提交账本再提交索引，索引版本变化时先抢救旧用量。表结构见 [ledger.sql](../../crates/core/src/ledger.sql)，迁移及损坏恢复规则见 [用量账本设计](../plans/2026-11-16-usage-stats/usage-ledger.md)「数据变动」「逻辑变动」；行为测试见 [ledger.rs](../../crates/core/tests/ledger.rs)。
 >
 > **本文是开工前的设计稿，以下两处不要照着写**：§7.2 的 Rust 记录类型用了 `#[serde(tag)]`，实际实现是"大结构体 + `Option` 字段 + 按 `type` 匹配"，因为 `&RawValue` 不能放在 tag 之下；§2.1 提到的 closure 通道与 `Arc<Mutex<Connection>>` 都没有采用，线程划分、事件顺序和搜索连接的现状在 [运行时架构](app-architecture.md)。§2 的选型论证（为什么不用 tantivy、redb）仍然有效。
 

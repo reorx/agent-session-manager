@@ -102,7 +102,7 @@ tags:
 
 ### 现状
 
-- `crates/core/src/index/db.rs`：`Db` 持有一个连接。`open_with` 调 `open_checked`，遇到 `is_corrupt` 的错误就 `remove_db_files` 再开一次。`open_checked` 依次 `use_wal` → `configure` → `ensure_schema`；`ensure_schema` 发现 `schema_mismatch` 就进 `build_schema`，在一个 `BEGIN IMMEDIATE` 事务里 `reset_schema`（删掉 main 库的全部表再建）。写本 spec 时已提交的 `SCHEMA_VERSION` 是 5；工作区里另一项进行中的改动（`asm` CLI）要把它提升到 6，见「风险与待定」第一条。
+- `crates/core/src/index/db.rs`：`Db` 持有一个连接。`open_with` 调 `open_checked`，遇到 `is_corrupt` 的错误就 `remove_db_files` 再开一次。`open_checked` 依次 `use_wal` → `configure` → `ensure_schema`；`ensure_schema` 发现 `schema_mismatch` 就进 `build_schema`，在一个 `BEGIN IMMEDIATE` 事务里 `reset_schema`（删掉 main 库的全部表再建）。写 spec 时的基线是 5；core 实现开始时 `bd56682` 已提交，`SCHEMA_VERSION` 为 6，本期保持 6。实测用的备份实际为版本 4，消息表也与当前版本不同。
 - 用量的写入：`insert_usage`（按 `(session_id, agent, msg_id)` upsert，`ts` 取较小值）、`delete_usage`、`refresh_session_usage`（重写 `session_model_usage` 和 `sessions` 上的用量列）。`clear_all` 清空包括 `api_usage` 在内的全部表。`Db::transaction` 用 `BEGIN IMMEDIATE` 包住一次扫描的全部写入。
 - `crates/core/src/index/indexer.rs`：`scan_streaming` 在一个 `db.transaction` 里依次 `forget_subagents`、`write_subagent`、`write_parsed`、`mark_missing`、`import_history`。会让索引丢用量的地方：`rebuild` → `clear_all`；`write_parsed` / `write_subagent` 在非追加时先 `delete_usage`；`forget_subagents` 在 session 自己的文件还在时删掉 subagent 的用量；`reset_schema`；`remove_db_files`。`mark_missing` 保留用量。`check_roots` 发现根目录变化时返回 `RootsChanged`，app 的 `Worker::scan` 收到后带 `rebuild = true` 重来。
 - `crates/core/src/claude/paths.rs`：`default_db_path()`（`$ASM_DB`，否则数据目录的 `index.sqlite`）、`default_cli_db_path()`（`$ASM_DB`，否则同目录的 `index-cli.sqlite`）。`asm` 经 `App::open_index` → `Db::open_with` 打开，`open_db_refreshed` 在查询前扫描。
@@ -216,10 +216,12 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   - `Db::ledger_usage(ids: Option<&[String]>) -> Result<Option<Vec<SessionUsage>>>`：没有账本时 `None`。
 - `usage.rs`（新）：
   - `DAY_START_HOUR: u32 = 4`。
-  - `usage_day<Tz: TimeZone>(ts_ms: i64, tz: &Tz) -> NaiveDate`：换成本地时间，减 4 小时，取日期。
+  - `usage_day<Tz: TimeZone>(ts_ms: i64, tz: &Tz) -> NaiveDate`：换成本地墙上时间（`naive_local()`），减 4 小时，取日期；不要从带时区的瞬间减四个实际小时，否则春季夏令时切换当天 04:00 会落到前一天。
   - `day_start_ms<Tz: TimeZone>(day: NaiveDate, tz: &Tz) -> i64`：`day` 的本地 4:00；夏令时让这一刻出现两次时取较早的，不存在时取下一个存在的时刻。
   - `UsageData`：`BTreeMap<String, SessionUsage>`。`replace_all(Vec<SessionUsage>)`、`apply(Vec<SessionUsage>)`（按 id 替换）。
   - `Totals { responses: u64, tokens: Tokens, cost: CostLines, unpriced_responses: u64 }`；`UsageData::totals(from_ms, until_ms) -> Totals`：桶的 `hour` 落在 `[from_ms / 3600000, until_ms / 3600000)` 的都算；每个桶用 `pricing::price(&model)` 和 `price_tokens(.., fast, long_prompt)` 计价，没有价格的把 `responses` 加进 `unpriced_responses`。计价的入口是 `totals_with(from_ms, until_ms, price: impl Fn(&str) -> Option<ModelPrice>)`，`totals` 传 `pricing::price`；测试传另一张价格表，验证费用确实是从 token 现算的。（按项目、类型、模型的过滤和分组在 usage-view 加。）
+- **core 实现补充（2026-11-16）**：`UsageData` 是带公开 `sessions: BTreeMap<String, SessionUsage>` 的结构体；`Ledger::open` 返回 `Result<Ledger>`，新版账本用可识别的 `NewerVersion` 错误表示。账本连接放在 `RefCell<Option<Ledger>>`，另用 `ledger_required` 区分主动禁用和恢复失败；恢复失败后继续报错，不能静默停止记账。使用内部可变连接，以便 `&self` 的写入/查询入口遇到损坏时关闭旧连接、改名、新建并回填。来源索引的元数据先读完，再开始账本事务；仅账本连接的错误带 `LedgerFailure` 标记，避免把来源索引的损坏与账本损坏混为一谈。独立调用 `refresh_hourly` 也有事务保护。
+- **Today 的上界**：`totals` 仍严格按上文的 UTC 小时半开区间计算；直接传 `now` 会排除当前小时。app 的 `refresh_today` 必须传当前小时的下一个 UTC 整点，下面的调用示例已修正，否则刚追加的调用要等到下一小时才显示。日期范围的整点上界不变。
 - `bin/asm/`：不用改。`Db::open_with` 已经带上账本，`default_cli_db_path()` 和 app 的索引同目录。
 
 **app**
@@ -231,7 +233,7 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   - `StoreRequest::Scan` 拆成 `Scan { quiet: bool }`；`quiet` 的扫描遇到 `is_busy` 的错误时不发 `Failed`，发一条 `ScanSkipped`。
 - `main.rs`：
   - `AppRoot` 加 `usage: UsageData`、`usage_available: bool`、`today: Totals`、`usage_day: NaiveDate`、`scan_in_flight: bool`、`last_scan_done: Option<Instant>`、`_auto_scan: Task<()>`。
-  - `on_store_events`：`Usage { full: true }` → `replace_all`，`full: false` → `apply`；之后 `refresh_today()`（`usage.totals(day_start_ms(usage_day), now)`）。`ScanDone` / `Failed` / `ScanSkipped` 清 `scan_in_flight` 并记时间。
+  - `on_store_events`：`Usage { full: true }` → `replace_all`，`full: false` → `apply`；之后 `refresh_today()`（`usage.totals(day_start_ms(usage_day), (now / 3_600_000 + 1) * 3_600_000)`）。`ScanDone` / `Failed` / `ScanSkipped` 清 `scan_in_flight` 并记时间。
   - `auto_scan(cx)`：`scan_in_flight` 或距上次结束不到 `AUTO_SCAN_MIN_GAP`（30 秒）就返回；否则发 `Scan { quiet: true }`，不改 `index_status`。`rescan`（菜单）发 `Scan { quiet: false }`，照旧设 `Loading`。
   - `AppRoot::new`：`cx.observe_window_activation(window, ..)`，窗口变为激活时调 `auto_scan`；起一个循环任务，每 `AUTO_SCAN_IDLE`（600 秒）醒一次，先 `roll_day(cx)` 再 `auto_scan(cx)`。
   - `roll_day(cx)`：`usage_day(now)` 和记着的不同就更新，调 `set_range(self.range, cx)` 让时间过滤重算边界，再 `refresh_today()`。
@@ -303,11 +305,14 @@ app：
 
 ### 风险与待定
 
-- **账本上线前索引很可能先被重建。** 2026-11-16 工作区里有一项未提交的改动把 `SCHEMA_VERSION` 从 5 提升到 6（`asm` CLI 改了 prompt 的判定）。它合并后，任何用新构建打开真实 `index.sqlite` 的动作（`make dev`、截图脚本、发版后的应用）都会重建索引，已删 session 的用量随之丢失；`asm` 自己用的是 `index-cli.sqlite`，不受影响。备份 `tmp/2026-11-12-usage-stats/index-copy.sqlite` 里有这批用量，实施步骤 7 负责把它找回来。账本这一期合并之后就不再有这个问题：重建前会先抢救。
+- **账本上线前索引很可能先被重建。** 规划时工作区里还有把 `SCHEMA_VERSION` 从 5 提升到 6 的改动（`asm` CLI 改了 prompt 的判定）；core 实现时已作为 `bd56682` 提交。它合并后，任何用新构建打开真实 `index.sqlite` 的动作（`make dev`、截图脚本、发版后的应用）都会重建索引，已删 session 的用量随之丢失；`asm` 自己用的是 `index-cli.sqlite`，不受影响。备份 `tmp/2026-11-12-usage-stats/index-copy.sqlite` 里有这批用量，实施步骤 7 负责把它找回来。账本这一期合并之后就不再有这个问题：重建前会先抢救。
 - **自动扫描后表格会滚回选中的行。** `after_rows_changed` → `select_row` 在选中的 session 换了位置时调 `set_selected_row`，它会顺带滚动（gpui-kit 没有只选中不滚动的入口）。手动扫描时这不是问题，每 10 分钟自动来一次就可能在用户往下翻的时候把表格拉回去。实现时先实测；确实打扰的话，自动扫描引起的刷新里，选中行不在当前可见范围内时不调 `set_selected_row`，只更新 `selected`。
 - **两个索引的解析版本不同。** `index-cli.sqlite` 的 schema 比已发布的 app 新，两边对同一次调用解析出的值如果不同，账本里是后写的那个。目前用量字段两边相同。
 - **账本和会话表的数字可以不同**：只增不删带来的（subagent 被单独删、文件被重写）。这是定下的语义，不登记为问题。
 - **核对只比调用数。** 账本里某个 session 多出几行（subagent 被单独删过）、同时又缺了另外几行时，两边的数可能相等或账本更大，这次缺的就补不上。要同时发生「只增不删造成的多」和「崩溃造成的少」，而后者在先提交账本的顺序下本来就不该出现，所以不为它付逐行比对的代价（110 ms，且随历史变慢）。
-- **`is_autocommit` 判断是否在事务里。** rusqlite 的 `Connection::is_autocommit` 在 `Transaction::new_unchecked` 开的事务里返回 false；实现时先用一个小测试确认，再依赖它。
+- **`is_autocommit` 判断是否在事务里。** 已由 `unchecked_transactions_disable_autocommit` 确认：`Transaction::new_unchecked` 开启后为 false，提交后恢复 true。
 - **回填时读 `api_usage` 的内存**：12.9 万行约十几 MB，一次性。一年后的索引如果还留着上百万行，按 session 分批读写。
-- **实测数字的来源**（2026-11-16 的索引副本，12.9 万次调用、2,225 个有用量的 session；脚本 `tmp/2026-11-12-usage-stats/ledger-bench.sql`、`plan-measure.sql`）：账本的调用表 14 MB（约 108 字节一行），小时汇总 5,510 行 0.44 MB；用 SQL 整表抄写 0.2–0.6 秒、建小时汇总 0.1–0.2 秒，Rust 里逐行写预计在 1 秒左右，步骤 6 实测后更新；按两张大表比调用数 38 ms，按主键逐行比 110 ms；`ts` 为 0 的调用 0 行；没有价格的调用 0 行。
+- **实测数字的来源**（2026-11-16，release，备份 129,372 次调用、2,225 个有用量的 session）：原 SQL 估计为调用表 14 MB、小时汇总 5,510 行 / 0.44 MB，Rust 回填预计约 1 秒。实际 Rust 回填 **356.324 ms**，关闭连接后的完整账本 **17,485,824 字节（16.68 MiB）**，第二次 `Db::open`（包含正常 schema 检查和双方调用数核对）**2.145 ms**；小时汇总仍为 **5,510 行**。回填约为估计的 36%，核对落在预估 2–5 ms 内；完整文件包含 session、projects、索引与页空隙，不能直接与只量调用表的 14 MB 比较。
+  - 备份本身实际是 **SCHEMA_VERSION 4**，不是规划时的 5，也不是当前代码的 6。先按 brief 用 `immutable=1` 的 SQLite backup 复制到任务目录；为单独测回填/核对，再在当前 schema 的空索引中复制备份的 projects、sessions、api_usage、session_model_usage 四张表（数据原样，消息和文件扫描状态不参与此测量）。准备脚本为 `tmp/2026-11-12-usage-stats/usage-p1-core/prepare-bench.py`，结果为同目录 `bench-final.log`。
+  - 另用版本 4 的原样副本测升级路径：第一次打开 **1,347.400 ms**（包含抢救与旧索引删除重建），账本 **17,637,376 字节**，保留 **3,361 个 transcript session 的元数据**（含无用量者）、**129,372 次调用**、**5,510 个桶**。第二次打开 1.787 ms 的索引已为空，不能把这个数当成有真实用量时的核对耗时；结果见 `bench-old-index.log`。
+  - 原 SQL 试验的按两张大表比调用数 38 ms、逐主键比较 110 ms 仍作为方案对比；本实现核对小的汇总表。原试验未发现 `ts=0` 或无价格调用。真实数据目录与原始备份从未被开发构建打开。

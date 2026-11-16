@@ -90,3 +90,8 @@ fn data_dir() -> PathBuf {
         None => home_dir().join(".agent-session-manager"),
     }
 }
+
+/// The app and CLI indexes in one directory share a durable usage ledger.
+pub fn ledger_path(index: &Path) -> PathBuf {
+    index.with_file_name("usage-ledger.sqlite")
+}
