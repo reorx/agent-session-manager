@@ -509,3 +509,19 @@ fn cache_reader_bounds_parent_walk_and_falls_back_when_chain_is_broken() {
         assert_eq!(breaks(&c)[0].1.dropped, 50_003);
     }
 }
+
+#[path = "support/cache_audit.rs"]
+mod cache_audit;
+
+/// Read only frozen prefixes; requires explicit manifest, facts, output and scratch paths.
+#[test]
+#[ignore]
+fn real_transcripts_cache_breaks() {
+    cache_audit::run();
+}
+
+#[test]
+#[ignore]
+fn real_usage_ledger_correction() {
+    cache_audit::ledger_correction();
+}
