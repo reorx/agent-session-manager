@@ -110,6 +110,7 @@ tags:
 - 带请求记录的 332 次空闲重建仍判为空闲，显示的间隔改为请求开始时间之间。
 - 在 1 小时前缀后面跟 5 分钟写入的会话里，判断按丢掉那一段的时长。
 - 截图：一个会话的回合卡上显示一种新原因的说明行。
+- 用量账本：升级后重建索引，这 4 次响应在 `usage-ledger.sqlite` 里变成新的 token，所在 session 的小时汇总跟着变。Usage 视图里这几天的 Cost 变化等于 `asm cost --compare` 的合计变化，状态栏 Today 与 Usage 一致。
 - `make test`、`make parity` 通过。
 
 ## Tech Design
@@ -199,6 +200,7 @@ tags:
   - 请求记录的字段：`id`、`query_source`、`shape_hash`、`keep: Option<u32>`、`tail: Option<Vec<IgnoredAny>>`（只要长度，`IgnoredAny` 是零大小类型，不分配）、`params: Option<RequestParams { betas: Option<Vec<String>> }>`。
 - `parse.rs::RawUsage` 新增 `iterations: Option<Vec<RawIteration>>`，`RawIteration { kind (type), input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, cache_creation }`。
 - `index/db.rs::SCHEMA_VERSION` +1，因为 4 次响应存进 `api_usage` 的费用变了。`schema.sql` 不变。
+- 用量账本（`ledger.rs`、`ledger.sql`，用量统计第 1 期加的）不改结构、不加迁移。版本号变了以后，打开索引时 `build_schema` 先 `salvage_into_ledger` 把旧索引的用量抄进账本，接着全量解析，经 `Db::transaction` 把新 token 写进账本：`responses` 按 `(session_id, agent, msg_id)` upsert，覆盖 token；`write_rows` 对改过的 session 调 `refresh_hourly`，重算 `usage_hourly`。记录文件已经删掉的响应没有新的解析结果，保留旧值。这 4 次都在 60 天内，记录都还在。
 - 不改索引的 `classify`、不存请求记录，这些归 P2。
 
 ### 逻辑变动
@@ -270,7 +272,7 @@ tags:
   - 记录类型表加上 `api-request` / `api-request-blob`；
   - assistant 记录的 `requestRef` / `effort`；
   - 用量一节写明 `iterations` 的计费和判定口径。
-- `AGENTS.md`：「缓存失效」那一条改指 `claude/cache.rs`，写明按祖先调用比较、原因来自请求记录。
+- `AGENTS.md`：「缓存失效」那一条改指 `claude/cache.rs`，写明按祖先调用比较、原因来自请求记录。core 规则里用量账本那一条（现在写的是「账本存 token 不存费用，改价格不用动账本」）补一句：改了解析出的 token，要靠提升 `SCHEMA_VERSION` 触发重建，把记录还在的响应覆盖成新值；记录已删的响应保留旧值。
 - `kb/known-issues.md`：删掉「顶层 usage 全为 0」和「`/rewind` 之后」两条。
 - `kb/docs/product-prd.md`：如果提到失效原因，就同步改。
 - 修好后写 session 总结，内容包括：已解决的两条已知问题、前后对比表。
@@ -281,7 +283,8 @@ tags:
 - [ ] 2. **iterations**：
   - `gen_fixtures.py` 加一个外层全 0、明细有数的响应，和一个带 `compaction` 项的响应，`uv run` 重跑并提交；
   - `tests/parse_transcript.rs` 写失败的测试（会话费用、token、context）；
-  - 实现 `tokens_of` / `prompt_of`，提升 `SCHEMA_VERSION`。
+  - 实现 `tokens_of` / `prompt_of`，提升 `SCHEMA_VERSION`；
+  - 账本的测试：旧版本索引里外层全 0 的响应已经抄进账本，提升版本后打开，账本里的这次响应变成按 `iterations` 算的 token，`usage_hourly` 同步；记录文件已删的 session 保持旧值。
 - [ ] 3. **`CacheTracker` 单元测试**（`cache.rs` 内）：
   - 先把现有行为写成测试：四种原因、1h / 5m、去重；
   - 再加：按祖先比较（rewind 不报、rewind 后空闲照报且基准正确）、分段时长（1h 前缀加 5m 小段）、开始时间口径、每种新原因、缺请求记录时退回不明；
@@ -295,6 +298,7 @@ tags:
   - 新增 `#[ignore]` 测试 `real_transcripts_cache_breaks`（`crates/core/tests/conversation.rs`）：`ASM_CACHE_AUDIT_DAYS=60 ASM_CACHE_AUDIT_OUT=<tsv>` 对 `~/.claude/projects/*/*.jsonl` 跑 `read_conversation`，输出与步骤 1 同格式的 TSV；
   - 与参考脚本逐条比对，差异逐条解释，存进任务的 tmp 目录；
   - 跑 `asm cost --compare`、`make test`、`make parity`；
+  - 账本：在真实账本的副本上（`sqlite3 "file:…/usage-ledger.sqlite?mode=ro" ".backup <副本>"`，`ASM_DB` 指向副本旁的索引，不碰真实数据目录）重建一次，核对这 4 次响应的新值和 Usage 视图的变化；
   - 用 `asm session-old ID --conversation` 的 `read_ms` 在最大的几个会话上量读取耗时，与改动前比较。
 - [ ] 7. **截图**：选一个第一处失效是新原因的会话，跑 `ASM_AUTOPLAY_CACHE_SESSION=<id> make screenshot-cost`，看回合卡说明行。
 - [ ] 8. **收尾**：更新文档、known-issues，写 session 总结，commit。
