@@ -213,3 +213,48 @@ fn aggregation_prices_only_matching_hours_and_preserves_arbitrary_slots() {
         for (slot,total) in slots.iter().zip(series) {assert_eq!(total.totals,data.summary(*slot,&UsageFilter::default()).totals);}
     }
 }
+
+fn calls_at(id: &str, hours: &[(i64, bool)]) -> SessionUsage {
+    SessionUsage { session: LedgerSession { id: id.into(), ..Default::default() }, hours: hours.iter().map(|&(hour, sub)| HourlyUsage {
+        hour, model: "claude-opus-5-5".into(), sub, responses: 1, tokens: Tokens { input: 1, ..Default::default() }, ..Default::default()
+    }).collect() }
+}
+
+#[test]
+fn a_session_is_active_in_a_span_when_any_of_its_calls_falls_inside() {
+    let span = Span { from_ms: 10 * 3_600_000, until_ms: 20 * 3_600_000 };
+    let mut data = UsageData::default();
+    data.replace_all(vec![
+        calls_at("inside", &[(10, false), (19, false)]),
+        calls_at("across", &[(8, false), (15, false), (25, false)]),
+        calls_at("around", &[(9, false), (20, false)]),
+        calls_at("outside", &[(1, false), (30, false)]),
+        calls_at("subagent", &[(5, false), (12, true)]),
+    ]);
+    let mut active: Vec<&str> = data.active_sessions(span).into_iter().collect();
+    active.sort();
+    assert_eq!(active, ["across", "inside", "subagent"], "calls before and after the span but none inside do not count");
+    assert!(data.active_sessions(Span { from_ms: 0, until_ms: 0 }).is_empty());
+    // a bucket without a call (as `summary` skips them) does not make a session active
+    let mut idle = calls_at("idle", &[(12, false)]);
+    idle.hours[0].responses = 0;
+    data.apply(vec![idle]);
+    assert!(!data.active_sessions(span).contains("idle"));
+}
+
+#[test]
+fn the_span_ends_are_usage_days() {
+    let tz = FixedOffset::east_opt(8 * 3600).unwrap();
+    let span = range_span(UsageRange::Custom, day("2026-11-16"), Some((day("2026-11-10"), day("2026-11-12"))), None, &tz);
+    let hour = |s: &str| ms(s) / 3_600_000;
+    let mut data = UsageData::default();
+    data.replace_all(vec![
+        calls_at("first-day-at-four", &[(hour("2026-11-10T04:00:00+08:00"), false)]),
+        calls_at("first-day-before-four", &[(hour("2026-11-10T03:59:00+08:00"), false)]),
+        calls_at("next-day-before-four", &[(hour("2026-11-13T03:59:00+08:00"), false)]),
+        calls_at("next-day-at-four", &[(hour("2026-11-13T04:00:00+08:00"), false)]),
+    ]);
+    let mut active: Vec<&str> = data.active_sessions(span).into_iter().collect();
+    active.sort();
+    assert_eq!(active, ["first-day-at-four", "next-day-before-four"], "03:59 the day after still belongs to the last day, 04:00 does not");
+}

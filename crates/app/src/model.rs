@@ -584,6 +584,29 @@ pub fn today_at(now_ms: i64) -> NaiveDate {
     usage_day(now_ms, &Local)
 }
 
+/// The usage days a jump from the Usage view brought along (`Filter::active`): only sessions
+/// with a call in them show. Fixed days, both included, not a preset: a jump from Today shows
+/// that day's sessions even after 4:00 has moved Today on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ActiveRange {
+    pub first: NaiveDate,
+    pub last: NaiveDate,
+}
+
+impl ActiveRange {
+    /// `11-12` or `11-01 – 11-12`; a range across a new year or outside `year` (this year) says
+    /// its year, as the Usage view's range titles do.
+    pub fn label(&self, year: i32) -> String {
+        let (first, last) = (self.first, self.last);
+        let first_fmt = if first.year() == year && last.year() == year { first.format("%m-%d") } else { first.format("%Y-%m-%d") };
+        if first == last {
+            return first_fmt.to_string();
+        }
+        let last_fmt = if last.year() == first.year() { last.format("%m-%d") } else { last.format("%Y-%m-%d") };
+        format!("{first_fmt} – {last_fmt}")
+    }
+}
+
 /// Filter applied to the table rows before sorting.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Filter {
@@ -600,17 +623,81 @@ pub struct Filter {
     pub model: Option<SharedString>,
     /// `project_key`s whose sessions never show (noise such as a probe tool's directory).
     pub hidden_projects: BTreeSet<SharedString>,
+    /// Only sessions with a call in these days (a jump from Usage). `matches` does not look at
+    /// it: the table holds the sessions that had one (`SessionTableDelegate::set_active_ids`).
+    /// Never saved.
+    pub active: Option<ActiveRange>,
 }
 
 impl Filter {
     pub fn matches(&self, row: &SessionRow) -> bool {
-        let project_ok = self.project.as_ref().is_none_or(|p| row.project_key == *p);
-        let since_ok = self.since_ms.is_none_or(|since| row.updated_at >= since)
-            && self.until_ms.is_none_or(|until| row.updated_at < until);
-        let shown = (self.show_empty || row.prompts > 0) && !self.hidden_projects.contains(&row.project_key);
+        self.favorite_ok(row)
+            && self.project_ok(row)
+            && self.updated_ok(row)
+            && self.prompts_ok(row)
+            && !self.hidden_projects.contains(&row.project_key)
+            && self.model_ok(row)
+            && self.kinds.contains(row.kind)
+    }
+
+    fn favorite_ok(&self, row: &SessionRow) -> bool {
+        !self.favorites_only || row.favorite
+    }
+
+    fn project_ok(&self, row: &SessionRow) -> bool {
+        self.project.as_ref().is_none_or(|p| row.project_key == *p)
+    }
+
+    fn updated_ok(&self, row: &SessionRow) -> bool {
+        self.since_ms.is_none_or(|since| row.updated_at >= since) && self.until_ms.is_none_or(|until| row.updated_at < until)
+    }
+
+    fn prompts_ok(&self, row: &SessionRow) -> bool {
+        self.show_empty || row.prompts > 0
+    }
+
+    fn model_ok(&self, row: &SessionRow) -> bool {
         // a pick saved by an older version may still carry a date
-        let model_ok = self.model.as_deref().is_none_or(|m| row.primary_model.as_deref() == Some(normalize(m)));
-        (!self.favorites_only || row.favorite) && project_ok && since_ok && shown && model_ok && self.kinds.contains(row.kind)
+        self.model.as_deref().is_none_or(|m| row.primary_model.as_deref() == Some(normalize(m)))
+    }
+
+    /// The filter that lets `row` through with as little changed as possible, and the names of
+    /// what changed, in toolbar order: Updated → any time, Project → all, Kind → the row's kind
+    /// on, Model → all, Favorites only → off, Empty sessions → shown, Active → off (when
+    /// `active_ok` says the row had no call in those days). Hidden projects stay hidden: the
+    /// caller checks them first.
+    pub fn relaxed_for(&self, row: &SessionRow, active_ok: bool) -> (Filter, Vec<&'static str>) {
+        let mut out = self.clone();
+        let mut names = Vec::new();
+        if !self.updated_ok(row) {
+            (out.since_ms, out.until_ms) = (None, None);
+            names.push("Updated");
+        }
+        if !self.project_ok(row) {
+            out.project = None;
+            names.push("Project");
+        }
+        if !self.kinds.contains(row.kind) {
+            out.kinds.toggle(row.kind);
+            names.push("Kind");
+        }
+        if !self.model_ok(row) {
+            out.model = None;
+            names.push("Model");
+        }
+        if !self.favorite_ok(row) {
+            out.favorites_only = false;
+            names.push("Favorites");
+        }
+        if !self.prompts_ok(row) {
+            out.show_empty = true;
+            names.push("Empty sessions");
+        }
+        if self.active.is_some() && !active_ok {
+            out.active = None;
+            names.push("Active");
+        }
+        (out, names)
     }
 
     /// Hide a project; when it is the picked one the filter goes back to all projects.
@@ -1185,5 +1272,93 @@ pub mod tests {
         assert_eq!(RangePreset::Custom.label(), "Custom");
         assert_eq!(RangePreset::Custom.menu_label(), "Custom range…");
         assert_eq!(RangePreset::LastMonth.menu_label(), "Last month");
+    }
+
+    // ---- jumping from Usage to the session table ------------------------------------------
+
+    fn nov(d: u32) -> ActiveRange {
+        ActiveRange { first: day(2026, 11, d), last: day(2026, 11, d) }
+    }
+
+    /// `(relaxed, names)`, after checking the relaxed filter lets the row through and keeps the
+    /// hidden projects as they were.
+    fn relax(filter: &Filter, row: &SessionRow, active_ok: bool) -> (Filter, Vec<&'static str>) {
+        let (relaxed, names) = filter.relaxed_for(row, active_ok);
+        assert!(relaxed.matches(row), "{names:?}: the row shows with the relaxed filter");
+        assert_eq!(relaxed.hidden_projects, filter.hidden_projects, "hidden projects are never shown on the user's behalf");
+        (relaxed, names)
+    }
+
+    #[test]
+    fn relaxing_changes_only_the_filters_that_hide_the_row() {
+        let r = row("r", "/p/alpha", 10_000);
+        let mut empty = summary("e", "/p/alpha", 10_000);
+        empty.user_msg_count = 0;
+        let empty = builtin_row(&empty);
+        // everything else set but out of the row's way, so a relaxation that goes too far shows
+        let mut kinds = KindSet::default();
+        kinds.toggle(Kind::History);
+        let base = Filter {
+            project: Some("-p-alpha".into()),
+            since_ms: Some(5_000),
+            until_ms: Some(20_000),
+            kinds,
+            hidden_projects: ["-p-probe".into()].into(),
+            active: Some(nov(12)),
+            ..Default::default()
+        };
+        assert!(base.matches(&r));
+
+        let mut no_cli = base.kinds;
+        no_cli.toggle(Kind::Cli);
+        let cases: Vec<(Filter, &SessionRow, bool, &str, Filter)> = vec![
+            (Filter { since_ms: Some(15_000), ..base.clone() }, &r, true, "Updated", Filter { since_ms: None, until_ms: None, ..base.clone() }),
+            (Filter { until_ms: Some(9_000), ..base.clone() }, &r, true, "Updated", Filter { since_ms: None, until_ms: None, ..base.clone() }),
+            (Filter { project: Some("-p-beta".into()), ..base.clone() }, &r, true, "Project", Filter { project: None, ..base.clone() }),
+            (Filter { kinds: no_cli, ..base.clone() }, &r, true, "Kind", base.clone()),
+            (Filter { model: Some("claude-opus-5-5".into()), ..base.clone() }, &r, true, "Model", base.clone()),
+            (Filter { favorites_only: true, ..base.clone() }, &r, true, "Favorites", base.clone()),
+            (base.clone(), &empty, true, "Empty sessions", Filter { show_empty: true, ..base.clone() }),
+            (base.clone(), &r, false, "Active", Filter { active: None, ..base.clone() }),
+        ];
+        for (filter, row, active_ok, name, expected) in cases {
+            let (relaxed, names) = relax(&filter, row, active_ok);
+            assert_eq!(names, [name]);
+            assert_eq!(relaxed, expected, "{name}: only that filter changed");
+        }
+
+        // the kind turned on is the row's: the other kinds stay as they were
+        let mut sdk_only = KindSet { cli: false, sdk: true, bg: false, history: false };
+        let (relaxed, _) = relax(&Filter { kinds: sdk_only, ..base.clone() }, &r, true);
+        sdk_only.cli = true;
+        assert_eq!(relaxed.kinds, sdk_only);
+
+        // two at once, both relaxed, in the order the toolbar has them
+        let filter = Filter { since_ms: Some(15_000), model: Some("claude-opus-5-5".into()), ..base.clone() };
+        let (relaxed, names) = relax(&filter, &r, false);
+        assert_eq!(names, ["Updated", "Model", "Active"]);
+        assert_eq!(relaxed, Filter { since_ms: None, until_ms: None, active: None, ..base.clone() });
+    }
+
+    #[test]
+    fn a_row_that_already_shows_relaxes_nothing() {
+        let r = row("r", "/p/alpha", 10_000);
+        for filter in [Filter::default(), Filter { project: Some("-p-alpha".into()), since_ms: Some(1), active: Some(nov(1)), ..Default::default() }] {
+            assert_eq!(filter.relaxed_for(&r, true), (filter.clone(), Vec::new()));
+        }
+        // a hidden project is not relaxed here: the caller says so and stops
+        let mut hidden = Filter::default();
+        hidden.hide_project("-p-alpha".into());
+        assert_eq!(hidden.relaxed_for(&r, true), (hidden.clone(), Vec::new()));
+    }
+
+    #[test]
+    fn the_active_label_reads_one_day_or_a_range() {
+        assert_eq!(nov(12).label(2026), "11-12");
+        assert_eq!(ActiveRange { first: day(2026, 11, 1), last: day(2026, 11, 12) }.label(2026), "11-01 – 11-12");
+        // across a new year, or outside this year, the days say their years
+        assert_eq!(ActiveRange { first: day(2025, 12, 28), last: day(2026, 1, 3) }.label(2026), "2025-12-28 – 2026-01-03");
+        assert_eq!(ActiveRange { first: day(2025, 11, 12), last: day(2025, 11, 12) }.label(2026), "2025-11-12");
+        assert_eq!(ActiveRange { first: day(2025, 11, 1), last: day(2025, 11, 12) }.label(2026), "2025-11-01 – 11-12");
     }
 }

@@ -2,7 +2,7 @@
 //! index vector. Filtering and sorting run on the main thread (10k rows ≈ 7ms).
 
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -65,6 +65,10 @@ pub struct SessionTableDelegate {
     filter: Filter,
     /// Hits of the active search by session id; only these sessions are shown while it is `Some`.
     search: Option<HashMap<SharedString, Arc<RowHit>>>,
+    /// Sessions with a call in the days of `filter.active` (`AppRoot::sync_active_ids` works
+    /// them out from the usage data). While that filter is on, only these show; `None` (not
+    /// known yet) shows none.
+    active_ids: Option<Arc<HashSet<SharedString>>>,
     sort: Option<(SharedString, ColumnSort)>,
     /// Cost of the rows in `ix` (the status bar shows it).
     pub shown_cost: f64,
@@ -123,6 +127,7 @@ impl SessionTableDelegate {
             mode: DisplayMode::FirstPrompt,
             filter: Filter::default(),
             search: None,
+            active_ids: None,
             sort: None,
             shown_cost: 0.0,
             compare_model: None,
@@ -155,6 +160,26 @@ impl SessionTableDelegate {
             }
         }
         self.recompute();
+    }
+
+    /// Any row of a session, shown or not.
+    pub fn row_by_id(&self, id: &str) -> Option<&Arc<SessionRow>> {
+        self.by_id.get(id).map(|i| &self.rows[*i])
+    }
+
+    /// The sessions with a call in the days of the Active filter; `None` forgets them.
+    pub fn set_active_ids(&mut self, ids: Option<Arc<HashSet<SharedString>>>) {
+        self.active_ids = ids;
+        self.recompute();
+    }
+
+    pub fn active_ids(&self) -> Option<&Arc<HashSet<SharedString>>> {
+        self.active_ids.as_ref()
+    }
+
+    /// The Active filter lets this session through: it is off, or the session had a call then.
+    pub fn is_active(&self, id: &str) -> bool {
+        self.filter.active.is_none() || self.active_ids.as_ref().is_some_and(|ids| ids.contains(id))
     }
 
     /// Where a session currently sits in the filtered + sorted view.
@@ -258,7 +283,7 @@ impl SessionTableDelegate {
 
     /// The sessions a search should look into: whatever passes the filters, newest first.
     pub fn search_targets(&self) -> Vec<SearchTarget> {
-        let mut rows: Vec<&Arc<SessionRow>> = self.rows.iter().filter(|r| self.filter.matches(r)).collect();
+        let mut rows: Vec<&Arc<SessionRow>> = self.rows.iter().filter(|r| self.passes_filters(r)).collect();
         rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         rows.iter()
             .map(|r| SearchTarget {
@@ -275,8 +300,13 @@ impl SessionTableDelegate {
         self.columns.iter().filter(|c| c.key != PREVIEW_KEY).map(|c| c.width.as_f32()).sum()
     }
 
+    /// The filters, Active included, let `row` through (what a search looks into).
+    fn passes_filters(&self, row: &SessionRow) -> bool {
+        self.filter.matches(row) && self.is_active(&row.id)
+    }
+
     fn shows(&self, row: &SessionRow) -> bool {
-        self.filter.matches(row) && self.search.as_ref().is_none_or(|hits| hits.contains_key(&row.id))
+        self.passes_filters(row) && self.search.as_ref().is_none_or(|hits| hits.contains_key(&row.id))
     }
 
     fn recompute(&mut self) {
@@ -913,5 +943,94 @@ mod tests {
         assert_eq!(d.shown_cost, 1.0);
         d.upsert(vec![priced("a", "/p/x", 400, Some(4.0), None)]);
         assert_eq!(d.shown_cost, 4.0, "a row streamed in again brings its new cost");
+    }
+
+    // ---- the Active filter (a jump from Usage) ---------------------------------------------
+
+    fn active_on(first: &str, last: &str) -> Filter {
+        Filter { active: Some(crate::model::ActiveRange { first: first.parse().unwrap(), last: last.parse().unwrap() }), ..Default::default() }
+    }
+
+    fn set(ids: &[&str]) -> Option<Arc<std::collections::HashSet<SharedString>>> {
+        Some(Arc::new(ids.iter().map(|id| SharedString::from(id.to_string())).collect()))
+    }
+
+    #[test]
+    fn the_active_filter_keeps_only_sessions_in_the_set_and_stacks_with_the_others() {
+        let mut d = delegate();
+        d.set_rows(vec![row("a", "/p/x", 100), row("b", "/p/y", 200), with_prompts("e", "/p/x", 300, 0), row("c", "/p/x", 400), row("old", "/p/x", 10)]);
+        d.set_active_ids(set(&["a", "b", "e", "old"]));
+        assert_eq!(ids(&d), ["c", "b", "a", "old"], "a set without the filter changes nothing");
+        assert!(d.set_filter(active_on("2026-11-12", "2026-11-12")));
+        assert_eq!(ids(&d), ["b", "a", "old"]);
+        assert!(d.set_filter(Filter { project: Some("-p-x".into()), since_ms: Some(50), ..active_on("2026-11-12", "2026-11-12") }));
+        assert_eq!(ids(&d), ["a"], "with the project, the Updated range and the hidden empty session");
+        assert!(d.row_by_id("c").is_some(), "every row is still there, shown or not");
+        assert!(d.row_by_id("nope").is_none());
+        assert!(d.is_active("a") && !d.is_active("c"));
+
+        // a new set (more calls came in) and new rows keep the filter
+        d.set_active_ids(set(&["a", "c"]));
+        assert_eq!(ids(&d), ["c", "a"]);
+        d.upsert(vec![row("d", "/p/x", 500)]);
+        assert_eq!(ids(&d), ["c", "a"], "a new session without calls in the days stays out");
+        d.set_active_ids(set(&["a", "c", "d"]));
+        assert_eq!(ids(&d), ["d", "c", "a"]);
+
+        assert!(d.set_filter(Filter { project: Some("-p-x".into()), since_ms: Some(50), ..Default::default() }));
+        assert_eq!(ids(&d), ["d", "c", "a"], "cleared: the other filters stay");
+        assert!(d.is_active("b"), "without the filter every session counts as active");
+    }
+
+    /// Updated looks at a session's last update, Active at when its calls were made.
+    #[test]
+    fn a_session_updated_later_but_active_in_range_is_listed_and_one_updated_in_range_but_idle_is_not() {
+        use agent_session_core::model::{HourlyUsage, LedgerSession, SessionUsage};
+        use agent_session_core::usage::{UsageData, UsageRange, range_span};
+        use chrono::FixedOffset;
+        let tz = FixedOffset::east_opt(8 * 3600).unwrap();
+        let at = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis();
+        let calls = |id: &str, times: &[&str]| SessionUsage {
+            session: LedgerSession { id: id.into(), ..Default::default() },
+            hours: times.iter().map(|t| HourlyUsage { hour: at(t) / 3_600_000, responses: 1, ..Default::default() }).collect(),
+        };
+        let mut data = UsageData::default();
+        data.replace_all(vec![
+            calls("late", &["2026-11-12T10:00:00+08:00", "2026-11-14T10:00:00+08:00"]),
+            calls("idle", &["2026-11-10T10:00:00+08:00"]),
+        ]);
+        let mut d = delegate();
+        d.set_rows(vec![row("late", "/p/x", at("2026-11-14T10:00:00+08:00")), row("idle", "/p/x", at("2026-11-12T12:00:00+08:00"))]);
+        let nov_12: chrono::NaiveDate = "2026-11-12".parse().unwrap();
+        let span = range_span(UsageRange::Custom, nov_12, Some((nov_12, nov_12)), None, &tz);
+        d.set_active_ids(Some(Arc::new(data.active_sessions(span).into_iter().map(|id| SharedString::from(id.to_string())).collect())));
+        d.set_filter(active_on("2026-11-12", "2026-11-12"));
+        assert_eq!(ids(&d), ["late"]);
+    }
+
+    #[test]
+    fn search_targets_follow_the_active_filter() {
+        let mut d = delegate();
+        d.set_rows(vec![row("a", "/p/x", 100), row("b", "/p/x", 200), row("c", "/p/y", 300)]);
+        d.set_active_ids(set(&["a", "c"]));
+        d.set_filter(Filter { project: Some("-p-x".into()), ..active_on("2026-11-12", "2026-11-12") });
+        d.set_search(true);
+        let targets: Vec<String> = d.search_targets().into_iter().map(|t| t.session_id).collect();
+        assert_eq!(targets, ["a"], "a search looks only into the sessions the filters, Active included, let through");
+        d.add_hits(vec![("a".into(), hit(1)), ("b".into(), hit(1))]);
+        assert_eq!(ids(&d), ["a"]);
+    }
+
+    #[test]
+    fn without_a_set_the_active_filter_shows_nothing() {
+        let mut d = delegate();
+        d.set_rows(vec![row("a", "/p/x", 100), row("b", "/p/x", 200)]);
+        d.set_filter(active_on("2026-11-12", "2026-11-12"));
+        assert!(ids(&d).is_empty(), "until the sessions of those days are known, none is listed rather than all");
+        assert!(d.search_targets().is_empty());
+        d.set_active_ids(set(&["b"]));
+        assert_eq!(ids(&d), ["b"]);
+        d.set_active_ids(None);
+        assert!(ids(&d).is_empty());
     }
 }

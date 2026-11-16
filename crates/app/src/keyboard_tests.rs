@@ -1757,3 +1757,435 @@ fn a_bar_s_tooltip_never_covers_the_chart_s_legend(cx: &mut TestAppContext) {
         assert!(tip.origin.y >= plot_top, "bar {ix}, mouse {y} px down: the tooltip starts at {:?}, above the plot area at {plot_top:?}", tip.origin.y);
     }
 }
+
+// ---- from Usage back to the session table (usage-drilldown) -----------------------------------
+
+const S3: &str = "33333333-aaaa-4bbb-8ccc-000000000003";
+const ALPHA: &str = "-Users-me-Code-alpha";
+const BETA: &str = "-Users-me-Code-beta";
+/// A session the ledger kept after its transcript was gone, with no row in the table.
+const GONE: &str = "99999999-aaaa-4bbb-8ccc-000000000009";
+
+/// The usage day (from 4:00 here) of a fixture time.
+fn local_day(at: &str) -> chrono::NaiveDate {
+    agent_session_core::usage::usage_day(chrono::DateTime::parse_from_rfc3339(at).unwrap().timestamp_millis(), &chrono::Local)
+}
+
+/// S1's first calls, S2's only one, S3's.
+fn s1_day() -> chrono::NaiveDate {
+    local_day("2026-09-01T08:00:05Z")
+}
+fn s2_day() -> chrono::NaiveDate {
+    local_day("2026-09-05T12:00:02Z")
+}
+fn s3_day() -> chrono::NaiveDate {
+    local_day("2026-09-10T02:00:03Z")
+}
+
+/// The Usage view on these days.
+fn usage_on(cx: &mut TestAppContext, h: &Harness, (first, last): (chrono::NaiveDate, chrono::NaiveDate)) {
+    press(cx, h, "ctrl-2");
+    h.app.update(cx, |app, cx| app.set_usage_custom_range(first, last, cx));
+}
+
+fn notices(cx: &mut TestAppContext, h: &Harness) -> Vec<String> {
+    h.app.read_with(cx, |app, _| app.notices.iter().map(|n| n.to_string()).collect())
+}
+
+/// The ids the table lists, sorted.
+fn listed(app: &AppRoot, cx: &App) -> Vec<String> {
+    let delegate = app.table.read(cx).delegate();
+    let mut ids: Vec<String> = (0..delegate.ix.len()).map(|i| delegate.row(i).id.to_string()).collect();
+    ids.sort();
+    ids
+}
+
+/// What a click on a row of the most expensive sessions does.
+fn reveal(cx: &mut TestAppContext, h: &Harness, id: &str) {
+    let app = h.app.clone();
+    in_window(cx, h, |window, cx| app.update(cx, |app, cx| app.reveal_session(id, window, cx)));
+    cx.run_until_parked();
+}
+
+/// What a click on a project's `↗` (`Some`) or the Sessions card's does.
+fn jump(cx: &mut TestAppContext, h: &Harness, project: Option<&str>) {
+    let app = h.app.clone();
+    in_window(cx, h, |window, cx| app.update(cx, |app, cx| app.show_active_sessions(project.map(|p| p.to_string().into()), window, cx)));
+    cx.run_until_parked();
+}
+
+fn clear_active(cx: &mut TestAppContext, h: &Harness) {
+    let app = h.app.clone();
+    in_window(cx, h, |window, cx| app.update(cx, |app, cx| app.clear_active(window, cx)));
+    cx.run_until_parked();
+}
+
+/// The ledger hands over a session with one call at `at` whose transcript is long gone.
+fn ledger_only(cx: &mut TestAppContext, h: &Harness, id: &str, project: &str, at: &str) {
+    use agent_session_core::model::{HourlyUsage, LedgerSession, SessionUsage, Tokens};
+    let hour = chrono::DateTime::parse_from_rfc3339(at).unwrap().timestamp_millis() / 3_600_000;
+    let session = SessionUsage {
+        session: LedgerSession {
+            id: id.into(),
+            project_key: format!("-Users-me-Code-{project}"),
+            project_path: Some(format!("/Users/me/Code/{project}")),
+            title: "cleaned up long ago".into(),
+            entrypoint: Some("cli".into()),
+            ..Default::default()
+        },
+        hours: vec![HourlyUsage { hour, model: "claude-opus-5".into(), responses: 1, tokens: Tokens { input: 10, output: 10, ..Default::default() }, ..Default::default() }],
+    };
+    let app = h.app.clone();
+    in_window(cx, h, |window, cx| app.update(cx, |app, cx| app.on_store_events(vec![crate::store::StoreEvent::Usage { sessions: vec![session], full: false }], window, cx)));
+    cx.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn revealing_a_session_from_usage_selects_it_and_focuses_the_table(cx: &mut TestAppContext) {
+    use crate::model::MainView;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    select(cx, &h, S1);
+    h.app.update(cx, |app, _| app.detail_visible = false);
+    usage_on(cx, &h, september());
+    assert!(h.app.read_with(cx, |app, _| app.usage_view.snapshot.sessions.iter().any(|s| s.id == S2 && s.listed)), "S2 is in the list, with a row");
+
+    reveal(cx, &h, S2);
+    assert_eq!(view(cx, &h), MainView::Sessions);
+    h.app.read_with(cx, |app, cx| {
+        assert_eq!(app.selected.as_ref().unwrap().id, S2);
+        let table = app.table.read(cx);
+        assert_eq!(table.selected_row(), table.delegate().position_of(S2), "the table's own selection is on it");
+        assert!(app.detail_visible, "the detail panel shows it");
+    });
+    assert_eq!(view_focus(cx, &h), (false, true), "the keys go to the table");
+    assert!(notices(cx, &h).is_empty(), "nothing was in its way");
+    press(cx, &h, "cmd-c");
+    assert_eq!(clipboard(cx).as_deref(), Some(S2), "⌘C works at once");
+}
+
+#[gpui_kit::test]
+fn revealing_a_filtered_out_session_relaxes_only_what_hides_it(cx: &mut TestAppContext) {
+    use crate::model::{MainView, RangePreset};
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    h.app.update(cx, |app, cx| {
+        app.set_project(Some(ALPHA.into()), cx);
+        let day = chrono::NaiveDate::from_ymd_opt(2000, 1, 3).unwrap();
+        app.set_custom_range(day, day, cx);
+    });
+    assert_eq!(h.app.read_with(cx, shown_rows), 0, "nothing was updated in 2000");
+    usage_on(cx, &h, september());
+
+    reveal(cx, &h, S2);
+    assert_eq!(view(cx, &h), MainView::Sessions);
+    h.app.read_with(cx, |app, cx| {
+        assert_eq!(app.selected.as_ref().unwrap().id, S2);
+        let filter = app.current_filter(cx);
+        assert_eq!((filter.since_ms, filter.until_ms, app.range), (None, None, RangePreset::Any), "Updated is any time");
+        assert_eq!(filter.project.as_deref(), Some(ALPHA), "the project was S2's: it stays");
+    });
+    assert_eq!(notices(cx, &h), ["已清除过滤：Updated"]);
+    assert_eq!(saved_state(&h).range, RangePreset::Any, "saved like a pick in the Updated menu");
+}
+
+#[gpui_kit::test]
+fn revealing_a_session_hidden_by_a_search_clears_the_search(cx: &mut TestAppContext) {
+    use crate::model::MainView;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    press(cx, &h, "cmd-f");
+    type_text(cx, &h, "parser");
+    press(cx, &h, "enter");
+    wait_until(cx, &h, "the search", |app, cx| search_done(app, cx) && !app.search_pending);
+    assert_eq!(h.app.read_with(cx, listed), [S1], "S2 says no 'parser'");
+    usage_on(cx, &h, september());
+
+    reveal(cx, &h, S2);
+    assert_eq!(view(cx, &h), MainView::Sessions);
+    assert_eq!(search_box(cx, &h), "", "the search box is emptied");
+    h.app.read_with(cx, |app, cx| {
+        assert!(!app.searching() && !app.table.read(cx).delegate().search_active(), "and the search is over");
+        assert_eq!(app.selected.as_ref().unwrap().id, S2);
+    });
+    assert_eq!(view_focus(cx, &h), (false, true));
+    assert_eq!(notices(cx, &h), ["已清除过滤：Search"]);
+
+    // a session among the hits keeps the search
+    press(cx, &h, "cmd-f");
+    type_text(cx, &h, "parser");
+    press(cx, &h, "enter");
+    wait_until(cx, &h, "the search", |app, cx| search_done(app, cx) && !app.search_pending);
+    usage_on(cx, &h, september());
+    reveal(cx, &h, S1);
+    assert_eq!(search_box(cx, &h), "parser");
+    assert_eq!(h.app.read_with(cx, |app, _| app.selected.as_ref().unwrap().id.to_string()), S1);
+    assert_eq!(notices(cx, &h).len(), 1, "nothing new to say");
+}
+
+#[gpui_kit::test]
+fn a_session_without_a_row_stays_in_usage_and_explains(cx: &mut TestAppContext) {
+    use crate::model::MainView;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    usage_on(cx, &h, september());
+    ledger_only(cx, &h, GONE, "alpha", "2026-09-03T08:00:00Z");
+    h.app.read_with(cx, |app, _| {
+        let lines = &app.usage_view.snapshot.sessions;
+        assert!(lines.iter().any(|s| s.id == GONE && !s.listed), "listed in Usage, greyed: the table has no row for it");
+        assert!(lines.iter().filter(|s| s.id != GONE).all(|s| s.listed));
+    });
+
+    reveal(cx, &h, GONE);
+    assert_eq!(view(cx, &h), MainView::Usage, "nothing to show in the table");
+    assert_eq!(view_focus(cx, &h), (true, false));
+    assert_eq!(notices(cx, &h), [crate::drilldown::GONE_NOTICE]);
+}
+
+#[gpui_kit::test]
+fn a_session_left_only_in_history_is_revealed_as_its_history_row(cx: &mut TestAppContext) {
+    use crate::model::{Kind, MainView};
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    usage_on(cx, &h, september());
+    // the ledger kept S4's calls; its transcript is gone, history.jsonl still has its prompts
+    ledger_only(cx, &h, S4, "alpha", "2026-09-03T08:00:00Z");
+    assert!(h.app.read_with(cx, |app, _| app.usage_view.snapshot.sessions.iter().any(|s| s.id == S4 && s.listed)), "the table has its History row");
+
+    reveal(cx, &h, S4);
+    assert_eq!(view(cx, &h), MainView::Sessions);
+    h.app.read_with(cx, |app, _| {
+        let row = app.selected.as_ref().expect("a selected row");
+        assert_eq!((row.id.as_ref(), row.kind), (S4, Kind::History));
+        assert!(app.detail_visible, "the detail panel shows its prompts");
+    });
+    assert_eq!(view_focus(cx, &h), (false, true));
+}
+
+#[gpui_kit::test]
+fn a_session_of_a_hidden_project_is_not_revealed(cx: &mut TestAppContext) {
+    use crate::model::MainView;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    h.app.update(cx, |app, cx| app.hide_project(BETA.into(), cx));
+    usage_on(cx, &h, september());
+    reveal(cx, &h, S3);
+    assert_eq!(view(cx, &h), MainView::Usage);
+    assert_eq!(notices(cx, &h), [crate::drilldown::HIDDEN_NOTICE]);
+    assert!(h.app.read_with(cx, |app, cx| app.current_filter(cx).hidden_projects.contains(BETA)), "still hidden: that is the user's to undo");
+}
+
+#[gpui_kit::test]
+fn jumping_from_a_project_sets_project_any_time_and_active(cx: &mut TestAppContext) {
+    use crate::model::{ActiveRange, MainView, RangePreset};
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    h.app.update(cx, |app, cx| app.set_range(RangePreset::Today, cx));
+    let (first, last) = september();
+    usage_on(cx, &h, (first, last));
+
+    jump(cx, &h, Some(ALPHA));
+    assert_eq!(view(cx, &h), MainView::Sessions);
+    assert_eq!(view_focus(cx, &h), (false, true));
+    h.app.read_with(cx, |app, cx| {
+        let filter = app.current_filter(cx);
+        assert_eq!(filter.project.as_deref(), Some(ALPHA));
+        assert_eq!((filter.since_ms, filter.until_ms, app.range), (None, None, RangePreset::Any));
+        assert_eq!(filter.active, Some(ActiveRange { first, last }), "the days Usage showed");
+        assert_eq!(listed(app, cx), [S1, S2], "alpha's sessions with calls in September");
+        assert!(app.table.read(cx).delegate().search_targets().iter().all(|t| t.project_key == ALPHA));
+    });
+    assert!(notices(cx, &h).is_empty(), "every session Usage counts is listed");
+}
+
+#[gpui_kit::test]
+fn jumping_from_the_sessions_card_keeps_project_kind_and_model(cx: &mut TestAppContext) {
+    use crate::model::{ActiveRange, Kind, MainView};
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    h.app.update(cx, |app, cx| {
+        app.set_project(Some(BETA.into()), cx);
+        app.toggle_kind(Kind::Sdk, cx);
+        app.set_model_filter(Some("claude-opus-5".into()), cx);
+    });
+    let before = h.app.read_with(cx, |app, cx| app.current_filter(cx));
+    usage_on(cx, &h, (s3_day(), s3_day()));
+    jump(cx, &h, None);
+    assert_eq!(view(cx, &h), MainView::Sessions);
+    h.app.read_with(cx, |app, cx| {
+        let filter = app.current_filter(cx);
+        assert_eq!((filter.project, filter.kinds, filter.model), (before.project, before.kinds, before.model), "Project, Kind and Model as they were");
+        assert_eq!(filter.active, Some(ActiveRange { first: s3_day(), last: s3_day() }));
+        assert_eq!(listed(app, cx), [S3]);
+    });
+}
+
+#[gpui_kit::test]
+fn the_notice_counts_the_sessions_the_table_cannot_list(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    usage_on(cx, &h, september());
+    ledger_only(cx, &h, GONE, "alpha", "2026-09-03T08:00:00Z");
+    ledger_only(cx, &h, "88888888-aaaa-4bbb-8ccc-000000000008", "beta", "2026-09-03T08:00:00Z");
+    let alpha_sessions = h.app.update(cx, |app, cx| {
+        app.set_project(Some(ALPHA.into()), cx);
+        app.usage_view.snapshot.cards[4].value.to_string()
+    });
+    assert_eq!(alpha_sessions, "3", "Usage counts S1, S2 and the one without a transcript");
+
+    jump(cx, &h, Some(ALPHA));
+    assert_eq!(h.app.read_with(cx, shown_rows), 2);
+    assert_eq!(notices(cx, &h), ["这段时间还有 1 个 session 的记录已被清理，未列出"], "3 in Usage − 2 listed; the beta one is another project");
+
+    // without such a session nothing is said
+    usage_on(cx, &h, (s1_day(), s1_day()));
+    jump(cx, &h, Some(ALPHA));
+    assert_eq!(h.app.read_with(cx, listed), [S1]);
+    assert_eq!(notices(cx, &h).len(), 1);
+}
+
+#[gpui_kit::test]
+fn clearing_the_active_tag_keeps_the_other_filters_and_the_focus(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    usage_on(cx, &h, (s1_day(), s1_day()));
+    jump(cx, &h, Some(ALPHA));
+    assert_eq!(h.app.read_with(cx, listed), [S1], "S2's call was on another day");
+    let with_active = h.app.read_with(cx, |app, cx| app.current_filter(cx));
+    // the focus somewhere else first (set directly: after `press("cmd-f")` the test window now
+    // and then hands the focus back to the box once the clear's effects run, whoever took it)
+    let app = h.app.clone();
+    in_window(cx, &h, |window, cx| app.update(cx, |app, cx| app.focus_search(window, cx)));
+    assert_eq!(focus(cx, &h), (true, false));
+
+    clear_active(cx, &h);
+    h.app.read_with(cx, |app, cx| {
+        let filter = app.current_filter(cx);
+        assert_eq!(filter, crate::model::Filter { active: None, ..with_active.clone() }, "only the Active filter went");
+        assert!(listed(app, cx).contains(&S2.to_string()), "alpha's other sessions are back");
+    });
+    assert_eq!(focus(cx, &h), (false, true), "the keys go to the table");
+}
+
+#[gpui_kit::test]
+fn searching_under_the_active_filter_and_clearing_it_reruns_the_search(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    usage_on(cx, &h, (s1_day(), s1_day()));
+    jump(cx, &h, None);
+    h.app.update(cx, |app, cx| app.toggle_regex(cx));
+    press(cx, &h, "cmd-f");
+    type_text(cx, &h, "parser|hello");
+    press(cx, &h, "enter");
+    wait_until(cx, &h, "the search", |app, cx| search_done(app, cx) && !app.search_pending);
+    h.app.read_with(cx, |app, cx| {
+        assert_eq!(listed(app, cx), [S1], "S2 says 'hello', but had no call that day");
+        assert_eq!(app.search_summary.as_ref().unwrap().sessions, 1, "it was not even searched");
+    });
+    let seq = h.app.read_with(cx, |app, _| app.search_seq);
+
+    clear_active(cx, &h);
+    assert!(h.app.read_with(cx, |app, _| app.search_seq) > seq, "searched again");
+    wait_until(cx, &h, "the search over all sessions", |app, cx| search_done(app, cx) && !app.search_pending);
+    assert_eq!(h.app.read_with(cx, listed), [S1, S2]);
+    assert_eq!(search_box(cx, &h), "parser|hello");
+}
+
+#[gpui_kit::test]
+fn the_active_filter_is_not_restored_after_a_restart(cx: &mut TestAppContext) {
+    use crate::model::RangePreset;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    h.app.update(cx, |app, cx| app.set_range(RangePreset::Today, cx));
+    usage_on(cx, &h, september());
+    jump(cx, &h, Some(ALPHA));
+    let state = saved_state(&h);
+    assert_eq!((state.range, state.project_key.as_deref()), (RangePreset::Any, Some(ALPHA)), "what the jump set is saved like any pick");
+
+    let again = launch_with(cx, |dir| state.save(&dir.join("state.json")).unwrap());
+    again.app.read_with(cx, |app, cx| {
+        let filter = app.current_filter(cx);
+        assert_eq!(filter.active, None, "the Active filter is not");
+        assert_eq!((app.range, filter.since_ms, filter.project.as_deref()), (RangePreset::Any, None, Some(ALPHA)));
+        assert!(listed(app, cx).contains(&S2.to_string()));
+    });
+}
+
+#[gpui_kit::test]
+fn a_scan_that_adds_calls_in_range_adds_the_session_to_the_list(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    usage_on(cx, &h, (s2_day(), s2_day()));
+    jump(cx, &h, Some(ALPHA));
+    assert_eq!(h.app.read_with(cx, listed), [S2]);
+
+    let at = chrono::DateTime::parse_from_rfc3339("2026-09-05T12:00:30Z").unwrap().timestamp_millis();
+    append_response(&h._dir.path().join("claude"), S1, "msg_same_day", "claude-opus-5", at);
+    // an automatic scan, as the timer or coming back to the window starts it
+    cx.executor().advance_clock(crate::AUTO_SCAN_MIN_GAP);
+    assert!(h.app.update(cx, |app, cx| app.auto_scan("test", cx)));
+    wait_until(cx, &h, "S1 with its call that day", |app, cx| listed(app, cx).len() == 2);
+    assert_eq!(h.app.read_with(cx, listed), [S1, S2]);
+}
+
+// ---- the same with the mouse ------------------------------------------------------------------
+
+/// A window tall enough for the Usage view's tables to be on screen, and a click on `selector`.
+fn click_on(cx: &mut TestAppContext, h: &Harness, selector: &'static str) {
+    use gpui_kit::{Modifiers, VisualTestContext, px, size};
+    let mut window = VisualTestContext::from_window(h.window, cx);
+    window.simulate_resize(size(px(1440.), px(1600.)));
+    window.run_until_parked();
+    let b = window.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} on screen"));
+    window.simulate_click(b.center(), Modifiers::none());
+    window.run_until_parked();
+}
+
+#[gpui_kit::test]
+fn a_click_on_a_session_line_in_usage_reveals_it(cx: &mut TestAppContext) {
+    use crate::model::MainView;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    usage_on(cx, &h, september());
+    let top = h.app.read_with(cx, |app, _| app.usage_view.snapshot.sessions[0].id.to_string());
+    click_on(cx, &h, crate::usage_view::SESSION_LINE_SELECTOR);
+    assert_eq!(view(cx, &h), MainView::Sessions);
+    assert_eq!(h.app.read_with(cx, |app, _| app.selected.as_ref().unwrap().id.to_string()), top);
+}
+
+/// The arrow sits on the project's row, whose own click sets (or unsets) the Project filter: a
+/// click on the arrow is the arrow's alone.
+#[gpui_kit::test]
+fn a_click_on_a_project_s_arrow_jumps_and_does_not_also_click_its_row(cx: &mut TestAppContext) {
+    use crate::model::MainView;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    usage_on(cx, &h, september());
+    let top = h.app.update(cx, |app, cx| {
+        let key = app.usage_view.snapshot.projects[0].key.clone().unwrap();
+        // picked: a click on its row would unset it
+        app.set_project(Some(key.clone()), cx);
+        key
+    });
+    click_on(cx, &h, crate::usage_view::PROJECT_JUMP_SELECTOR);
+    assert_eq!(view(cx, &h), MainView::Sessions);
+    h.app.read_with(cx, |app, cx| {
+        let filter = app.current_filter(cx);
+        assert_eq!(filter.project, Some(top), "the row's click did not run too");
+        assert!(filter.active.is_some());
+    });
+}
+
+#[gpui_kit::test]
+fn the_sessions_card_s_arrow_and_the_tag_s_cross_work_with_the_mouse(cx: &mut TestAppContext) {
+    use crate::model::MainView;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    usage_on(cx, &h, (s1_day(), s1_day()));
+    click_on(cx, &h, crate::usage_view::SESSIONS_JUMP_SELECTOR);
+    assert_eq!(view(cx, &h), MainView::Sessions);
+    assert_eq!(h.app.read_with(cx, listed), [S1]);
+    click_on(cx, &h, crate::toolbar::ACTIVE_TAG_SELECTOR);
+    assert!(h.app.read_with(cx, |app, cx| app.current_filter(cx).active.is_none()), "the tag's ✕ cleared it");
+    assert_eq!(focus(cx, &h), (false, true));
+}

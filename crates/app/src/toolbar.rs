@@ -13,7 +13,7 @@ use gpui_kit::component::menu::{DropdownMenu, PopupMenu, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_flex};
 use gpui_kit::*;
 
-use crate::model::{DisplayMode, Filter, Kind, MainView, ModelEntry, RangePreset, ScopeSet};
+use crate::model::{ActiveRange, DisplayMode, Filter, Kind, MainView, ModelEntry, RangePreset, ScopeSet};
 use crate::usage_view::{RANGE_BUTTONS, fmt_day_in};
 use agent_session_core::pricing::{display_name, normalize};
 use agent_session_core::usage::UsageRange;
@@ -209,7 +209,13 @@ impl AppRoot {
     pub(crate) fn apply_filter(&mut self, filter: Filter, cx: &mut Context<Self>) {
         // Project, Kind and Model are the Usage view's filters too
         let usage_changed = !crate::usage_view::same_filter(&crate::usage_view::usage_filter(&filter), &crate::usage_view::usage_filter(&self.current_filter(cx)));
+        // the sessions of the Active filter's days come from the usage data, ready before the
+        // filter asks for them
+        let active_ids = (filter.active != self.current_filter(cx).active).then(|| filter.active.map(|range| self.active_ids_in(range)));
         let (changed, ms, shown) = self.table.update(cx, |table, cx| {
+            if let Some(ids) = active_ids {
+                table.delegate_mut().set_active_ids(ids);
+            }
             let changed = table.delegate_mut().set_filter(filter);
             if changed {
                 table.scroll_to_row(0, cx);
@@ -655,6 +661,7 @@ impl AppRoot {
                     ),
                 )
             })
+            .children(filter.active.map(|range| self.active_tag(range, cx)))
             .child(trigger("kind", "Kind", format!("{}{}", filter.kinds.label(), if filter.favorites_only { " · ★" } else { "" }).into(), cx).dropdown_menu(self.kind_menu(cx)))
             .child(trigger("model", "Model", filter.model.as_ref().map_or_else(|| "All".into(), |m| display_name(m).into()), cx).dropdown_menu(self.model_menu(cx)))
             .child(
@@ -686,6 +693,40 @@ impl AppRoot {
                 trigger("preview", "Preview", mode.label().into(), cx)
                     .dropdown_menu_with_anchor(Anchor::TopRight, self.preview_menu(cx)),
             )
+    }
+}
+
+/// The toolbar's `Active …` tag (tests click it).
+pub const ACTIVE_TAG_SELECTOR: &str = "toolbar-active-tag";
+
+impl AppRoot {
+    /// `Active 11-12 ✕` after Updated while a jump from Usage keeps only the sessions active in
+    /// those days; a click clears that filter.
+    fn active_tag(&self, range: ActiveRange, cx: &mut Context<Self>) -> Button {
+        let variant = ButtonCustomVariant::new(cx)
+            .color(style::lit_bg())
+            .foreground(style::text())
+            .hover(style::control_hover())
+            .active(style::control_hover());
+        Button::new("active-tag")
+            .custom(variant)
+            .small()
+            .h(px(CONTROL_H))
+            .px(px(8.))
+            .border_1()
+            .border_color(style::control_border())
+            .rounded(px(5.))
+            .tooltip("Only sessions with calls in these days, from the Usage view · click to clear")
+            .debug_selector(|| ACTIVE_TAG_SELECTOR.into())
+            .child(
+                h_flex()
+                    .gap(px(4.))
+                    .text_size(px(12.))
+                    .child(div().text_color(style::label()).child("Active"))
+                    .child(div().font_weight(FontWeight::MEDIUM).child(range.label(self.usage_day.year())))
+                    .child(div().text_color(style::label()).child("✕")),
+            )
+            .on_click(cx.listener(|this, _, window, cx| this.clear_active(window, cx)))
     }
 }
 

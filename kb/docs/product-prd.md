@@ -56,7 +56,7 @@ tags:
 | 真实数据读取与索引 | ✅ | 解析器、增量 SQLite 索引、history.jsonl 补位、损坏自动重建；界面热启动约 200ms 出表（5488 行），冷索引 1.27GB 约 4s 且表格流式填充；Index 菜单可手动 Scan / Rebuild |
 | 实时更新 | 🟡 定时 | 2026-11-16：应用开着时自动增量扫描（窗口回到前台、每 10 分钟，30 秒内只扫一次），有变化才刷新表格；关掉窗口后照常扫描；不监听文件。用量账本见 `../plans/2026-11-16-usage-stats/usage-ledger.md` |
 | 常驻菜单栏 | ✅ | 2026-11-16：启动后菜单栏有一个图标和今天的费用（取整到美元）；红色按钮和 `⌘W` 只隐藏窗口，Dock 图标随之消失，应用留在菜单栏继续扫描；菜单里有今天的费用、In / Out、上次扫描的时刻，Open Sessions、Open Usage、Scan Now、Quit；从 Finder 重开时窗口和关掉前一样。见 4.10 与 `../plans/2026-11-16-usage-stats/menubar-resident.md` |
-| Usage 视图 | ✅ | 2026-11-16：`⌃2` / 工具栏 `Usage` 切到用量视图：范围（Today / Yesterday / 7 / 30 days / This month / Last month / Custom），和会话表共用 Project / Kind / Model 过滤；五张指标卡（Cost / In / Out / Calls / Sessions，与上一段时间对比）；按小时 / 按天的柱状图（按模型堆叠，可切 Cost / In / Out / Hit rate，按小时时叠前一天的虚线框和现在线，按天时有 7 日均线，悬停看明细，点一天的柱子看它的小时）；钱花在哪（按 token 种类）、按模型、按项目（点一行按项目过滤）、费用最高的 session；Usage 开着时每分钟扫描一次。从 Usage 跳到会话（第 4 期）未做。见 4.11 与 `../plans/2026-11-16-usage-stats/usage-view.md` |
+| Usage 视图 | ✅ | 2026-11-16：`⌃2` / 工具栏 `Usage` 切到用量视图：范围（Today / Yesterday / 7 / 30 days / This month / Last month / Custom），和会话表共用 Project / Kind / Model 过滤；五张指标卡（Cost / In / Out / Calls / Sessions，与上一段时间对比）；按小时 / 按天的柱状图（按模型堆叠，可切 Cost / In / Out / Hit rate，按小时时叠前一天的虚线框和现在线，按天时有 7 日均线，悬停看明细，点一天的柱子看它的小时）；钱花在哪（按 token 种类）、按模型、按项目（点一行按项目过滤）、费用最高的 session；Usage 开着时每分钟扫描一次。2026-11-16 第 4 期：点费用最高的 session 回到会话表并选中它，项目行和 Sessions 卡的 `↗` 列出这段时间里有调用的 session（工具栏 `Active …` 标签）。见 4.11、`../plans/2026-11-16-usage-stats/usage-view.md` 与 `usage-drilldown.md` |
 | 快捷键与菜单 | ✅ 部分 | 退出、`cmd-w` 关窗（留在菜单栏）、`ctrl-1` / `ctrl-2` 切换会话表与 Usage、折叠详情面板、`cmd-f`、`cmd-1..4`、`cmd-shift-r` 重建索引、`cmd-c` / `cmd-shift-c` 复制 ID / resume 命令、`[` / `]` 按回合跳转；File 菜单的 Close Window；View 菜单可显示 / 隐藏没有 prompt 的空 session；表格行有右键菜单。启动后和窗口重开后焦点在表格上，不需要先点击就能用快捷键 |
 | 设置与状态持久化 | ✅ 视图状态 / ⬜ 设置页 | 项目与时间过滤（含自定义区间）、排序、Preview 模式、空 session 开关、详情面板开合、选中行存 `state.json`，下次启动恢复 |
 | 安装与自动更新 | ✅ | 2026-10-28 发布 1.0：Homebrew cask（`brew install --cask reorx/tap/agent-session-manager`）或 GitHub Release 的 dmg，Apple Silicon、macOS 14 起，Developer ID 签名并经 Apple 公证；应用内每天检查一次更新（也可菜单 Check for Updates…），用户确认后安装并重启；About 面板显示版本。见 `release.md` |
@@ -210,6 +210,9 @@ M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebui
 - **下方四块**：钱花在哪（Cache read / Cache write / Output / Uncached input 的费用和占比，有 web search 时加一行）、按模型、按项目（前 7 个，其余合成一行；点一行按项目过滤，再点取消）、费用最高的 6 个 session（范围内的费用）。窗口窄于 960 时两列改成上下排列，整个视图可纵向滚动。
 - **空状态**：账本还没有数据时卡片是 `—`、图的位置写 `No usage recorded yet`；范围内没有调用时卡片是 `$0.00` / `0`，各表写 `No calls in this range`；账本不可用时整个视图只有一句说明。
 - **刷新**：切到 Usage 时扫一次（30 秒内扫过就不扫），Usage 开着时每分钟扫一次，回到会话表或关掉窗口后恢复每 10 分钟；没有变化时界面不动。Usage 显示期间搜索结果不重跑，回到会话表时才补上。
+- **回到会话表**（✅ 2026-11-16，`../plans/2026-11-16-usage-stats/usage-drilldown.md`）：
+  - 点「费用最高的 session」的一行：切到会话表，选中它、滚到它、详情显示它，焦点在表格上。被过滤或搜索挡住时只放宽挡住它的那几项（搜索词、Updated、Project、Kind、Model、只看收藏、空 session、Active），通知写明放宽了什么（`已清除过滤：Updated、Model`）。会话表里完全没有它（记录和历史都被清理）时留在 Usage 并通知，这种行的短 id 是灰色的、悬停有说明；它的项目被隐藏时同样留在 Usage 并通知，不替用户取消隐藏。
+  - 项目行末尾的 `↗`：Project 设为这个项目；Sessions 卡右上角的 `↗`：Project / Kind / Model 不变（范围内没有调用时不显示）。两者都切到会话表，Updated 改为 Any time、清空搜索，只列出在 Usage 当前范围里至少有一次调用（含 subagent）的 session；工具栏 Updated 后面出现 `Active 11-01 – 11-16 ✕`（只有一天时 `Active 11-12`），点 ✕ 清掉，其他过滤不变。这个过滤和其他过滤、搜索叠加，扫描到新的调用时列表跟着变，重启后不保留。Usage 算到、会话表却列不出的 session 有多少，跳转后通知里说（区分记录已被清理和被其他过滤挡住）。点项目行的其余部分仍是在 Usage 里按项目过滤。
 
 ## 5. 核心使用流程
 

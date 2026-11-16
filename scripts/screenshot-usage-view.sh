@@ -16,15 +16,24 @@
 #   11-month.png        This month, the project still picked
 #   12-narrow.png       the window 900 px wide: the panels one above the other
 #   13-sessions.png     the session table, the project filter still on
-#   14-empty.png        a range without calls: $0.00, empty axes, "No calls in this range"
-#   15-no-usage.png     a second launch on an empty data directory: "No usage recorded yet"
+#   14-jump-project.png the project's ↗ (kb/plans/2026-11-16-usage-stats/usage-drilldown.md): the
+#                       table with that project, Updated any time, the `Active …` tag, only the
+#                       sessions with a call in This month
+#   15-jump-session.png the most expensive session the table has, as a click on it in Usage: it is
+#                       selected, in the detail panel, the keys on the table
+#   16-empty.png        a range without calls: $0.00, empty axes, "No calls in this range"
+#   17-no-usage.png     a second launch on an empty data directory: "No usage recorded yet"
 #
 # The app prints its state with each step (`autoplay-usage-view: <step> · view=… range=…
-# chart=hourly/24 hover=… empty=… calls=… project=… width=… today-matches=…`) and holds it until
+# chart=hourly/24 hover=… empty=… calls=… project=… width=… today-matches=… active=… updated=…
+# rows=… selected=… detail=… focus=… usage-sessions=…`) and holds it until
 # the script has captured it (`<step>.shot` in the gate directory). The script checks the state:
 # today by the hour with its cost equal to the status bar's Today, 30 bars a day, the metric
 # switched, a tooltip pinned, the drill by the hour and back to 30 days, the project picked and
-# kept in the session table, the narrow width, the empty states. A failed check prints FAILED and
+# kept in the session table, the narrow width, the jumps (the Active filter on and Updated any
+# time, the rows those of the notice's count; the revealed session selected with the keys on the
+# table), the empty states. The rows of the project jump go to the log as `jump-rows: <ids>`, to
+# compare with the ledger (see gpui-kit-guide.md). A failed check prints FAILED and
 # the run goes on; it exits 1 at the end. A step the app skipped (no calls to hover or drill into)
 # is not captured and fails too. Nothing is typed or clicked, and the app never comes to the
 # front by itself.
@@ -54,7 +63,7 @@ build_winid
 wake-screen
 
 STAMP=$(date +%H%M%S)
-STEPS="today today-hover yesterday d30 d30-in d30-hit d30-hover drill back project month narrow sessions empty"
+STEPS="today today-hover yesterday d30 d30-in d30-hit d30-hover drill back project month narrow sessions jump-project jump-session empty"
 if [ -n "${ASM_USAGE_VIEW_STEPS:-}" ]; then
   STEPS=$(echo "$ASM_USAGE_VIEW_STEPS" | tr ',' ' ')
 fi
@@ -160,7 +169,23 @@ check() {
     project) lacks project project=- ;;
     month) echo "$LINE" | grep -q "range=This month " || fail_check "month: expected This month" ; lacks month project=- ;;
     narrow) has narrow width=900 ;;
-    sessions) has sessions view=sessions ; lacks sessions project=- ;;
+    sessions) has sessions view=sessions ; lacks sessions project=- ; has sessions active=- ;;
+    jump-project)
+      has jump-project view=sessions ; lacks jump-project project=- ; lacks jump-project active=-
+      has jump-project updated=any ; lacks jump-project rows=0 ; has jump-project focus=table
+      # the notice counts what Usage has and the table does not list (acceptance 10)
+      local rows usage unlisted
+      rows=$(echo "$LINE" | sed -nE 's/.* rows=([0-9]+) .*/\1/p')
+      usage=$(echo "$LINE" | sed -nE 's/.* usage-sessions=([0-9]+)( .*|$)/\1/p')
+      unlisted=$(grep -E "^notice: 这段时间还有 [0-9]+ 个" "$LOG" | tail -1 | sed -nE 's/^notice: 这段时间还有 ([0-9]+) 个.*/\1/p' || true)
+      [ $((rows + ${unlisted:-0})) = "$usage" ] || fail_check "jump-project: $rows rows + ${unlisted:-0} unlisted is not Usage's $usage sessions"
+      ;;
+    jump-session)
+      has jump-session view=sessions ; lacks jump-session selected=- ; has jump-session detail=yes ; has jump-session focus=table
+      local sel
+      sel=$(echo "$LINE" | sed -nE 's/.* selected=([^ ]+) .*/\1/p')
+      grep -q "^reveal: $sel$" "$LOG" || fail_check "jump-session: $sel is not the session revealed"
+      ;;
     empty) has empty view=usage ; has empty empty=no-calls ; has empty calls=0 ; has empty project=- ;;
   esac
 }

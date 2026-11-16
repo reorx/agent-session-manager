@@ -25,6 +25,7 @@ mod actions;
 mod conversation;
 mod cost_tab;
 mod detail;
+mod drilldown;
 mod favorites;
 #[cfg(test)]
 mod keyboard_tests;
@@ -252,6 +253,9 @@ pub struct AppRoot {
     _menu_commands: Option<Task<()>>,
     #[cfg(test)]
     selection_event_count: Option<usize>,
+    /// Every notification `say` pushed, in order.
+    #[cfg(test)]
+    notices: Vec<SharedString>,
 }
 
 /// Where the app finds its data and keeps its own.
@@ -306,6 +310,8 @@ impl AppRoot {
             model: saved.model.clone().map(Into::into),
             favorites_only: saved.favorites_only,
             hidden_projects: saved.hidden_projects.iter().cloned().map(Into::into).collect(),
+            // a jump from Usage is not kept across a restart: its range came from that moment
+            active: None,
         });
         // before the sort: a hidden column is not sorted by
         delegate.set_hidden_columns(saved.hidden_columns.iter().cloned());
@@ -485,6 +491,8 @@ impl AppRoot {
             _menu_commands: None,
             #[cfg(test)]
             selection_event_count: None,
+            #[cfg(test)]
+            notices: Vec::new(),
         };
         // a fresh window has no focus, and without one no key binding or menu action reaches the app
         this.focus_view(window, cx);
@@ -604,9 +612,14 @@ impl AppRoot {
         if usage_changed {
             self.roll_day(now_ms(), cx);
         }
+        // new calls in the Active filter's days: other sessions are listed, as after a scan
+        let active_changed = usage_changed && self.sync_active_ids(cx);
+        if active_changed {
+            self.relocate_selection(false, cx);
+        }
         // a reload follows a scan that changed the index: the results on screen may be out of date
         // (not searched while Usage is shown: Usage scans every minute, a regex search takes a while)
-        if reloaded && self.searching() {
+        if (reloaded || active_changed) && self.searching() {
             match self.view {
                 MainView::Sessions => self.refresh_search(cx),
                 MainView::Usage => self.search_went_stale(StaleSearch::Refresh),
@@ -1832,7 +1845,7 @@ impl Render for AppRoot {
 
 // Only the icons the component bundle lacks (the detail header's buttons); see gpui-kit-assets'
 // README, "Default component icons and application extras".
-gpui_kit::assets::icon_assets!(ExtraIcons, [SquareTerminal, FileSearch, Download]);
+gpui_kit::assets::icon_assets!(ExtraIcons, [SquareTerminal, FileSearch, Download, ArrowUpRight]);
 
 /// The default component icons plus `ExtraIcons`.
 struct AppAssets;

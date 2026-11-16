@@ -1,5 +1,5 @@
 //! Local usage days and in-memory totals, priced with the current price table.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use chrono::{Duration, NaiveDate, TimeZone};
 use crate::{model::{SessionUsage, Tokens}, pricing::{self, CostLines, ModelPrice}};
 
@@ -230,6 +230,14 @@ impl UsageData {
         let mut entries=BTreeMap::<String,ProjectEntry>::new();
         for s in self.sessions.values().filter(|s|s.hours.iter().any(|h|h.responses>0)) {entries.entry(s.session.project_key.clone()).or_insert_with(||ProjectEntry{key:s.session.project_key.clone(),name:project_name(&s.session),sessions:0}).sessions+=1;}
         entries.into_values().collect()
+    }
+    /// Sessions with at least one call inside `span`, their subagents' calls included and
+    /// whatever the filters: what "active in this range" means for the session table.
+    pub fn active_sessions(&self, span: Span) -> HashSet<&str> {
+        self.sessions.values()
+            .filter(|s| s.hours.iter().any(|h| h.responses > 0 && span.contains_hour(h.hour)))
+            .map(|s| s.session.id.as_str())
+            .collect()
     }
     pub fn model_entries(&self)->Vec<(String,u64)> {
         let mut entries=BTreeMap::new(); for h in self.sessions.values().flat_map(|s|&s.hours).filter(|h|h.responses>0) {*entries.entry(pricing::normalize(&h.model).to_string()).or_default()+=h.responses;} entries.into_iter().collect()

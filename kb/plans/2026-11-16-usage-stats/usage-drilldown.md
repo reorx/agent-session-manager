@@ -199,3 +199,18 @@ app `keyboard_tests.rs`（无界面窗口，fixture 的调用时间固定，范�
 - **通知里的 N 可能让人困惑**：Usage 的 Sessions 数包括会话表里没有的、被隐藏项目里的、没有 prompt 的 session。N 的口径定为「Usage 的数 − 列表的行数」，通知的文字如实写「未列出」，不细分原因。实测后如果 N 经常很大（没有 prompt 的 SDK session 多），把「没有 prompt 的 session」也在跳转时改为显示。
 - **`selected` 被放宽的过滤带走**：放宽过滤会改变整张表，原来选中的行随之换成目标 session，这是预期的；但 `wanted_id` 的等待逻辑（启动时恢复选中）不能被这次跳转打断。`reveal_session` 里先清 `wanted_id`。
 - **Active 的标签占工具栏宽度**：`screenshot-clicks.sh` 的点击坐标是按工具栏按钮的位置写的，标签只在跳转后出现，默认状态下不影响；改了工具栏布局后仍要按 AGENTS.md 校对一次坐标。
+
+## 实现记录（2026-11-16，usage-p4-drill）
+
+实现与验收证据见 `kb/sessions/2026-11-16-usage-p4-drill.md`。和上文不一致的地方（以代码为准）：
+
+- **代码放在新模块 `crates/app/src/drilldown.rs`**：`reveal_session`、`show_active_sessions`、`clear_active`、`sync_active_ids`、`active_ids_in`、通知文字（`GONE_NOTICE`、`HIDDEN_NOTICE`、`unlisted_notice`）和发通知的 `AppRoot::say`（同时打 `notice: …` 到日志，截图脚本据此判定）。`main.rs` / `toolbar.rs` 只加了接线。
+- **`ActiveRange::label(year)` 带当前年份参数**，和第 3 期范围标题的做法一样：今年的写 `11-12` / `11-01 – 11-12`；跨年两端都带年份 `2025-12-28 – 2026-01-03`；整段不在今年时 `2025-11-12` / `2025-11-01 – 11-12`。
+- **集合在 `apply_filter` 里给**：`active` 变了时 `apply_filter` 自己算集合（`active_ids_in`）并在 `set_filter` 之前交给 delegate，调用方不用先调 `sync_active_ids`；`sync_active_ids` 只用于收到用量之后。
+- **用量更新后的刷新走扫描刷新的规矩**：集合真变了才 `relocate_selection(false)`（不把表格滚回选中行），搜索中和整表重读一样走静默的 `refresh_search`，不是上文写的 `after_rows_changed` + `run_search`（AGENTS.md：扫描引起的刷新不滚回选中行、搜索模式下走 `refresh_search`）。
+- **`reveal_session` 把 `wanted_id` 设成目标，而不是清掉**：放宽过滤途中表格可能先选中别的行，启动时可能还在等恢复的选中，都让给目标。搜索中又放宽了过滤时，过滤变化引起的重搜记成 `Refresh`（结果攒齐再换），目标在重搜期间一直选中。被清空的搜索在通知里叫 `Search`（`已清除过滤：Search、Updated`）。
+- **通知的 N 是集合差，不是减法**：N = Usage 在同样 Project / Kind / Model 下算到、表格却没列出的 session 数。会话表的 Model 按 session 的主模型比，Usage 按每次调用的模型比，开着 Model 过滤时表格里可能有 Usage 没算的行，减法会少算。文字按原因分三种：全是记录已清理的「这段时间还有 N 个 session 的记录已被清理，未列出」；全是被其他过滤挡住的「…被会话表的其他过滤挡住，未列出」；两种都有的「这段时间还有 N 个 session 未列出：K 个的记录已被清理，其余被会话表的其他过滤挡住」。没有 Model 过滤时 N 等于 Usage 的 Sessions 数减去行数（验收 10，导览的 `jump-project` 判定这个等式）。
+- **Sessions 卡的 `↗` 只在范围内有调用时显示**（`Empty::No`），没有调用、账本为空、账本不可用时不画。
+- **autoplay 加在 `ASM_USAGE_VIEW_AUTOPLAY` 的导览里，不是 `ASM_USAGE_AUTOPLAY`**：后者的 gate 驱动改数据的扫描和重建（`make screenshot-usage`），跳转只改视图状态，属于第 3 期的 Usage 视图导览（`make screenshot-usage-view`）。两步放在 `sessions` 之后、`empty` 之前，而不是 `project` 之后：放在中间，Active 过滤会一直带到 `month` / `narrow` / `sessions` 的截图里，前 13 张的含义就变了。状态行加了会话表一侧的字段（`active=`、`updated=`、`rows=`、`selected=`、`detail=`、`focus=`、`usage-sessions=`），`jump-project` 把列出的 id 打成 `jump-rows: …`，供和账本副本逐个对。
+- **第 4 步的键盘测试和实现是一起写的**，没有先跑出红。补的证据是变异检查：10 处改动（去掉 `stop_propagation`、收到用量后不同步集合、`apply_filter` 不给集合、不清搜索、不改 Updated、不清 `since/until`、通知不分原因、灰色判定恒真、不查隐藏项目、清标签后不给表格焦点）各自让对应的测试失败（`tmp/2026-11-12-usage-stats/usage-p4-drill/mutations.log`）。
+- **测试比上文多四个**：`a_session_left_only_in_history_is_revealed_as_its_history_row`（只剩 History 行的 session 照常选中）；三个鼠标测试 `a_click_on_a_session_line_in_usage_reveals_it`、`a_click_on_a_project_s_arrow_jumps_and_does_not_also_click_its_row`、`the_sessions_card_s_arrow_and_the_tag_s_cross_work_with_the_mouse` 用测试窗口的鼠标点击（`debug_selector` 定位）代替了上文的 cliclick 检查；真点击仍留给实机验收。

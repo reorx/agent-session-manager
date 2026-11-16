@@ -19,9 +19,11 @@ use agent_session_core::usage::{
     moving_average, previous_span, range_span, usage_day,
 };
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime, TimeZone, Weekday};
+use gpui_kit::assets::IconName;
 use gpui_kit::component::date_picker::DatePickerState;
 use gpui_kit::component::scroll::ScrollableElement;
-use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{Icon, h_flex, v_flex};
 use gpui_kit::*;
 
 use crate::AppRoot;
@@ -223,6 +225,9 @@ pub struct SessionLine {
     pub input: SharedString,
     /// What the session cost inside the range, not in all.
     pub cost: SharedString,
+    /// The session table has a row for it (`AppRoot::refresh_usage` checks); without one its
+    /// transcript and its history are gone, and a click can only say so.
+    pub listed: bool,
 }
 
 /// An entry of the chart's legend.
@@ -633,6 +638,7 @@ fn session_line(s: &agent_session_core::usage::SessionTotal) -> SessionLine {
         project: s.project_name.clone().into(),
         input: fmt_tokens(s.totals.tokens.input_total()).into(),
         cost: fmt_money(s.totals.cost.total()).into(),
+        listed: true,
     }
 }
 
@@ -880,7 +886,11 @@ impl AppRoot {
         }
         let started = Instant::now();
         let query = self.usage_query(cx);
-        let snapshot = UsageSnapshot::build(&self.usage, self.usage_available, &query, crate::now_ms(), self.usage_day, &Local);
+        let mut snapshot = UsageSnapshot::build(&self.usage, self.usage_available, &query, crate::now_ms(), self.usage_day, &Local);
+        let delegate = self.table.read(cx).delegate();
+        for line in &mut snapshot.sessions {
+            line.listed = delegate.row_by_id(&line.id).is_some();
+        }
         let u = &mut self.usage_view;
         u.projects = self.usage.project_entries();
         u.projects.sort_by_cached_key(|p| p.name.to_lowercase());
@@ -967,6 +977,15 @@ pub const CHART_H: f32 = 236.;
 const NARROW_W: f32 = 960.;
 /// The width of a number column of the tables.
 const NUM_W: f32 = 76.;
+/// The column of the project table's `↗`.
+const JUMP_W: f32 = 28.;
+/// The tooltip of a session's grey id: the session table has no row for it.
+pub const UNLISTED_TIP: &str = "Transcript cleaned up: only its usage is kept";
+/// The first line of "Most expensive sessions", the first project's `↗` and the Sessions card's
+/// (tests click them).
+pub const SESSION_LINE_SELECTOR: &str = "usage-session-line-0";
+pub const PROJECT_JUMP_SELECTOR: &str = "usage-project-jump-0";
+pub const SESSIONS_JUMP_SELECTOR: &str = "usage-sessions-jump";
 
 impl AppRoot {
     /// The Usage view under the toolbar: five cards, the chart, then "Where the money goes" next
@@ -991,7 +1010,7 @@ impl AppRoot {
             div().id("usage-scroll").size_full().overflow_y_scrollbar().child(
                 v_flex()
                     .w_full()
-                    .child(render_cards(&snap.cards, cx))
+                    .child(render_cards(&snap.cards, self.render_sessions_jump(cx), cx))
                     .child(self.render_chart_panel(cx))
                     .child(grid2(narrow, self.render_parts(cx), self.render_models(cx)))
                     .child(grid2(narrow, self.render_projects(cx), self.render_sessions(cx))),
@@ -1037,6 +1056,16 @@ impl AppRoot {
                     .child(render_legend(&chart.legend)),
             )
             .child(area)
+    }
+
+    /// The Sessions card's `↗`: the sessions active in the range, in the session table. Only
+    /// when there are some.
+    fn render_sessions_jump(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        (self.usage_view.snapshot.empty == Empty::No).then(|| {
+            jump_button("usage-sessions-jump", "These sessions in the session table")
+                .debug_selector(|| SESSIONS_JUMP_SELECTOR.into())
+                .on_click(cx.listener(|this, _, window, cx| this.show_active_sessions(None, window, cx)))
+        })
     }
 
     /// "Where the money goes": a stacked bar of the cost by kind of token, then its table.
@@ -1099,12 +1128,23 @@ impl AppRoot {
                 let track = div().w(px(90.)).h(px(6.)).flex_none().rounded(px(3.)).bg(style::row_border()).when(r.key.is_some(), |el| {
                     el.child(div().h_full().rounded(px(3.)).bg(style::share_bar()).w(relative(r.fraction.clamp(0.0, 1.0))))
                 });
+                // the project's sessions active in the range, in the session table; its own click,
+                // not also the row's (which filters Usage by the project)
+                let arrow = r.key.clone().map(|key| {
+                    jump_button(("usage-project-jump", ix), "Its sessions active in this range, in the session table")
+                        .when(ix == 0, |el| el.debug_selector(|| PROJECT_JUMP_SELECTOR.into()))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.show_active_sessions(Some(key.clone()), window, cx);
+                        }))
+                });
                 let row = table_row(false, r.selected)
                     .child(name_cell(div().truncate().when(r.key.is_none(), |el| el.text_color(style::muted())).child(r.name.clone())))
                     .child(div().w(px(100.)).flex_none().flex().justify_end().child(track))
                     .child(num_cell(r.cost.clone(), cx))
                     .child(num_cell(r.share.clone(), cx))
-                    .child(num_cell(r.sessions.clone(), cx));
+                    .child(num_cell(r.sessions.clone(), cx))
+                    .child(div().w(px(JUMP_W)).flex_none().flex().justify_end().children(arrow));
                 match r.key.clone() {
                     Some(key) => {
                         let picked = r.selected;
@@ -1123,36 +1163,52 @@ impl AppRoot {
         panel()
             .border_t_1()
             .border_color(style::hairline())
-            .child(panel_head("By project", "click a project to filter by it"))
-            .child(header_row("Project", &["", "Cost", "Share", "Sessions"]))
+            .child(panel_head("By project", "click a project to filter by it, ↗ for its sessions"))
+            .child(header_row("Project", &["", "Cost", "Share", "Sessions"]).child(div().w(px(JUMP_W)).flex_none()))
             .children(rows)
             .when(snap.projects.is_empty(), |el| el.child(empty_note(snap.empty)))
     }
 
-    /// The sessions that cost the most inside the range.
-    fn render_sessions(&self, cx: &App) -> Div {
+    /// The sessions that cost the most inside the range; a click on one shows it in the session
+    /// table. One without a row there has a grey id that says why.
+    fn render_sessions(&self, cx: &mut Context<Self>) -> Div {
         let snap = &self.usage_view.snapshot;
-        let rows = snap.sessions.iter().map(|s| {
+        let rows: Vec<Stateful<Div>> = snap.sessions.iter().enumerate().map(|(ix, s)| {
+            let short_id = div()
+                .id(("usage-session-id", ix))
+                .flex_none()
+                .font_family(style::mono(cx))
+                .text_size(px(11.5))
+                .text_color(if s.listed { style::accent() } else { style::muted() })
+                .child(s.short_id.clone())
+                .when(!s.listed, |el| el.tooltip(|window, cx| Tooltip::new(UNLISTED_TIP).build(window, cx)));
             let cell = h_flex()
                 .gap(px(8.))
                 .min_w_0()
-                .child(div().flex_none().font_family(style::mono(cx)).text_size(px(11.5)).text_color(style::accent()).child(s.short_id.clone()))
+                .child(short_id)
                 .child(div().min_w_0().truncate().child(s.title.clone()))
                 .child(div().flex_none().max_w(px(140.)).truncate().text_size(px(11.5)).text_color(style::muted()).child(s.project.clone()));
-            table_row(false, false).child(name_cell(cell)).child(num_cell(s.input.clone(), cx)).child(num_cell(s.cost.clone(), cx))
-        });
+            let id = s.id.clone();
+            div()
+                .id(("usage-session-row", ix))
+                .cursor_pointer()
+                .hover(|s| s.bg(style::hover_bg()))
+                .when(ix == 0, |el| el.debug_selector(|| SESSION_LINE_SELECTOR.into()))
+                .child(table_row(false, false).child(name_cell(cell)).child(num_cell(s.input.clone(), cx)).child(num_cell(s.cost.clone(), cx)))
+                .on_click(cx.listener(move |this, _, window, cx| this.reveal_session(&id, window, cx)))
+        }).collect();
         panel()
             .border_t_1()
             .border_color(style::hairline())
-            .child(panel_head("Most expensive sessions", "cost inside the range"))
+            .child(panel_head("Most expensive sessions", "cost inside the range, click one to see it"))
             .child(header_row("Session", &["In", "Cost"]))
             .children(rows)
             .when(snap.sessions.is_empty(), |el| el.child(empty_note(snap.empty)))
     }
 }
 
-/// The five cards in a row.
-fn render_cards(cards: &[Card], cx: &App) -> Div {
+/// The five cards in a row; `jump` goes next to the Sessions card's label.
+fn render_cards(cards: &[Card], mut jump: Option<Stateful<Div>>, cx: &App) -> Div {
     let mut row = h_flex().w_full().items_stretch().border_b_1().border_color(style::hairline());
     for (ix, card) in cards.iter().enumerate() {
         // one text that wraps inside the card, its pieces colored by their tone
@@ -1180,7 +1236,13 @@ fn render_cards(cards: &[Card], cx: &App) -> Div {
                 .pb(px(15.))
                 .gap(px(4.))
                 .when(ix > 0, |el| el.border_l_1().border_color(style::hairline()))
-                .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(style::label()).child(card.label.to_uppercase()))
+                .child(
+                    h_flex()
+                        .h(px(16.))
+                        .justify_between()
+                        .child(div().text_size(px(11.)).font_weight(FontWeight::SEMIBOLD).text_color(style::label()).child(card.label.to_uppercase()))
+                        .when(card.label == "Sessions", |el| el.children(jump.take())),
+                )
                 .child(div().font_family(style::mono(cx)).text_size(px(24.)).font_weight(FontWeight::SEMIBOLD).line_height(px(30.)).child(card.value.clone()))
                 .child(div().w_full().text_size(px(12.)).min_h(px(16.)).text_color(style::text_secondary()).child(sub)),
         );
@@ -1272,6 +1334,22 @@ fn swatch(color: Hsla) -> Div {
     div().flex_none().size(px(9.)).rounded(px(2.)).bg(color)
 }
 
+/// A small `↗` button: to the session table.
+fn jump_button(id: impl Into<ElementId>, tooltip: &'static str) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex_none()
+        .size(px(20.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.))
+        .cursor_pointer()
+        .hover(|s| s.bg(style::control_hover()))
+        .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
+        .child(Icon::new(IconName::ArrowUpRight).size(px(13.)).text_color(style::accent()))
+}
+
 /// Under a table without rows.
 fn empty_note(empty: Empty) -> Div {
     div().py(px(18.)).text_size(px(12.5)).text_color(style::muted()).child(empty.message())
@@ -1303,8 +1381,24 @@ fn usage_kind_counts(data: &UsageData) -> [usize; 3] {
 }
 
 /// The steps of the Usage view's autoplay (`ASM_USAGE_VIEW_AUTOPLAY`), in order.
-pub const AUTOPLAY_STEPS: [&str; 14] =
-    ["today", "today-hover", "yesterday", "d30", "d30-in", "d30-hit", "d30-hover", "drill", "back", "project", "month", "narrow", "sessions", "empty"];
+pub const AUTOPLAY_STEPS: [&str; 16] = [
+    "today",
+    "today-hover",
+    "yesterday",
+    "d30",
+    "d30-in",
+    "d30-hit",
+    "d30-hover",
+    "drill",
+    "back",
+    "project",
+    "month",
+    "narrow",
+    "sessions",
+    "jump-project",
+    "jump-session",
+    "empty",
+];
 /// The window width of the autoplay's `narrow` step: under `NARROW_W`, so the panels stack.
 const AUTOPLAY_NARROW_W: f32 = 900.;
 
@@ -1323,6 +1417,11 @@ impl AppRoot {
     /// - `project`: the Project filter set to the most expensive project of the 30 days;
     /// - `narrow`: the window 900 px wide (the panels stack), its width restored after the capture;
     /// - `sessions`: the session table, the project still set;
+    /// - `jump-project`: from Usage, the most expensive project's `↗` (`show_active_sessions`):
+    ///   the table with that project, Updated any time and the Active filter; the rows listed go to
+    ///   the log as `jump-rows: <id>,<id>,…`;
+    /// - `jump-session`: from Usage, the most expensive session the table has a row for, as a
+    ///   click on it does (`reveal_session`): selected, in the detail panel, the keys on the table;
     /// - `empty`: Usage, no project, a Custom range in 2000 (no calls).
     pub(crate) fn usage_view_autoplay(&self, gate: PathBuf, window: &Window, cx: &mut Context<Self>) -> Task<()> {
         let only: Option<Vec<String>> = std::env::var("ASM_USAGE_VIEW_STEPS").ok().filter(|v| !v.trim().is_empty()).map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
@@ -1415,6 +1514,19 @@ impl AppRoot {
                 return Ok(Some(size));
             }
             "sessions" => self.set_view(MainView::Sessions, window, cx),
+            "jump-project" => {
+                self.set_view(MainView::Usage, window, cx);
+                let key = self.usage_view.snapshot.projects.first().and_then(|p| p.key.clone()).ok_or("no project with calls")?;
+                self.show_active_sessions(Some(key), window, cx);
+                let delegate = self.table.read(cx).delegate();
+                let ids: Vec<&str> = delegate.ix.iter().map(|i| delegate.rows[*i].id.as_ref()).collect();
+                println!("jump-rows: {}", ids.join(","));
+            }
+            "jump-session" => {
+                self.set_view(MainView::Usage, window, cx);
+                let id = self.usage_view.snapshot.sessions.iter().find(|s| s.listed).map(|s| s.id.clone()).ok_or("no session of the range in the table")?;
+                self.reveal_session(&id, window, cx);
+            }
             "empty" => {
                 self.set_view(MainView::Usage, window, cx);
                 self.set_project(None, cx);
@@ -1430,7 +1542,9 @@ impl AppRoot {
 
     /// What the autoplay prints after a step: `view=usage range=Last 30 days metric=cost
     /// chart=daily/30 hover=12 empty=no calls=1234 cost=$… project=<key> width=1440 today=Today $…
-    /// today-matches=yes`. The script checks these.
+    /// today-matches=yes`, then the session table's side: `active=2026-11-01..2026-11-16
+    /// updated=any|limited rows=12 selected=<short id> detail=yes focus=table|search|usage|-
+    /// usage-sessions=14` (the last is Usage's Sessions card). The script checks these.
     fn usage_autoplay_state(&self, window: &Window, cx: &App) -> String {
         let u = &self.usage_view;
         let snap = &u.snapshot;
@@ -1454,8 +1568,21 @@ impl AppRoot {
             }
             _ => "-",
         };
+        let filter = self.current_filter(cx);
+        let delegate = self.table.read(cx).delegate();
+        let focus = if self.table.read(cx).focus_handle(cx).is_focused(window) {
+            "table"
+        } else if self.search.read(cx).focus_handle(cx).is_focused(window) {
+            "search"
+        } else if u.focus.is_focused(window) {
+            "usage"
+        } else {
+            "-"
+        };
+        let usage_sessions = snap.cards.iter().find(|c| c.label == "Sessions").map_or(String::from("-"), |c| c.value.replace(',', ""));
         format!(
-            "view={} range={} metric={metric} chart={}/{} hover={} empty={empty} calls={} cost={} project={} width={:.0} {} today-matches={today_matches}",
+            "view={} range={} metric={metric} chart={}/{} hover={} empty={empty} calls={} cost={} project={} width={:.0} {} today-matches={today_matches} \
+             active={} updated={} rows={} selected={} detail={} focus={focus} usage-sessions={usage_sessions}",
             if self.view == MainView::Usage { "usage" } else { "sessions" },
             snap.range_label,
             if chart.hourly { "hourly" } else { "daily" },
@@ -1466,6 +1593,11 @@ impl AppRoot {
             self.current_filter(cx).project.as_deref().unwrap_or("-"),
             window.viewport_size().width.as_f32(),
             self.today_label,
+            filter.active.map_or("-".to_string(), |a| format!("{}..{}", a.first, a.last)),
+            if filter.since_ms.is_none() && filter.until_ms.is_none() { "any" } else { "limited" },
+            delegate.ix.len(),
+            self.selected.as_ref().map_or("-", |row| row.short_id.as_ref()),
+            if self.detail_visible { "yes" } else { "no" },
         )
     }
 }
