@@ -279,8 +279,8 @@ tags:
 
 ### 实施步骤
 
-- [ ] 1. **参考脚本**：在 `tmp/<date>-cache-break-accuracy/expected_breaks.py` 用 Python 独立实现本 plan 的规则，在 60 天数据上输出每次重建（会话、回复时间、原因、少读、写入、间隔、时长）的 TSV，同时按现行规则输出一份，生成前后对比表。可以复用 `tmp/2026-11-16-cache-accuracy-plan/` 里的脚本。
-  - 2026-11-17 初版已完成（`tmp/2026-11-16-cache-break-accuracy/`：`expected_breaks.py`、`before.tsv` / `after.tsv`、`comparison.md`、`changes-explained.tsv`，报告在 `cache-break-ref/report.md`）。按上面新定的 compact 规则更新后，这一步才算完成。
+- [x] 1. **参考脚本**：在 `tmp/<date>-cache-break-accuracy/expected_breaks.py` 用 Python 独立实现本 plan 的规则，在 60 天数据上输出每次重建（会话、回复时间、原因、少读、写入、间隔、时长）的 TSV，同时按现行规则输出一份，生成前后对比表。可以复用 `tmp/2026-11-16-cache-accuracy-plan/` 里的脚本。
+  - 2026-11-17 完成，已按更正后的 compact 规则更新（`tmp/2026-11-16-cache-break-accuracy/`：`expected_breaks.py` 与 19 个行为测试、冻结输入 `calls.jsonl` / `manifest.json`、`before.tsv` / `after.tsv`、`comparison.md`、`changes-explained.tsv`；报告 `cache-break-ref/report.md`，以「协调者摘要（cache-break-ref-r2）」为准）。60 天 133,186 次调用：现行 845 次重建，新规则 842 次（compact 276、空闲 490、换模型 35、不明 9、更早的消息 2、system 或工具 3、登录方式 11、请求设置 9、请求没变 7），差异 708 处，其中原因变化 46 处。
 - [ ] 2. **iterations**：
   - `gen_fixtures.py` 加一个外层全 0、明细有数的响应，和一个带 `compaction` 项的响应，`uv run` 重跑并提交；
   - `tests/parse_transcript.rs` 写失败的测试（会话费用、token、context）；
