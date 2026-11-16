@@ -6,9 +6,11 @@ macOS 桌面应用（Rust + GPUI / gpui-kit），以表格列出本机所有 Cla
 
 M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监听、subagent 查看、设置页；打包和图标已随 1.0 做完），定义在 `kb/plans/2026-09-08-agent-session-manager-prd.md` §3（开发任务的总入口，需求 R1–R13 也在里面；§2 架构未随实现更新）。各功能的实现状态在 `kb/docs/product-prd.md` §2，未解决的问题在 `kb/known-issues.md`。
 
+用量统计（`kb/plans/2026-11-16-usage-stats/`，四期）进行中：第 1 期用量账本已完成（2026-11-16，含状态栏 Today、4:00 分日、自动扫描，真实账本已从索引备份导入），第 2 期常驻菜单栏、第 3 期 Usage 视图、第 4 期从 Usage 下钻未完成。
+
 ## 结构
 
-- `crates/core`（`agent-session-core`，无 gpui 依赖）：JSONL 解析（`claude/`）、增量 SQLite 索引（`index/`）、FTS5 / 正则搜索（`search/`）、费用（`pricing.rs`、`cost.rs`）、收藏、`asm` CLI 与 `transcript-reader`（`bin/`）
+- `crates/core`（`agent-session-core`，无 gpui 依赖）：JSONL 解析（`claude/`）、增量 SQLite 索引（`index/`）、FTS5 / 正则搜索（`search/`）、费用（`pricing.rs`、`cost.rs`）、收藏、用量账本（`ledger.rs`，索引同目录的 `usage-ledger.sqlite`，app 和 `asm` 的索引共用一份）、用量日与内存里的用量聚合（`usage.rs`）、`asm` CLI 与 `transcript-reader`（`bin/`）
 - `crates/app`（`agent-session-manager`）：gpui-kit 界面，保持薄。界面向三条后台线程发请求，线程回事件：
   - `asm-store`（`store.rs`）独占 `Db`：启动先读索引出表，再流式增量扫描
   - `asm-search`（`search.rs`）自带只读连接：文本模式走 FTS，正则模式流式扫描 transcript
@@ -17,6 +19,8 @@ M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监�
 各功能要先知道的事（对应文档在文末 Documentation）：
 
 - 详情面板：`detail.rs` 用 GPUI 的 `list` + `ListState` 按行表渲染回合卡（`turn_cards.rs`），一行是卡片的一段
+- 用量账本：用量一旦被读到就永久留在账本里，删记录文件、重建索引、索引损坏都不影响；会话表的费用仍来自索引。store 线程在第一次 `Loaded` 之后发账本的全部用量（`StoreEvent::Usage { full: true }`），之后每次扫描只发写过的 session；`AppRoot` 在主线程算状态栏的 Today（`roll_day` / `refresh_today`）。用量日从本地 4:00 开始，全应用（时间预设、Today）只用 core `usage.rs` 的 `usage_day` / `day_start_ms`
+- 自动扫描：应用开着时窗口激活和每 10 分钟各触发一次安静的增量扫描（30 秒节流）。安静的扫描不发进度，写过的行等事务提交后才发，遇到索引或账本被锁只发 `ScanSkipped`；菜单发起的扫描照旧流式更新
 - 会话操作（复制 resume 命令 / ID、Finder、导出 TXT、收藏等）都在 `actions.rs`，可用性由纯函数按行的事实算出；标题行按钮、右键菜单、`⌘C` / `⇧⌘C` 派发同一组 action
 - History 行读 `history.jsonl` 显示 prompt 卡片，不参与搜索（与 Python 脚本一致）
 - 费用由 core 按 `message.usage` × `pricing.rs` 价格表自算，按 `message.id` 去重，subagent 计入父 session；Claude Code 记录的 `cost-state` 只作对照
@@ -35,10 +39,10 @@ M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监�
 - 测试：`cargo test -p agent-session-core`、`cargo test -p agent-session-manager`（纯逻辑，加上无界面窗口里的键盘测试）、`make test` 全跑
 - `make asm ARGS="…"` 跑 `asm` CLI，`make transcript-reader ARGS="SESSION_ID -o session.txt"` 导出精简 TXT；子命令和参数看 `--help`。改价格表或用量解析后跑一次 `asm cost --compare`（自算费用与 `cost-state` 的偏差）
 - `make parity`：在真实 `~/.claude` 上把 `asm` 与 Python 脚本（`~/Code/scripts/claude_session_search.py`，本项目的行为基准）逐字比对；改解析器、清理逻辑、`regex.rs` 或输出格式后必须跑。两边的列表顺序一致（开始时间降序，并列时按更新时间降序、再按 id），改排序要两边一起改（脚本的测试在它旁边的 `tests/test_claude_session_search.py`）。比对期间有 session 正在写入时 search 组偶尔失败，重跑即过
-- 截图：`make screenshot`、`screenshot-search`、`screenshot-detail`、`screenshot-cost` 由 app 的 autoplay 自己走流程；`screenshot-clicks` 用 cliclick 真点击，坐标写在 `scripts/screenshot-clicks.sh`，改布局后要校对。都跑在真实索引上，输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）。各脚本截哪些图、怎么用 `ASM_AUTOPLAY_*` 指定 session 和查询，见 `kb/docs/gpui-kit-guide.md`「脚本化交互与截图」
+- 截图：`make screenshot`、`screenshot-search`、`screenshot-detail`、`screenshot-cost` 由 app 的 autoplay 自己走流程；`screenshot-clicks` 用 cliclick 真点击，坐标写在 `scripts/screenshot-clicks.sh`，改布局后要校对。都跑在真实索引上，输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）。各脚本截哪些图、怎么用 `ASM_AUTOPLAY_*` 指定 session 和查询，见 `kb/docs/gpui-kit-guide.md`「脚本化交互与截图」。`make screenshot-usage`（状态栏 Today、文件驱动的扫描 / 重建）例外：必须设 `ASM_DB`、`ASM_CLAUDE_DIR` 指向副本
 - 量耗时：搜索用 `ASM_BENCH_DB=<索引副本> cargo test -p agent-session-manager real_index_timings -- --ignored --nocapture`（`ASM_BENCH_QUERIES`、`ASM_BENCH_REGEX` 可换查询）；详情打开速度看 app 日志的 `detail:` 行（read / build / first frame），量的时候要停在 Conversation tab，停在 Metadata 上首帧要等切回来才打点。不要用截图脚本日志里的耗时，刚唤醒屏幕后的数字可以偏高 4–8 倍
 - 构建产物在 `~/Library/Caches/cargo-target`（全局 cargo 配置），不在 `./target`；`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒
-- 环境变量：`ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（默认 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`）、`ASM_STATE`（仅 app，默认为索引同目录的 `state.json`）、`ASM_FAVORITES_DIR`（覆盖共享配置中的收藏目录）、`ASM_TRASH_DIR`（取消收藏改用此目录，测试必设）。验收时把 `ASM_DB` / `ASM_STATE` 指到 `tmp/`，可反复测冷启动而不动真实索引
+- 环境变量：`ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（默认 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`）、`ASM_STATE`（仅 app，默认为索引同目录的 `state.json`）、`ASM_FAVORITES_DIR`（覆盖共享配置中的收藏目录）、`ASM_TRASH_DIR`（取消收藏改用此目录，测试必设）、`ASM_USAGE_AUTOPLAY`（gate 目录，用文件驱动扫描 / 重建，见 gpui-kit-guide）。验收时把 `ASM_DB` / `ASM_STATE` 指到 `tmp/`，可反复测冷启动而不动真实索引；账本跟着 `ASM_DB` 在同一目录，所以也不会动真实账本
 - Rust 由 mise 管理（版本锁在 `mise.toml`）；新机器先 `make setup`（含 Metal Toolchain）
 - 发布：`make release-local` 在本地走完整条链（产物在 `dist/release/`，不上传），`make test-release` 是发布脚本的行为测试。名字、最低系统、Sparkle 公钥集中在 `scripts/release/config.sh`。Sparkle 私钥（`~/Sync/apple-developer/sparkle/agent-session-manager_ed25519.key`）永远不要重新生成
 - `make icon`：把 `assets/icon/` 的两张 SVG 渲染成 `AppIcon.icns`；改了 SVG 要重跑，并提交生成的 `.icns`
@@ -63,6 +67,7 @@ M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监�
 - 用量按 API 响应一行存在 `api_usage`（主键 `session_id, agent, msg_id`，subagent 文件的 `agent` 为文件名 stem）。`sessions` 上的费用 / token 列只由 `refresh_session_usage` 从这张表汇总写入，`upsert_session` 不写它们。同一次响应会被增量扫描切成两半，所以去重只能靠这张表，不能在 `SessionDelta` 里累加
 - `session_model_usage`（用量按模型 × fast × prompt 是否超过 `LONG_PROMPT` 分组）也只由 `refresh_session_usage` 重写，`SessionSummary::set_usage` 在内存里按同样规则分组（有测试断言两者一致）。启动时直接读这张表，不要改回读 session 时对 `api_usage` 现做 GROUP BY（冷缓存多 350ms）
 - 一个 `Db` 只在一个线程用；rayon 只用于解析，写库在调用线程的单个事务里
+- 用量账本（`ledger.rs`、`ledger.sql`）只增不删，有自己的版本号和迁移，不能套用索引「版本不符就删库重建」的做法。`Db` 另开一个连接写账本：`Db::transaction` 先提交账本再提交索引，事务外的用量写入也先开内部事务；索引重建前 `build_schema` 先 `salvage_into_ledger`。账本的错误保留 SQLite 错误链（`is_busy` 认得出锁）但带 `LedgerFailure` 来源标记，不能被 `open_with` 当成索引损坏去删索引。账本存 token 不存费用，改价格不用动账本
 - `SessionDelta::apply` 必须保持「全量解析 == 多次增量解析」（有测试断言）；新字段要归类为 first（只设一次）、last（覆盖）、count（累加）或 max（取较大值，如 `context_peak`）
 
 ## GPUI / gpui-kit 编码规则
@@ -81,6 +86,7 @@ M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监�
 - 焦点必须始终在应用的某个元素上：没有焦点时快捷键和菜单动作到不了 `AppRoot`。启动时焦点给表格；新增弹出层，关闭后要把焦点还回去
 - 改快捷键、焦点或搜索框的按键处理，先在 `keyboard_tests.rs` 写行为测试（整个应用跑在无界面窗口里，按键走 GPUI 的分发）
 - 程序化 `InputState::set_value` 不发 `InputEvent::Change`，之后要自己触发后续逻辑（如 `AppRoot::set_query` 直接调 `run_search`）
+- 扫描引起的刷新不把表格滚回选中的行（`relocate_selection(false)`）；搜索模式下扫描后的重搜走 `refresh_search`（结果攒齐后一次替换），不走 `run_search`。新加的刷新入口照这个走
 
 ## 关键决策
 
@@ -115,6 +121,7 @@ plans / notes / sessions（当时的方案、实测与取舍），改到对应�
 - `kb/plans/2026-11-10-cost-analysis.md` — 主模型定义、换模型计价口径、分组用量存表的原因；改 Cost tab、Model 过滤或 `asm cost --as` 前读
 - `kb/plans/2026-11-03-context-window-from-catalog.md` — 模型目录格式、合并优先级、刷新；改模型目录读取或窗口来源前读
 - `kb/plans/2026-11-12-columns-and-cache-breaks.md` — 列开关、命中率、缓存失效的判定与原因；改表格列、`conversation.rs::cache_check` 或回合卡说明行前读
+- `kb/plans/2026-11-16-usage-stats/` — 用量统计四期（账本、常驻菜单栏、Usage 视图、下钻）：各期共用的口径（4:00 分日、按调用时间归日、In 的定义、账本只增不删）在 `index.md`，各期一份 spec；改账本、`usage.rs`、自动扫描、状态栏 Today 或会话表的时间预设前读。第 1 期的实现与验收在 `kb/sessions/2026-11-16-usage-p1-*.md`
 - `kb/plans/2026-11-16-cache-break-accuracy.md` — 失效判定的新规则：用量明细（`iterations`）、按 rewind 的祖先调用比较、请求记录（`api-request`）给出的原因、分段的缓存时长；改用量解析、失效判定（实现后在 `claude/cache.rs`）或回合卡失效文案前读
 - `kb/plans/2026-10-26-favorites.md` — 收藏快照、目录迁移、去重优先级、索引根目录守卫；改收藏流程前读
 - `kb/notes/2026-10-10-transcript-reader-xml.md`（导出格式）、`kb/notes/2026-10-10-transcript-reader.md`（压缩规则）；改导出内容前读

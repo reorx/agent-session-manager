@@ -252,17 +252,17 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 ### 实施步骤
 
-- [ ] 1. `usage.rs` 的分日函数：先写测试（下节「分日」），再实现；`cargo add --dev chrono-tz -p agent-session-core` 供夏令时的测试用
-- [ ] 2. app `model.rs`：改 `RangePreset` 的测试（`day_presets_have_only_a_lower_bound`、`month_presets_cover_whole_calendar_months`、`a_custom_range_includes_its_last_day_and_defaults_to_this_month_so_far` 里的 `midnight` 换成 4:00，加凌晨 4 点前的用例），再改实现
-- [ ] 3. `ledger.rs`：先写 `crates/core/tests/ledger.rs` 里只涉及 `Ledger` 的用例（建表、upsert、`refresh_hourly`、版本、损坏改名），再实现
-- [ ] 4. `Db` 接上账本：先写经过 `Db` 和 `Indexer` 的用例（写入、只增不删、抢救、核对、两个索引共用），再实现
-- [ ] 5. `UsageData` 与 `totals`：先写测试，再实现
-- [ ] 6. 在 `tmp/2026-11-12-usage-stats/` 里复制一份索引副本（`sqlite3 index-copy.sqlite ".backup <新文件>"`，不要直接打开备份本身），用它打开一次 `Db`：记录回填耗时、账本大小、第二次打开的核对耗时，与本 spec 的数字对比
-- [ ] 7. 核对真实索引有没有在账本上线前被重建过：用 `sqlite3 "file:<路径>?immutable=1"` 只读地比较真实的 `index.sqlite` 和备份 `tmp/2026-11-12-usage-stats/index-copy.sqlite` 里有用量的 session 数（备份是 2,225 个，其中 56 个记录已删）。真实索引少了已删的那批，就在账本第一次在真实数据上运行之后，写一个 `#[ignore]` 的测试 `import_usage_from_an_index_backup`（环境变量给出备份的副本和真实账本的路径），用 `salvage_into_ledger` 把备份抄进账本；做之前先复制一份账本。结果告诉用户并记进 session 总结
-- [ ] 8. `store.rs`：先写事件序列的测试，再加 `Usage` 事件和 `quiet` 扫描
-- [ ] 9. `main.rs`：状态栏的 Today、自动扫描、`roll_day`；先在 `keyboard_tests.rs` 写用例
-- [ ] 10. `make test`、`make parity`；`ASM_DB` / `ASM_STATE` 指到 `tmp/2026-11-12-usage-stats/` 实机验收（下节）
-- [ ] 11. 文档、删掉 known-issues 里对应的一条、session 总结，一次 commit
+- [x] 1. `usage.rs` 的分日函数：先写测试（下节「分日」），再实现；`cargo add --dev chrono-tz -p agent-session-core` 供夏令时的测试用
+- [x] 2. app `model.rs`：改 `RangePreset` 的测试（`day_presets_have_only_a_lower_bound`、`month_presets_cover_whole_calendar_months`、`a_custom_range_includes_its_last_day_and_defaults_to_this_month_so_far` 里的 `midnight` 换成 4:00，加凌晨 4 点前的用例），再改实现
+- [x] 3. `ledger.rs`：先写 `crates/core/tests/ledger.rs` 里只涉及 `Ledger` 的用例（建表、upsert、`refresh_hourly`、版本、损坏改名），再实现
+- [x] 4. `Db` 接上账本：先写经过 `Db` 和 `Indexer` 的用例（写入、只增不删、抢救、核对、两个索引共用），再实现
+- [x] 5. `UsageData` 与 `totals`：先写测试，再实现
+- [x] 6. 在 `tmp/2026-11-12-usage-stats/` 里复制一份索引副本（`sqlite3 index-copy.sqlite ".backup <新文件>"`，不要直接打开备份本身），用它打开一次 `Db`：记录回填耗时、账本大小、第二次打开的核对耗时，与本 spec 的数字对比
+- [x] 7. 核对真实索引有没有在账本上线前被重建过：用 `sqlite3 "file:<路径>?immutable=1"` 只读地比较真实的 `index.sqlite` 和备份 `tmp/2026-11-12-usage-stats/index-copy.sqlite` 里有用量的 session 数（备份是 2,225 个，其中 56 个记录已删）。真实索引少了已删的那批，就在账本第一次在真实数据上运行之后，写一个 `#[ignore]` 的测试 `import_usage_from_an_index_backup`（环境变量给出备份的副本和真实账本的路径），用 `salvage_into_ledger` 把备份抄进账本；做之前先复制一份账本。结果告诉用户并记进 session 总结
+- [x] 8. `store.rs`：先写事件序列的测试，再加 `Usage` 事件和 `quiet` 扫描
+- [x] 9. `main.rs`：状态栏的 Today、自动扫描、`roll_day`；先在 `keyboard_tests.rs` 写用例
+- [x] 10. `make test`、`make parity`；`ASM_DB` / `ASM_STATE` 指到 `tmp/2026-11-12-usage-stats/` 实机验收（下节）
+- [x] 11. 文档、删掉 known-issues 里对应的一条、session 总结，一次 commit
 
 ### 测试与验证
 

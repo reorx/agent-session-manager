@@ -103,7 +103,7 @@ usage-ledger ──┬── menubar-resident
 
 ### 实施步骤
 
-- [ ] 1. [usage-ledger](usage-ledger.md)
+- [x] 1. [usage-ledger](usage-ledger.md)
 - [ ] 2. [menubar-resident](menubar-resident.md)
 - [ ] 3. [usage-view](usage-view.md)
 - [ ] 4. [usage-drilldown](usage-drilldown.md)
