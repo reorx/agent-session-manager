@@ -7,12 +7,18 @@
 //! `ASM_SEARCH_AUTOPLAY=1` to run a scripted search session (`make screenshot-search`),
 //! `ASM_DETAIL_AUTOPLAY=1` to tour the Conversation tab (`make screenshot-detail`),
 //! `ASM_COST_AUTOPLAY=1` to tour the Cost tab (`make screenshot-cost`),
-//! `ASM_USAGE_AUTOPLAY=<dir>` to scan and rebuild when files show up in `<dir>` (`make screenshot-usage`);
+//! `ASM_USAGE_AUTOPLAY=<dir>` to scan and rebuild when files show up in `<dir>` (`make screenshot-usage`),
+//! `ASM_RESIDENT_AUTOPLAY=<dir>` to close, reopen and work the menu bar item's menu the same way
+//! (`make screenshot-resident`);
 //! `ASM_CLAUDE_DIR`, `ASM_DB` and `ASM_STATE` point the app at other data.
 //!
 //! While the app is open it scans by itself (`auto_scan`): when its window comes to the front and
 //! every `AUTO_SCAN_IDLE`, at most once per `AUTO_SCAN_MIN_GAP`. The status bar shows what today
 //! (from 4:00 local) cost, from the usage ledger.
+//!
+//! Closing the window only hides it (`close_requested`): the app stays in the menu bar
+//! (`resident`), scanning as before, until it is quit. Open Sessions in the menu bar item's menu,
+//! or opening the app again from Finder, shows the same window again (`show_window`).
 
 mod actions;
 mod conversation;
@@ -22,6 +28,7 @@ mod favorites;
 #[cfg(test)]
 mod keyboard_tests;
 mod model;
+mod resident;
 mod search;
 mod settings;
 mod store;
@@ -55,6 +62,7 @@ use crate::actions::{CopyResume, CopySessionId, ExportTranscript, HideProject, O
 use crate::conversation::{Card, ConversationView};
 use crate::detail::{DETAIL_W, DetailState, DetailTab, Load};
 use crate::model::{DisplayMode, Filter, Kind, ModelEntry, ProjectEntry, RangePreset, SessionRow, kind_counts, model_entries, project_entries, split_hidden, today_at};
+use crate::resident::{Resident, ResidentCommand, ResidentView, ScanRecord};
 use crate::search::{RowHit, SearchMode, SearchOptions, SearchSummary, Searcher};
 use crate::settings::{SortDir, ViewState, default_state_path};
 use crate::store::{Store, StoreEvent, StoreRequest};
@@ -83,7 +91,8 @@ gpui_kit::actions!(
         Preview4,
         Rescan,
         RebuildIndex,
-        ToggleEmptySessions
+        ToggleEmptySessions,
+        CloseWindow
     ]
 );
 
@@ -95,6 +104,10 @@ const TABLE_CHROME_W: f32 = 16.;
 const AUTO_SCAN_MIN_GAP: Duration = Duration::from_secs(30);
 /// While the app is open and nothing else scanned, it scans this often.
 const AUTO_SCAN_IDLE: Duration = Duration::from_secs(600);
+/// The first close of the window says what closing does now (`close_requested`).
+const RESIDENT_NOTICE: &str = "Agent Session Manager 会留在菜单栏继续记录用量。";
+const RESIDENT_NOTICE_DETAIL: &str = "要完全退出请按 ⌘Q。";
+const RESIDENT_NOTICE_ANSWERS: [&str; 2] = ["好", "立即退出"];
 
 /// What the index is doing, shown in the middle of the status bar.
 #[derive(Clone, Debug, PartialEq)]
@@ -185,6 +198,18 @@ pub struct AppRoot {
     last_scan_done: Option<Instant>,
     /// Scans that reached `ScanDone`.
     scans_done: usize,
+    /// When scans last went through or failed, for the menu bar item's menu.
+    scan_record: ScanRecord,
+    /// The window was closed: it is off screen and the app lives in the menu bar.
+    window_hidden: bool,
+    /// The first close explained that the app stays in the menu bar (saved in `state.json`).
+    resident_notice_shown: bool,
+    /// That explanation is on screen, waiting for an answer.
+    notice_open: bool,
+    /// Quit was asked for (the test platform's quit does nothing, so tests look here).
+    quitting: bool,
+    /// What the menu bar item shows, last pushed to it by `sync_resident`.
+    resident_view: Option<ResidentView>,
     launched: Instant,
     first_rows_ms: Option<u128>,
     state_path: PathBuf,
@@ -195,6 +220,7 @@ pub struct AppRoot {
     _debounce: Option<Task<()>>,
     _autoplay: Option<Task<()>>,
     _auto_scan: Task<()>,
+    _menu_commands: Option<Task<()>>,
     #[cfg(test)]
     selection_event_count: Option<usize>,
 }
@@ -335,6 +361,13 @@ impl AppRoot {
             }
         });
 
+        // the red button: hide instead of close (AppKit asks first, and a false keeps the window)
+        let this = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            this.update(cx, |this, cx| this.close_requested(window, cx)).ok();
+            false
+        });
+
         let auto_scan = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(AUTO_SCAN_IDLE).await;
@@ -398,6 +431,12 @@ impl AppRoot {
             scan_in_flight: true,
             last_scan_done: None,
             scans_done: 0,
+            scan_record: ScanRecord::default(),
+            window_hidden: false,
+            resident_notice_shown: saved.resident_notice_shown,
+            notice_open: false,
+            quitting: false,
+            resident_view: None,
             launched: Instant::now(),
             first_rows_ms: None,
             state_path,
@@ -408,11 +447,13 @@ impl AppRoot {
             _debounce: None,
             _autoplay: None,
             _auto_scan: auto_scan,
+            _menu_commands: None,
             #[cfg(test)]
             selection_event_count: None,
         };
         // a fresh window has no focus, and without one no key binding or menu action reaches the app
         this.focus_table(window, cx);
+        this.sync_resident(cx);
         if std::env::var_os("ASM_FAVORITES_AUTOPLAY").is_some() {
             this._autoplay = Some(this.favorites_autoplay(window, cx));
         } else if std::env::var_os("ASM_SPIKE_AUTOPLAY").is_some() {
@@ -425,6 +466,8 @@ impl AppRoot {
             this._autoplay = Some(this.cost_autoplay(window, cx));
         } else if let Some(gate) = std::env::var_os("ASM_USAGE_AUTOPLAY").filter(|v| !v.is_empty()) {
             this._autoplay = Some(this.usage_autoplay(PathBuf::from(gate), window, cx));
+        } else if let Some(gate) = std::env::var_os("ASM_RESIDENT_AUTOPLAY").filter(|v| !v.is_empty()) {
+            this._autoplay = Some(this.resident_autoplay(PathBuf::from(gate), window, cx));
         }
         this
     }
@@ -460,11 +503,15 @@ impl AppRoot {
                     }
                     self.db_info = format!("{} messages · DB {}", stats.messages, human_size(stats.db_bytes)).into();
                     self.scans_done += 1;
+                    self.scan_record.done(Local::now().time());
                     self.scan_ended(cx);
                     data_changed = true;
                     usage_changed = true;
                 }
-                StoreEvent::ScanSkipped => self.scan_ended(cx),
+                StoreEvent::ScanSkipped => {
+                    self.scan_record.failed(Local::now().time());
+                    self.scan_ended(cx);
+                }
                 StoreEvent::Usage { sessions, full } => {
                     if full {
                         self.usage.replace_all(sessions);
@@ -500,6 +547,9 @@ impl AppRoot {
                 StoreEvent::Failed(message) => {
                     eprintln!("store: {message}");
                     self.index_status = IndexStatus::Failed(message.into());
+                    if self.scan_in_flight {
+                        self.scan_record.failed(Local::now().time());
+                    }
                     self.scan_ended(cx);
                 }
             }
@@ -521,6 +571,7 @@ impl AppRoot {
         if reloaded && self.searching() {
             self.refresh_search(cx);
         }
+        self.sync_resident(cx);
         cx.notify();
     }
 
@@ -664,6 +715,7 @@ impl AppRoot {
             detail_visible: self.detail_visible,
             selected_id: self.selected.as_ref().map(|r| r.id.to_string()).or_else(|| self.wanted_id.as_ref().map(|id| id.to_string())),
             search: self.search_opts.clone(),
+            resident_notice_shown: self.resident_notice_shown,
         }
     }
 
@@ -683,6 +735,7 @@ impl AppRoot {
         self.index_status = IndexStatus::Loading;
         self.scan_in_flight = true;
         self.store.request(if rebuild { StoreRequest::Rebuild } else { StoreRequest::Scan { quiet: false } });
+        self.sync_resident(cx);
         cx.notify();
     }
 
@@ -697,6 +750,7 @@ impl AppRoot {
         println!("auto-scan: {trigger}");
         self.scan_in_flight = true;
         self.store.request(StoreRequest::Scan { quiet: true });
+        self.sync_resident(cx);
         true
     }
 
@@ -716,6 +770,7 @@ impl AppRoot {
             self.set_range(self.range, cx);
         }
         self.refresh_today(now_ms);
+        self.sync_resident(cx);
         cx.notify();
     }
 
@@ -740,6 +795,105 @@ impl AppRoot {
             println!("today: {label} (since {} 4:00, {} calls)", self.usage_day, self.today.responses);
             self.today_label = label;
         }
+    }
+
+    /// The menu bar item's title and menu from today's totals and the scans, pushed to it when
+    /// they changed (tests have no menu bar item: only `resident_view` changes).
+    fn sync_resident(&mut self, cx: &mut Context<Self>) {
+        let today = (self.usage_available == Some(true)).then_some(&self.today);
+        let view = ResidentView::new(today, &self.scan_record, self.scan_in_flight);
+        if self.resident_view.as_ref() == Some(&view) {
+            return;
+        }
+        println!("menu bar: {} | {} | {} | {}", view.title, view.today, view.tokens, view.scanned);
+        if let Some(resident) = cx.try_global::<Resident>() {
+            resident.update(&view);
+        }
+        self.resident_view = Some(view);
+    }
+
+    /// The red button, `⌘W` or File > Close Window: hide the window, the app goes on in the menu
+    /// bar. The very first time, a notice says so first, and offers to quit instead.
+    pub(crate) fn close_requested(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.window_hidden || self.notice_open || self.quitting {
+            return;
+        }
+        if self.resident_notice_shown {
+            self.hide_window(window, cx);
+            return;
+        }
+        // a sheet on the window, shown after this update; the answer comes back on a task
+        println!("window: first-close notice");
+        self.notice_open = true;
+        let answer = window.prompt(PromptLevel::Info, RESIDENT_NOTICE, Some(RESIDENT_NOTICE_DETAIL), &RESIDENT_NOTICE_ANSWERS, cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let answer = answer.await.ok();
+            this.update_in(cx, |this, window, cx| {
+                this.notice_open = false;
+                let Some(answer) = answer else { return };
+                this.resident_notice_shown = true;
+                this.persist(cx);
+                match answer {
+                    1 => this.quit(cx),
+                    _ => this.hide_window(window, cx),
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn hide_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(resident) = cx.try_global::<Resident>() {
+            resident.hide(window);
+        }
+        self.window_hidden = true;
+        println!("window: hidden");
+        cx.notify();
+    }
+
+    /// Open Sessions in the menu bar item's menu, or the app opened again from Finder: the
+    /// window as it was, in front, the Dock icon back and the keys going to the table.
+    pub(crate) fn show_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(resident) = cx.try_global::<Resident>() {
+            resident.show();
+        }
+        // GPUI's activate is activateIgnoringOtherApps: NSApp.activate() does not bring the app
+        // to the front when no click asked for it (the autoplay, Finder's reopen)
+        cx.activate(true);
+        window.activate_window();
+        if std::mem::take(&mut self.window_hidden) {
+            println!("window: shown");
+        }
+        self.focus_table(window, cx);
+        self.roll_day(now_ms(), cx);
+        self.auto_scan("window shown", cx);
+        cx.notify();
+    }
+
+    pub(crate) fn on_resident_command(&mut self, command: ResidentCommand, window: &mut Window, cx: &mut Context<Self>) {
+        println!("menu bar: {command:?}");
+        match command {
+            ResidentCommand::OpenSessions => self.show_window(window, cx),
+            ResidentCommand::ScanNow => self.rescan(false, cx),
+            ResidentCommand::Quit => self.quit(cx),
+        }
+    }
+
+    /// Run the commands of the menu bar item's menu (and Finder's reopen) as they come.
+    pub(crate) fn listen_to_menu(&mut self, commands: async_channel::Receiver<ResidentCommand>, window: &mut Window, cx: &mut Context<Self>) {
+        self._menu_commands = Some(cx.spawn_in(window, async move |this, cx| {
+            while let Ok(command) = commands.recv().await {
+                if this.update_in(cx, |this, window, cx| this.on_resident_command(command, window, cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn quit(&mut self, cx: &mut Context<Self>) {
+        self.quitting = true;
+        cx.quit();
     }
 
     fn on_table_event(&mut self, _: &Entity<TableState<SessionTableDelegate>>, ev: &TableEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -841,6 +995,114 @@ impl AppRoot {
                 println!("autoplay-usage: {step} · {today}");
             }
         })
+    }
+
+    /// Scripted menu bar steps for the resident acceptance (`make screenshot-resident`). Once the
+    /// start-up scan and the ledger are in, prints `autoplay-resident: shown · <menu bar>`. Then
+    /// it runs the commands the script drops into `gate` as files `1-<command>`, `2-<command>`, …
+    /// in that order, and prints `autoplay-resident: <command> · …` once each is through:
+    /// - `close`: what the red button does (if the first-close notice shows, it waits for it to be
+    ///   answered by hand);
+    /// - `menu`: opens the menu bar item's menu at a fixed place, as a click on the item would
+    ///   (`ASM_RESIDENT_MENU_AT=x,y`, top-left corner from the top-left of the main screen;
+    ///   default near the right end of the menu bar), and prints where;
+    /// - `close-menu`: closes it without choosing anything;
+    /// - `scan`: Scan Now through its menu item (the menu is closed first), until the scan ended;
+    /// - `wait-scan`: until a scan started since the last step ended (the script clicked Scan Now);
+    /// - `open`: Open Sessions through its menu item, until the window is back;
+    /// - `quit`: Quit through its menu item.
+    ///
+    /// `<menu bar>` is the item's title and the menu's three lines, joined by `|`. With
+    /// `ASM_RESIDENT_QUERY`, that query is searched for before `shown`, so the screenshots show
+    /// whether a search survives the window being closed and opened again.
+    fn resident_autoplay(&self, gate: PathBuf, window: &Window, cx: &mut Context<Self>) -> Task<()> {
+        let query = std::env::var("ASM_RESIDENT_QUERY").ok().filter(|q| !q.is_empty());
+        let settled = |this: &AppRoot| !this.scan_in_flight && !this.today_label.is_empty() && matches!(this.index_status, IndexStatus::Idle(_));
+        let menu_open = |cx: &App| cx.try_global::<Resident>().is_some_and(|r| r.menu_open());
+        let at = std::env::var("ASM_RESIDENT_MENU_AT").ok().and_then(|v| {
+            let (x, y) = v.split_once(',')?;
+            Some((x.trim().parse::<f64>().ok()?, y.trim().parse::<f64>().ok()?))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if !autoplay_wait(&this, cx, 1200, |this, _| settled(this)).await {
+                return;
+            }
+            if let Some(query) = query {
+                this.update_in(cx, |this, window, cx| this.set_query(&query, window, cx)).ok();
+                autoplay_wait(&this, cx, 100, |this, _| this.search_summary.is_some() || this.search_error.is_some()).await;
+            }
+            cx.background_executor().timer(Duration::from_millis(800)).await;
+            let Ok(shown) = this.update(cx, |this, _| format!("{} · status bar {}", this.resident_line(), this.today_label)) else { return };
+            println!("autoplay-resident: shown · {shown}");
+            let mut base = this.update(cx, |this, _| this.scans_done).unwrap_or(0);
+            for n in 1.. {
+                let command = loop {
+                    if let Some(command) = gate_command(&gate, n) {
+                        break command;
+                    }
+                    cx.background_executor().timer(Duration::from_millis(200)).await;
+                };
+                let note = match command.as_str() {
+                    "close" => {
+                        this.update_in(cx, |this, window, cx| this.close_requested(window, cx)).ok();
+                        // the notice, if any, is answered by hand
+                        let hidden = autoplay_wait(&this, cx, 6000, |this, _| this.window_hidden || this.quitting).await;
+                        format!("hidden={hidden}")
+                    }
+                    "menu" => {
+                        let Ok(at) = this.update(cx, |_, cx| cx.try_global::<Resident>().map(|r| r.pop_up_later(at))) else { return };
+                        let open = autoplay_wait(&this, cx, 30, |_, cx| menu_open(cx)).await;
+                        match at {
+                            Some((x, y)) if open => format!("open at {x:.0},{y:.0}"),
+                            _ => "not open".into(),
+                        }
+                    }
+                    "close-menu" => {
+                        this.update(cx, |_, cx| cx.try_global::<Resident>().map(|r| r.close_menu())).ok();
+                        let closed = autoplay_wait(&this, cx, 30, |_, cx| !menu_open(cx)).await;
+                        format!("closed={closed}")
+                    }
+                    "scan" | "wait-scan" => {
+                        if command == "scan" {
+                            this.update(cx, |_, cx| cx.try_global::<Resident>().map(|r| r.close_menu())).ok();
+                            autoplay_wait(&this, cx, 30, |_, cx| !menu_open(cx)).await;
+                            autoplay_menu_item(&this, cx, ResidentCommand::ScanNow);
+                        }
+                        let done = autoplay_wait(&this, cx, 1200, |this, _| this.scans_done > base && settled(this)).await;
+                        let Ok(line) = this.update(cx, |this, _| this.resident_line()) else { return };
+                        if done { line } else { format!("no scan · {line}") }
+                    }
+                    "open" => {
+                        autoplay_menu_item(&this, cx, ResidentCommand::OpenSessions);
+                        let shown = autoplay_wait(&this, cx, 100, |this, _| !this.window_hidden).await;
+                        cx.background_executor().timer(Duration::from_millis(500)).await;
+                        let Ok(state) = this.update_in(cx, |this, window, cx| {
+                            let table_focused = this.table.read(cx).focus_handle(cx).is_focused(window);
+                            format!("shown={shown} active={} table-focused={table_focused} · {}", window.is_window_active(), this.resident_line())
+                        }) else {
+                            return;
+                        };
+                        state
+                    }
+                    "quit" => {
+                        println!("autoplay-resident: quit · through the menu item");
+                        autoplay_menu_item(&this, cx, ResidentCommand::Quit);
+                        return;
+                    }
+                    other => format!("unknown command {other}"),
+                };
+                println!("autoplay-resident: {command} · {note}");
+                base = this.update(cx, |this, _| this.scans_done).unwrap_or(base);
+            }
+        })
+    }
+
+    /// The menu bar item's title and its menu's three lines: `$0 | Today  $0.09 | In 53k · Out 1.2k | Scanned 15:53`.
+    fn resident_line(&self) -> String {
+        match &self.resident_view {
+            Some(v) => format!("{} | {} | {} | {}", v.title, v.today, v.tokens, v.scanned),
+            None => "—".into(),
+        }
     }
 
     /// Scripted search session for screenshots. After every step the search is given time to
@@ -1279,6 +1541,7 @@ impl Render for AppRoot {
             .on_action(cx.listener(|this, _: &RevealFavoritesFolder, _, cx| cx.reveal_path(&this.favorites.root)))
             .on_action(cx.listener(|this, _: &ChangeFavoritesFolder, window, cx| this.change_favorites_folder(window, cx)))
             .on_action(cx.listener(|this, _: &DefaultFavoritesFolder, window, cx| this.default_favorites_folder(window, cx)))
+            .on_action(cx.listener(|this, _: &CloseWindow, window, cx| this.close_requested(window, cx)))
             .on_action(cx.listener(|this, _: &Rescan, _, cx| this.rescan(false, cx)))
             .on_action(cx.listener(|this, _: &RebuildIndex, _, cx| this.rescan(true, cx)))
             .on_action(cx.listener(|this, _: &ToggleEmptySessions, _, cx| this.toggle_empty_sessions(cx)))
@@ -1363,6 +1626,35 @@ fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// Autoplay: look every 100ms until `ready`, at most `tries` times. False when it never was (or
+/// the app is gone).
+async fn autoplay_wait(this: &WeakEntity<AppRoot>, cx: &mut AsyncWindowContext, tries: usize, ready: impl Fn(&AppRoot, &App) -> bool) -> bool {
+    for _ in 0..tries {
+        match this.update(cx, |this, cx| ready(this, cx)) {
+            Ok(true) => return true,
+            Ok(false) => cx.background_executor().timer(Duration::from_millis(100)).await,
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
+/// Autoplay: what a click on the menu bar item's menu item does (its target sends the command
+/// over the channel); straight to `on_resident_command` without a menu bar item.
+fn autoplay_menu_item(this: &WeakEntity<AppRoot>, cx: &mut AsyncWindowContext, command: ResidentCommand) {
+    this.update_in(cx, |this, window, cx| match cx.try_global::<Resident>() {
+        Some(resident) => resident.perform(command),
+        None => this.on_resident_command(command, window, cx),
+    })
+    .ok();
+}
+
+/// The `n`-th command dropped into the autoplay's gate directory: the file `<n>-<command>`.
+fn gate_command(gate: &std::path::Path, n: usize) -> Option<String> {
+    let prefix = format!("{n}-");
+    std::fs::read_dir(gate).ok()?.filter_map(|entry| entry.ok()).find_map(|entry| entry.file_name().to_str()?.strip_prefix(&prefix).map(str::to_string))
+}
+
 /// `ASM_AUTOPLAY_STEP`, or `cut-output` for the older `ASM_AUTOPLAY_CUT_OUTPUT=1`.
 fn autoplay_step() -> Option<String> {
     std::env::var("ASM_AUTOPLAY_STEP").ok().filter(|v| !v.is_empty()).or_else(|| std::env::var_os("ASM_AUTOPLAY_CUT_OUTPUT").map(|_| "cut-output".into()))
@@ -1372,6 +1664,9 @@ fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-d", ToggleFavorite, None),
         KeyBinding::new("cmd-q", Quit, None),
+        // not AppKit's performClose: (that asks windowShouldClose: inside a GPUI update, and the
+        // app aborts): straight to `close_requested`
+        KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-\\", ToggleDetail, None),
         KeyBinding::new("cmd-f", FocusSearch, None),
         KeyBinding::new("alt-cmd-r", ToggleRegex, None),
@@ -1405,7 +1700,14 @@ fn app_menu_items(updates: bool) -> Vec<MenuItem> {
 }
 
 fn main() {
-    let app = gpui_kit::application().with_assets(AppAssets);
+    // closing the window hides it (`close_requested`); only Quit ends the app
+    let app = gpui_kit::application().with_assets(AppAssets).with_quit_mode(QuitMode::Explicit);
+    let (menu, menu_commands) = async_channel::unbounded();
+    // opened again from Finder or Spotlight: AppKit asks only while no window is visible
+    let reopen = menu.clone();
+    app.on_reopen(move |_| {
+        let _ = reopen.try_send(ResidentCommand::OpenSessions);
+    });
     app.run(move |cx| {
         gpui_kit::init(cx);
         style::install_theme(cx);
@@ -1413,8 +1715,10 @@ fn main() {
         cx.on_action(|_: &Quit, cx| cx.quit());
         bind_keys(cx);
         let updates = updater::install(cx);
+        resident::install(cx, menu);
         cx.set_menus([
             Menu::new("Agent Session Manager").items(app_menu_items(updates)),
+            Menu::new("File").items(vec![MenuItem::action("Close Window", CloseWindow)]),
             Menu::new("View").items(vec![
                 MenuItem::action("Find", FocusSearch),
                 MenuItem::action("Find Next Hit", NextHit),
@@ -1451,7 +1755,11 @@ fn main() {
         };
         cx.spawn(async move |cx| {
             cx.open_window(options, |window, cx| {
-                let view = cx.new(|cx| AppRoot::new(AppPaths::from_env(), window, cx));
+                let view = cx.new(|cx| {
+                    let mut app = AppRoot::new(AppPaths::from_env(), window, cx);
+                    app.listen_to_menu(menu_commands, window, cx);
+                    app
+                });
                 cx.new(|cx| Root::new(view, window, cx))
             })
             .expect("failed to open window");

@@ -61,6 +61,8 @@ pub struct ViewState {
     pub selected_id: Option<String>,
     /// Scope, mode, case and labels of the search box; the query itself starts empty.
     pub search: SearchOptions,
+    /// The first close of the window explained that the app stays in the menu bar.
+    pub resident_notice_shown: bool,
 }
 
 impl Default for ViewState {
@@ -81,6 +83,7 @@ impl Default for ViewState {
             detail_visible: true,
             selected_id: None,
             search: SearchOptions::default(),
+            resident_notice_shown: false,
         }
     }
 }
@@ -140,6 +143,7 @@ mod tests {
                 scope: ScopeSet { user: false, assistant: true, tools: true },
                 labels: vec!["tool_use:Bash".into()],
             },
+            resident_notice_shown: true,
         };
         state.save(&path).unwrap();
         assert_eq!(ViewState::load(&path), state);
@@ -172,6 +176,7 @@ mod tests {
         assert!(state.hidden_projects.is_empty(), "a file written before projects could be hidden hides none");
         assert_eq!(state.search, SearchOptions::default(), "a file written before search: text mode, prompts and replies");
         assert_eq!(state.search.scope.label(), "Both");
+        assert!(!state.resident_notice_shown, "a file written before the menu bar item: the first close still explains it");
     }
 
     #[test]

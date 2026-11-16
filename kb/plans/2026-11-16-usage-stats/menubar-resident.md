@@ -193,12 +193,38 @@ tags:
 - 验收 6、8、10 手动做：隐藏后在 Finder 里双击 `make release-local` 产出的应用；三种退出方式各试一次并 `pgrep` 确认进程没了；包里 Check for Updates 能弹出 Sparkle 的窗口。
 - 验收完用 Quit 或 `pkill -f agent-session-manager` 结束应用，`pgrep` 确认。
 
+### 实现与本 spec 的差异（usage-p2-resident，2026-11-16）
+
+- `ResidentCommand` 只有 `OpenSessions`、`ScanNow`、`Quit`；`OpenUsage` 和 target 的 `openUsage:` 随 usage-view 的菜单项一起加（没有菜单项的变体只会是死代码）。
+- `AppRoot` 没有 `resident: Option<…>` 字段：`Resident` 是 GPUI 全局，`AppRoot` 用 `cx.try_global::<Resident>()`，测试里没有它，效果同 `None`。隐藏 / 切 policy 是它的方法（`Resident::hide(window)`、`Resident::show()`），不是带 `cfg(target_os)` 的自由函数：应用只在 macOS 上构建，`updater.rs` 也没有这层。`AppRoot` 另存上一次推给菜单栏项的内容（`resident_view`），无界面测试断言它。
+- 收命令的任务在 `AppRoot` 里（`listen_to_menu`，`main()` 建窗口时调用），不在 `main()` 里经保存的 `WindowHandle` 转发；`on_reopen` 往同一条通道送 `OpenSessions`。
+- `scan_failed_at` 换成 `resident::ScanRecord`（上次成功的时刻、上次失败的时刻、连续失败次数）。「连续失败」定为连续两次，或从来没有成功过时的第一次；安静扫描遇锁跳过（`ScanSkipped`，正是「`asm` 正占着索引」的情形）也算一次失败。只失败一次时第三行仍是 `Scanned <上次成功>`：10 分钟后会重试，不必提示。
+- 菜单第一行和状态栏一样在有无价格的模型时加 ` (N unpriced)`（验收 2 要求两边一致）。
+- 第一次关窗的对话框：标题「Agent Session Manager 会留在菜单栏继续记录用量。」，说明「要完全退出请按 ⌘Q。」；选「好」或「立即退出」都把 `resident_notice_shown` 写进 `state.json`（说明已经看过）。对话框开着时再关窗不做任何事。
+- `show_window` 在 `auto_scan` 之前还调 `roll_day`（窗口隐藏期间跨过 4:00 时，重开先换日）。焦点照本 spec 一律给表格，不恢复关窗前的焦点。
+- 菜单栏项设了 `autosaveName`，让系统（和 Thaw 这类工具）记住用户拖到的位置。
+- autoplay 不是 `ASM_RESIDENT_AUTOPLAY=1` 的固定序列，而是 `ASM_RESIDENT_AUTOPLAY=<gate 目录>`：脚本按序号放命令文件（`close`、`menu`、`close-menu`、`scan`、`wait-scan`、`open`、`quit`），每步做完打 `autoplay-resident: <命令> · <标题> | <三行>`。菜单由 autoplay 在固定位置弹出（`popUpMenuPositioningItem`，经 run loop），不靠点菜单栏项：这台机器上菜单栏项在 Thaw 的隐藏区。菜单项由 `performActionForItemAtIndex:` 触发，走真实的 target → 通道 → GPUI 任务；`RESIDENT_CLICK=1` 时脚本改用 cliclick 真点 Scan Now；`RESIDENT_HOLD=<秒>` 让窗口多隐藏一段时间并打出每次定时扫描的时刻（下文 App Nap 一条）；`ASM_RESIDENT_QUERY=<词>` 先搜索再截图，用来对照验收 5 的搜索词。做法见 `kb/docs/gpui-kit-guide.md`「脚本化交互与截图」。
+- `screenshot-resident.sh` 和 `screenshot-usage.sh` 共用 `scripts/shot-lib.sh`（拒绝真实数据目录、按窗口 / 区域截图并在失败时重试一次）。
+
+### 实测
+
+- 自查（fixture 副本，`tmp/2026-11-12-usage-stats/usage-p2-resident/selfcheck2/`）：启动后标题 `$0`、菜单 `Today  $0.09 | In 53k · Out 1k | Scanned 14:38`，与状态栏 `Today $0.09` 一致；关窗后窗口不在屏幕上、进程在、Dock 条里没有图标、左上角菜单栏换成 Finder；隐藏时往副本追加 12 次调用后 Scan Now，标题 `$0 → $1`、菜单 `Today  $1.11 | In 689k · Out 16k`；Open Sessions 后 `active=true table-focused=true`，Dock 图标回来，表格里已是扫描后的数字；经菜单 Quit，进程退出码 0。
+- 第二次自查（`selfcheck3/`，加 `ASM_RESIDENT_QUERY=parser`）：重开后搜索词、命中的那一行、展开的步骤和命中位置（1 / 3 hits）与关窗前相同，行和状态栏已是隐藏期间扫到的数字（$0.21 → $1.24，Today $0.09 → $1.11）。
+- 无界面测试：见 `kb/sessions/2026-11-16-usage-p2-resident.md` 的对照表。
+
 ### 风险与待定
 
-- **activation policy 来回切换（推测，未实测）。** 已知的情况：从 Accessory 切回 Regular 后，应用菜单栏有时不出现，要再激活一次应用，或者先让别的应用拿一下焦点。计划的顺序是「设 Regular → `activate(true)` → `activate_window()`」，不行再试延后一帧激活。步骤 1 实测；两种都不稳就按用户同意的退路做「Dock 图标一直在」（那时 `on_reopen` 负责点 Dock 图标重开窗口），并改 PRD 的对应条目。
-- **隐藏的窗口在 GPUI 里的行为（推测）。** `orderOut:` 之后 GPUI 仍认为窗口存在；它是否继续为不可见的窗口安排绘制、`cx.notify()` 是否有额外开销，没有核实。后台扫描每次都会 `notify`，如果隐藏时仍在布局整张表，就在 `window_hidden` 时跳过 `on_store_events` 里只为显示服务的重算（表格的 `after_rows_changed` 仍要做，数据要保持最新）。
+步骤 1 的试验（usage-p2-probe，报告 `tmp/2026-11-12-usage-stats/usage-p2-probe/report.md`）之后：
+
+- **activation policy 来回切换：已实测，稳定。** 按「设 Regular → `cx.activate(true)` → `window.activate_window()`」的顺序 10/10 次恢复 Dock 图标、应用菜单栏、前台和 key window，不需要延后一帧，不用「Dock 图标一直在」的退路。切到 Accessory 时系统自动把前台交还给上一个应用。
+- **不要用 `NSApp.activate()`（新增）。** macOS 14 起的协作式激活由定时器之类的非点击路径触发时 0/4 次拉到前台，只有真实点击菜单项时成功。继续用 GPUI 的 `cx.activate(true)`（`activateIgnoringOtherApps:YES`，macOS 26 上照常生效）；它已被 Apple 标为弃用，将来失效时退回「点击菜单项时 `NSApp.activate()`」。
+- **在 GPUI 的 update 里同步调 `performClose:` 会让进程 abort（新增）。** `windowShouldClose:` 的回调借不到 `App`，GPUI 退回「允许关闭」，随后 `close_window` 里 `RefCell already borrowed`。所以 `⌘W` 走自己的 `CloseWindow` action 直接调 `close_requested`；同理不在 update 里同步打开菜单（嵌套 run loop）。用户点红色按钮不受影响。
+- **隐藏的窗口不重绘：已实测。** 隐藏期间 `render` 调用 0 次（GPUI 在窗口被遮挡时停掉 display link），重开时一次重绘；`on_store_events` 不需要为隐藏的窗口跳过计算。
+- **菜单开着时数字照样刷新：已实测。** GPUI 的任务走 GCD 主队列，菜单跟踪期间照常执行，`setTitle` / `setEnabled` 即时生效。
+- **菜单栏管理工具（新增）。** 用户装了 Thaw，新的菜单栏项被放进它的隐藏区（屏幕外），要用户在 Thaw 里把它拖到可见区才看得到；debug 二进制和正式包在 Thaw 里是两个不同的项。验收截图「菜单栏出现图标和今天的费用」要么先请用户移出来，要么以日志里的标题为准。
 - **`windowShouldClose:` 只管用户关窗。** `NSApp terminate:`（`⌘Q`、Sparkle 重启、关机）不经过它，所以这些路径不受影响；步骤 8 在正式包上确认。
+- **Finder 再次打开（`on_reopen`）未实测。** 裸二进制做不了，留给步骤 8 在 `make release-local` 的包上验（验收 6）。GPUI 只在没有可见窗口时回调，窗口 `orderOut:` 之后正是这种情况。
+- **App Nap（新增，推测，未实测）。** 窗口隐藏后应用是 Accessory、没有可见窗口，macOS 可能对它启用 App Nap，计时器被合并推迟，10 分钟一次的扫描可能晚到。验收时让窗口隐藏 25 分钟以上，看日志里两次 `auto-scan: timer` 的间隔；明显超过 10 分钟再考虑 `NSProcessInfo beginActivityWithOptions:`（会让活动监视器显示「阻止 App Nap」）。
 - **Sparkle 在 Accessory 状态下弹窗**：窗口关着时它的更新提示可能出现在别的应用后面。不处理，登记为已知的表现。
-- **菜单开着时数字不刷新**：菜单打开期间扫描结束，标题更新可能要等菜单关掉再开才看到。可以接受。
-- **debug 二进制的 Dock 图标**是通用图标，切换 policy 的效果以正式包为准。
-- 第一次关窗的对话框用 `window.prompt`（GPUI 的系统对话框）；它在测试平台上由 `simulate_prompt_answer` 回答，接口名以本地源码为准。
+- **debug 二进制的 Dock 图标**是通用的 `exec` 图标，菜单栏左上的应用名是二进制名；正式包的效果以步骤 8 为准。
+- 第一次关窗的对话框用 `window.prompt`（窗口上的 sheet，GPUI 异步弹出，在 `windowShouldClose:` 的回调里调用也安全）；测试平台上由 `cx.simulate_prompt_answer(..)` 回答，已用于 `the_first_close_asks_once`。

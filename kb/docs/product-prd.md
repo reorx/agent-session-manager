@@ -54,8 +54,9 @@ tags:
 | 更多过滤 | ⬜ | 最少 prompt 数的界面控件、使用过的工具、有 PR、有 subagent |
 | 全文搜索、正则搜索 | ✅ | 文本模式 FTS5（2–40ms，两字 CJK 走 LIKE 约 20ms）、正则模式流式扫描 transcript（2GB 记录文件，260–530ms，带 Tools 范围时已到 500ms 的目标线）；Matches 列、高亮片段、详情内命中跳转（命中在工具输入输出、thinking 里也能跳到）。`asm search` 命令行同样可用 |
 | 真实数据读取与索引 | ✅ | 解析器、增量 SQLite 索引、history.jsonl 补位、损坏自动重建；界面热启动约 200ms 出表（5488 行），冷索引 1.27GB 约 4s 且表格流式填充；Index 菜单可手动 Scan / Rebuild |
-| 实时更新 | 🟡 定时 | 2026-11-16：应用开着时自动增量扫描（窗口回到前台、每 10 分钟，30 秒内只扫一次），有变化才刷新表格；不监听文件。用量账本见 `../plans/2026-11-16-usage-stats/usage-ledger.md` |
-| 快捷键与菜单 | ✅ 部分 | 退出、折叠详情面板、`cmd-f`、`cmd-1..4`、`cmd-shift-r` 重建索引、`cmd-c` / `cmd-shift-c` 复制 ID / resume 命令、`[` / `]` 按回合跳转；View 菜单可显示 / 隐藏没有 prompt 的空 session；表格行有右键菜单。启动后焦点在表格上，不需要先点击就能用快捷键 |
+| 实时更新 | 🟡 定时 | 2026-11-16：应用开着时自动增量扫描（窗口回到前台、每 10 分钟，30 秒内只扫一次），有变化才刷新表格；关掉窗口后照常扫描；不监听文件。用量账本见 `../plans/2026-11-16-usage-stats/usage-ledger.md` |
+| 常驻菜单栏 | ✅ | 2026-11-16：启动后菜单栏有一个图标和今天的费用（取整到美元）；红色按钮和 `⌘W` 只隐藏窗口，Dock 图标随之消失，应用留在菜单栏继续扫描；菜单里有今天的费用、In / Out、上次扫描的时刻，Open Sessions、Scan Now、Quit；从菜单或 Finder 重开时窗口和关掉前一样。见 4.10 与 `../plans/2026-11-16-usage-stats/menubar-resident.md` |
+| 快捷键与菜单 | ✅ 部分 | 退出、`cmd-w` 关窗（留在菜单栏）、折叠详情面板、`cmd-f`、`cmd-1..4`、`cmd-shift-r` 重建索引、`cmd-c` / `cmd-shift-c` 复制 ID / resume 命令、`[` / `]` 按回合跳转；File 菜单的 Close Window；View 菜单可显示 / 隐藏没有 prompt 的空 session；表格行有右键菜单。启动后和窗口重开后焦点在表格上，不需要先点击就能用快捷键 |
 | 设置与状态持久化 | ✅ 视图状态 / ⬜ 设置页 | 项目与时间过滤（含自定义区间）、排序、Preview 模式、空 session 开关、详情面板开合、选中行存 `state.json`，下次启动恢复 |
 | 安装与自动更新 | ✅ | 2026-10-28 发布 1.0：Homebrew cask（`brew install --cask reorx/tap/agent-session-manager`）或 GitHub Release 的 dmg，Apple Silicon、macOS 14 起，Developer ID 签名并经 Apple 公证；应用内每天检查一次更新（也可菜单 Check for Updates…），用户确认后安装并重启；About 面板显示版本。见 `release.md` |
 | 精简 TXT 导出 | ✅ CLI / ✅ GUI | 2026-10-10 完成 Transcript Reader：通过 Session ID、唯一前缀或文件路径导出用户输入、最终回复与工具计数，去掉思考和工具结果，见 `../notes/2026-10-10-transcript-reader.md`；2026-10-27 GUI 完成：详情标题行的导出按钮或右键菜单弹出系统保存对话框，内容与 CLI 相同；同日起被用户打断留下的 `[Request interrupted by user]` 不再当成用户输入导出 |
@@ -165,7 +166,7 @@ Branch、Tools、ID 不作为列，只在详情面板的 Metadata 里显示（�
 
 - 首次启动全量索引，状态栏显示进度，表格随索引流式填充
 - 之后启动增量更新，通常 100ms 内完成
-- 应用开着时自动做增量扫描（✅ 2026-11-16）：窗口回到前台时、之后每 10 分钟；上一次还没结束或结束不到 30 秒就跳过。自动扫描是安静的：没有变化时界面没有任何反应，状态栏中间留着上一次的摘要；有变化时和 Scan for Changes 一样整表刷新，选中的 session 保持选中，表格不会滚回选中的行；另一个进程（`asm`）占着索引时放弃这一次，不报错
+- 应用开着时自动做增量扫描（✅ 2026-11-16）：窗口回到前台时、之后每 10 分钟；上一次还没结束或结束不到 30 秒就跳过。窗口关掉（应用留在菜单栏）后定时扫描照常，重开窗口时也扫一次。自动扫描是安静的：没有变化时界面没有任何反应，状态栏中间留着上一次的摘要；有变化时和 Scan for Changes 一样整表刷新，选中的 session 保持选中，表格不会滚回选中的行；另一个进程（`asm`）占着索引时放弃这一次，不报错
 - 运行期间监听数据目录（⬜），新 session / 新消息立即出现，Updated 列实时刷新
 - 记录文件被清理后行保留并标记为 History
 - 菜单提供"Rebuild Index"；索引损坏时自动重建，不崩溃
@@ -173,7 +174,7 @@ Branch、Tools、ID 不作为列，只在详情面板的 Metadata 里显示（�
 
 ### 4.7 快捷键与菜单 ✅ 部分
 
-已实现：`cmd-q` 退出、`cmd-\` 折叠 / 展开详情面板、`cmd-f` 聚焦搜索框、`cmd-1..4` 切换展示模式，对应 App 菜单与 View 菜单。M4 新增（表格有焦点时）：`cmd-c` 复制 session ID、`cmd-shift-c` 复制 resume 命令（搜索框里的 `cmd-c` 仍是复制文字）、`[` / `]` 按回合跳转。
+已实现：`cmd-q` 退出、`cmd-w` 关掉窗口（应用留在菜单栏，File 菜单的 Close Window 同样）、`cmd-\` 折叠 / 展开详情面板、`cmd-f` 聚焦搜索框、`cmd-1..4` 切换展示模式，对应 App 菜单与 View 菜单。M4 新增（表格有焦点时）：`cmd-c` 复制 session ID、`cmd-shift-c` 复制 resume 命令（搜索框里的 `cmd-c` 仍是复制文字）、`[` / `]` 按回合跳转。
 
 M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebuild Index），View 菜单的空 session 开关。
 
@@ -186,6 +187,17 @@ M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebui
 ### 4.9 设置 ⬜
 
 数据目录（默认 `~/.claude`，可改以支持多账号）、主题（跟随系统 / 亮 / 暗）、终端应用、默认过滤、是否索引 subagent。所有视图状态（排序、列宽、展示模式、过滤条件、窗口尺寸）自动持久化。
+
+### 4.10 常驻菜单栏 ✅
+
+2026-11-16 完成（`../plans/2026-11-16-usage-stats/menubar-resident.md`）。目的：应用开着就一直记账，关掉窗口也不停。
+
+- **菜单栏项**：一个单色的柱状图图标，后面是今天的费用取整到美元（`$204`，满千加逗号 `$1,204`），口径同状态栏的 Today。每次扫描后更新，过了 4:00 归零。账本读不了时只有图标。点它弹出菜单，不直接开窗口。
+- **菜单**：只读三行 `Today  $203.69`（有没有价格的模型时同状态栏加 `(N unpriced)`）、`In 492.7M · Out 2.4M`、`Scanned 15:53`（扫描中是 `Scanning…`，连续两次扫描失败或被 `asm` 的锁跳过时是 `Scan failed 16:13`）；然后 Open Sessions、Scan Now（扫描中置灰）、Quit Agent Session Manager。Open Usage 一项随 Usage 视图一起加。
+- **关窗**：红色按钮、`⌘W`、File > Close Window 都只隐藏窗口；Dock 图标消失，`⌘Tab` 里也没有，菜单栏换回别的应用的菜单。后台线程、定时扫描、表格里的数据都还在。第一次关窗弹一个系统对话框说明「会留在菜单栏继续记录用量，要完全退出请按 ⌘Q」，按钮「好」/「立即退出」，选过之后不再弹（记在 `state.json`）。
+- **重开**：菜单的 Open Sessions，或在 Finder / Spotlight 里再打开应用。Dock 图标回来，窗口到最前，视图、过滤、排序、选中、搜索词、滚动位置都和关掉前一样，关掉期间扫到的变化已经在表格里；焦点在表格上，快捷键马上能用。
+- **退出**：`⌘Q`、应用菜单的 Quit、菜单栏菜单的 Quit；Sparkle 的 Install and Relaunch、注销、关机照常退出。
+- 用 Thaw / Bartender 这类菜单栏管理工具时，新的菜单栏项可能先被收进隐藏区，要在工具里把它拖到可见区。
 
 ## 5. 核心使用流程
 

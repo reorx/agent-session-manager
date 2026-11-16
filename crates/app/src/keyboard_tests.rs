@@ -24,7 +24,13 @@ struct Harness {
 /// The app on the fixture sessions, with a throw-away index and view state, once the start-up
 /// scan is over.
 fn launch(cx: &mut TestAppContext) -> Harness {
+    launch_with(cx, |_| {})
+}
+
+/// `launch`, after `prepare` put whatever it likes into the throw-away directory (`state.json`).
+fn launch_with(cx: &mut TestAppContext, prepare: impl FnOnce(&std::path::Path)) -> Harness {
     let dir = tempfile::tempdir().unwrap();
+    prepare(dir.path());
     let claude = dir.path().join("claude");
     copy_fixture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../core/tests/fixtures/claude")), &claude);
     let paths = AppPaths {
@@ -975,5 +981,193 @@ fn a_selected_session_gone_from_refreshed_results_hands_the_selection_to_the_fir
         assert_eq!(table.delegate().position_of(&gone), None, "no longer found");
         assert_eq!(table.selected_row(), Some(0));
         assert_eq!(app.selected.as_ref().unwrap().id, table.delegate().row(0).id, "the highlight and the detail panel agree");
+    });
+}
+
+// ---- closing the window into the menu bar ---------------------------------------------------
+
+/// The app as on every launch after the first close: the menu bar notice was shown before.
+fn launch_noticed(cx: &mut TestAppContext) -> Harness {
+    launch_with(cx, |dir| crate::settings::ViewState { resident_notice_shown: true, ..Default::default() }.save(&dir.join("state.json")).unwrap())
+}
+
+/// What a click on the red button does: AppKit asks the window whether it may close. True when
+/// it was closed.
+fn close_like_the_red_button(cx: &mut TestAppContext, h: &Harness) -> bool {
+    let closed = gpui_kit::VisualTestContext::from_window(h.window, cx).simulate_close();
+    cx.run_until_parked();
+    closed
+}
+
+fn hidden(cx: &mut TestAppContext, h: &Harness) -> bool {
+    h.app.read_with(cx, |app, _| app.window_hidden)
+}
+
+fn menu_command(cx: &mut TestAppContext, h: &Harness, command: crate::resident::ResidentCommand) {
+    let app = h.app.clone();
+    in_window(cx, h, |window, cx| app.update(cx, |app, cx| app.on_resident_command(command, window, cx)));
+    cx.run_until_parked();
+}
+
+fn window_active(cx: &mut TestAppContext, h: &Harness) -> bool {
+    in_window(cx, h, |window, _| window.is_window_active())
+}
+
+fn saved_state(h: &Harness) -> crate::settings::ViewState {
+    crate::settings::ViewState::load(&h._dir.path().join("state.json"))
+}
+
+#[gpui_kit::test]
+fn closing_the_window_hides_it_and_keeps_the_app_running(cx: &mut TestAppContext) {
+    let h = launch_noticed(cx);
+    wait_until(cx, &h, "today's usage", usage_loaded);
+    assert!(!close_like_the_red_button(cx, &h), "the window is not closed, only hidden");
+    assert!(hidden(cx, &h));
+    assert!(!cx.has_pending_prompt(), "the notice was shown on an earlier run");
+
+    // the app, its store thread and its timer are all still there
+    let before = h.app.read_with(cx, |app, cx| updated_at(app, cx, S1));
+    append_response(&h._dir.path().join("claude"), S1, "msg_hidden", "claude-opus-5", now_ms());
+    cx.executor().advance_clock(crate::AUTO_SCAN_IDLE);
+    wait_until(cx, &h, "S1 updated by the timer while hidden", |app, cx| updated_at(app, cx, S1) != before);
+    let paid = today_of_one_appended("claude-opus-5");
+    h.app.read_with(cx, |app, _| {
+        assert_eq!(app.today_label, paid.as_str());
+        let menu = app.resident_view.as_ref().expect("the menu follows today");
+        assert_eq!(menu.today, paid.replace("Today ", "Today  "));
+        assert_eq!(menu.title, "$0");
+        assert!(app.window_hidden, "a scan does not bring the window back");
+    });
+}
+
+#[gpui_kit::test]
+fn command_w_closes_like_the_red_button(cx: &mut TestAppContext) {
+    use crate::resident::ResidentCommand::OpenSessions;
+    let h = launch_noticed(cx);
+    press(cx, &h, "cmd-w");
+    assert!(hidden(cx, &h));
+    menu_command(cx, &h, OpenSessions);
+    assert!(!hidden(cx, &h));
+    // from the search box too
+    press(cx, &h, "cmd-f");
+    assert_eq!(focus(cx, &h), (true, false));
+    press(cx, &h, "cmd-w");
+    assert!(hidden(cx, &h));
+}
+
+#[gpui_kit::test]
+fn reopening_restores_the_view_and_gives_the_table_the_focus(cx: &mut TestAppContext) {
+    use crate::model::RangePreset;
+    use crate::resident::ResidentCommand::OpenSessions;
+    let h = launch_noticed(cx);
+    let hit = |app: &AppRoot, _: &App| app.detail.hit_position();
+    h.app.update(cx, |app, cx| app.set_range(RangePreset::Days30, cx));
+    sort_like_header(cx, &h, "prompts");
+    press(cx, &h, "cmd-f");
+    type_text(cx, &h, "parser");
+    press(cx, &h, "enter");
+    wait_until(cx, &h, "the search", search_done);
+    wait_until(cx, &h, "the first hit", |app, cx| hit(app, cx) == Some((1, 3)));
+    let view = |cx: &mut TestAppContext| h.app.read_with(cx, |app, cx| (app.view_state(cx), app.query.clone(), app.selected.as_ref().map(|r| r.id.clone())));
+    let before = view(cx);
+    // closed while typing in the search box
+    press(cx, &h, "cmd-f");
+    press(cx, &h, "cmd-w");
+    assert!(hidden(cx, &h));
+
+    menu_command(cx, &h, OpenSessions);
+    assert!(!hidden(cx, &h));
+    assert!(window_active(cx, &h), "the window is in front");
+    assert_eq!(view(cx), before, "range, sort, selection and query as they were");
+    assert_eq!(search_box(cx, &h), "parser");
+    assert_eq!(focus(cx, &h), (false, true), "the table has the focus");
+    press(cx, &h, "n");
+    assert_eq!(h.app.read_with(cx, hit), Some((2, 3)), "its keys work without a click");
+}
+
+#[gpui_kit::test]
+fn the_first_close_asks_once(cx: &mut TestAppContext) {
+    use crate::resident::ResidentCommand::OpenSessions;
+    let h = launch(cx);
+    assert!(!close_like_the_red_button(cx, &h));
+    assert!(cx.has_pending_prompt(), "the first close explains the menu bar item");
+    assert!(!hidden(cx, &h), "the window waits for the answer");
+    // a second close while the notice is up changes nothing
+    press(cx, &h, "cmd-w");
+    assert!(!hidden(cx, &h));
+
+    cx.simulate_prompt_answer("好");
+    cx.run_until_parked();
+    assert!(hidden(cx, &h));
+    assert!(saved_state(&h).resident_notice_shown, "remembered for the next launch");
+
+    menu_command(cx, &h, OpenSessions);
+    assert!(!close_like_the_red_button(cx, &h));
+    assert!(!cx.has_pending_prompt(), "only once");
+    assert!(hidden(cx, &h));
+    assert!(h.app.read_with(cx, |app, _| !app.quitting));
+}
+
+#[gpui_kit::test]
+fn quit_now_in_the_first_close_notice_quits(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    press(cx, &h, "cmd-w");
+    assert!(cx.has_pending_prompt());
+    cx.simulate_prompt_answer("立即退出");
+    cx.run_until_parked();
+    // the test platform's quit does nothing: what the app asked for is all there is to see
+    assert!(h.app.read_with(cx, |app, _| app.quitting));
+    assert!(saved_state(&h).resident_notice_shown, "the notice was read");
+}
+
+#[gpui_kit::test]
+fn the_menu_commands_come_over_a_channel(cx: &mut TestAppContext) {
+    use crate::resident::ResidentCommand::{OpenSessions, ScanNow};
+    let h = launch_noticed(cx);
+    // as the menu bar item's target (and Finder's reopen) send them
+    let (menu, commands) = async_channel::unbounded();
+    let app = h.app.clone();
+    in_window(cx, &h, |window, cx| app.update(cx, |app, cx| app.listen_to_menu(commands, window, cx)));
+    press(cx, &h, "cmd-w");
+    menu.try_send(OpenSessions).unwrap();
+    cx.run_until_parked();
+    assert!(!hidden(cx, &h));
+    let base = h.app.read_with(cx, |app, _| app.scans_done);
+    cx.executor().advance_clock(crate::AUTO_SCAN_MIN_GAP);
+    menu.try_send(ScanNow).unwrap();
+    wait_until(cx, &h, "the scan from the menu", |app, _| app.scans_done > base);
+}
+
+#[gpui_kit::test]
+fn scan_now_from_the_menu_scans_while_hidden(cx: &mut TestAppContext) {
+    use crate::resident::ResidentCommand::ScanNow;
+    let h = launch_noticed(cx);
+    wait_until(cx, &h, "today's usage", usage_loaded);
+    press(cx, &h, "cmd-w");
+    assert!(hidden(cx, &h));
+    h.app.read_with(cx, |app, _| {
+        let menu = app.resident_view.as_ref().unwrap();
+        assert!(!menu.scanning && menu.scanned.starts_with("Scanned "), "{menu:?}");
+    });
+
+    append_response(&h._dir.path().join("claude"), S1, "msg_scan_now", "claude-opus-5", now_ms());
+    let base = h.app.read_with(cx, |app, _| app.scans_done);
+    // the fixture scans in a few milliseconds: look in the same update
+    let app = h.app.clone();
+    in_window(cx, &h, |window, cx| {
+        app.update(cx, |app, cx| {
+            app.on_resident_command(ScanNow, window, cx);
+            let menu = app.resident_view.as_ref().unwrap();
+            assert!(menu.scanning, "Scan Now is greyed out while it scans");
+            assert_eq!(menu.scanned, "Scanning…");
+        })
+    });
+    wait_until(cx, &h, "the scan from the menu", |app, _| app.scans_done > base);
+    let paid = today_of_one_appended("claude-opus-5");
+    h.app.read_with(cx, |app, _| {
+        let menu = app.resident_view.as_ref().unwrap();
+        assert!(!menu.scanning && menu.scanned.starts_with("Scanned "), "{menu:?}");
+        assert_eq!(menu.today, paid.replace("Today ", "Today  "), "the new call is counted");
+        assert!(app.window_hidden);
     });
 }

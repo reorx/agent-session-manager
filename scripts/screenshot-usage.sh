@@ -17,23 +17,12 @@ BIN=$1
 OUT=$2
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/.." && pwd)
-WINID="$ROOT/tmp/winid"
-REAL_DATA="$HOME/Library/Application Support/dev.reorx.AgentSessionManager"
+# shellcheck source=shot-lib.sh
+. "$HERE/shot-lib.sh"
 
-if [ -z "${ASM_DB:-}" ] || [ -z "${ASM_CLAUDE_DIR:-}" ]; then
-  echo "set ASM_DB and ASM_CLAUDE_DIR to copies (e.g. under tmp/): this script rebuilds the index" >&2
-  exit 2
-fi
-case "$ASM_DB" in "$REAL_DATA"/*) echo "ASM_DB is in the real data directory: $ASM_DB" >&2; exit 2 ;; esac
-if [ "$(cd "$ASM_CLAUDE_DIR" && pwd -P)" = "$(cd "$HOME/.claude" && pwd -P)" ]; then
-  echo "ASM_CLAUDE_DIR is the real ~/.claude: use a copy" >&2
-  exit 2
-fi
-
-mkdir -p "$OUT" "$ROOT/tmp"
-if [ ! -x "$WINID" ] || [ "$HERE/winid.swift" -nt "$WINID" ]; then
-  swiftc -O -o "$WINID" "$HERE/winid.swift"
-fi
+require_copies "this script rebuilds the index"
+mkdir -p "$OUT"
+build_winid
 wake-screen
 
 STAMP=$(date +%H%M%S)
@@ -43,7 +32,7 @@ GATE=$(mktemp -d "$OUT/gate-$STAMP.XXXX")
 LOG="$OUT/app-$STAMP.log"
 ASM_USAGE_AUTOPLAY="$GATE" "$BIN" > "$LOG" 2>&1 &
 PID=$!
-trap 'kill $PID 2>/dev/null; wait $PID 2>/dev/null || true' EXIT
+trap 'kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true' EXIT
 # keep the display awake while the app runs (window captures of a sleeping screen fail)
 caffeinate -d -w "$PID" &
 WID=
@@ -61,7 +50,7 @@ capture() {
     sleep 0.1
   done
   grep -q "^autoplay-usage: $step " "$LOG" || { echo "step '$step' never settled; see $LOG" >&2; exit 1; }
-  screencapture -x -o -l "$WID" "$OUT/$n-$step.png"
+  capture_window "$WID" "$OUT/$n-$step.png"
   grep "^autoplay-usage: $step " "$LOG"
 }
 
@@ -77,7 +66,7 @@ capture 3 rebuilt
 if [ "${USAGE_HOLD:-0}" -gt 0 ]; then
   echo "holding the app open for $USAGE_HOLD s (log: $LOG)"
   sleep "$USAGE_HOLD"
-  screencapture -x -o -l "$WID" "$OUT/4-held.png"
+  capture_window "$WID" "$OUT/4-held.png"
 fi
 
 echo "screenshots written to $OUT"

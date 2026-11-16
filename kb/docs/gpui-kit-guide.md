@@ -17,7 +17,7 @@ tags:
 
 ## 依赖与查 API
 
-应用只声明 `gpui-kit = "=0.6.1"` 一个 UI 依赖。它把 GPUI 和组件库一起重导出，再单独声明 `gpui` 或 `gpui-pre` 会让两份 GPUI 同时进入依赖图，类型互不相认。
+应用只声明 `gpui-kit = "=0.6.1"` 一个 UI 依赖。它把 GPUI 和组件库一起重导出，再单独声明 `gpui` 或 `gpui-pre` 会让两份 GPUI 同时进入依赖图，类型互不相认。直接调 AppKit 的地方（Sparkle、菜单栏项）用 `objc2`、`objc2-foundation`、`objc2-app-kit` 和 `raw-window-handle`，版本取 `Cargo.lock` 里 GPUI 已经在用的那一个（`cargo add …@<版本>`），不会引入第二份。
 
 | 路径 | 内容 |
 |---|---|
@@ -205,6 +205,24 @@ edition 2024 下，`fn f(cx: &App) -> impl IntoElement` 的返回值会捕获 `c
 - 任务里更新视图的调用返回 `Result`，视图已销毁时失败。用 `.ok()` 或据此退出循环，不要 unwrap
 - 闭包里持有视图用弱引用，避免循环引用
 
+## 菜单栏项与隐藏窗口
+
+GPUI 和 gpui-component 都没有菜单栏项（`NSStatusItem`）的封装，`gpui-component` 的 `StatusBar` 是窗口底部的状态栏。`resident.rs` 直接用 `objc2-app-kit`（0.3.2，GPUI 已经依赖的那个版本，只开用到的 feature）建，做法和坑都来自 usage-p2-probe 试验（`tmp/2026-11-12-usage-stats/usage-p2-probe/report.md`）：
+
+| 要点 | 做法 |
+|---|---|
+| 菜单项的回调 | target 是 `define_class!` 定义的 NSObject 子类（类名在进程内唯一，`AsmMenuTarget`），方法里只 `try_send` 一个命令进 `async_channel`；GPUI 一侧的任务收命令、`update_in` 执行。AppKit 回调里不碰 GPUI 的 `App`。菜单先发 `menuDidClose:` 再发 action，命令执行时菜单已经关了 |
+| 持有 | `NSMenuItem.target` 和 `NSMenu.delegate` 都是弱引用，`NSStatusItem` 释放了菜单栏项就消失：`Resident`（GPUI `Global`，像 `updater.rs` 的 `Updater`）持有 item、菜单、要改标题的菜单项和 target |
+| 置灰 | `menu.setAutoenablesItems(false)`，否则 AppKit 按 target 能否响应自动启用菜单项，`setEnabled` 不生效 |
+| 更新 | 在 GPUI 主线程的代码里直接 `setTitle` / `setEnabled`，菜单开着时也即时生效（GPUI 的任务走 GCD 主队列，菜单跟踪的嵌套 run loop 里照常执行） |
+| 图标 | `NSImage::imageWithSystemSymbolName_accessibilityDescription("chart.bar.xaxis", ..)` 加 `setTemplate(true)`，深浅色菜单栏自动适配，debug 二进制也不需要资源文件；`setAutosaveName` 让系统记住用户拖到的位置 |
+| 取 NSWindow | `HasWindowHandle::window_handle(window)` 要写全限定：GPUI 的 `Window` 有同名的固有方法（返回 `AnyWindowHandle`）。AppKit 句柄给的是 content view，再取它的 `window()`。测试平台的窗口没有句柄（`NotSupported`） |
+| 隐藏 | `orderOut:` 这一个窗口，不用 `App::hide()`（隐藏整个应用，Sparkle 的窗口也会被藏起来）；再 `setActivationPolicy(Accessory)` 去掉 Dock 图标。重开：`Regular` → `cx.activate(true)` → `window.activate_window()`，试验 10/10 稳定，不需要延后一帧 |
+| **不能在 GPUI 的 update 里同步触发 `windowShouldClose:`** | 在 action、事件处理、`update` 里调 `NSWindow performClose:`，AppKit 同步回调 `windowShouldClose:`，GPUI 的包装借不到 `App`，回调返回 true，接着 `close_window` 再借用时 panic，进程 abort。所以 `⌘W` 绑自己的 `CloseWindow` action，直接调 `close_requested`；用户点红色按钮不受影响（那时 GPUI 不在 update 里）。同理，打开菜单（`popUpMenuPositioningItem`、`performClick:`）是嵌套 run loop，要经 `performSelector:withObject:afterDelay:0` 推到 run loop 上 |
+| 测试 | `resident::install` 只在 `main()` 里调用，测试里没有 `Resident` 全局，`cx.try_global::<Resident>()` 为 `None`，平台调用都跳过；无界面测试只看 `window_hidden`、焦点和 `resident_view`（推给菜单栏项的内容） |
+
+菜单栏管理工具（这台机器上是 Thaw）会把新的菜单栏项收进隐藏区（屏幕外），要用户在工具里拖到可见区；脚本不能指望点到它（见下文 `screenshot-resident`）。
+
 ## 测试
 
 界面层的测试大部分是纯逻辑，不起窗口：行转换、过滤、排序、视图状态读写、store 与搜索线程的事件序列。
@@ -224,6 +242,9 @@ edition 2024 下，`fn f(cx: &App) -> impl IntoElement` 的返回值会捕获 `c
 | 窗口激活 | 测试窗口创建时不是激活的。`window.activate_window()` 让它激活，`observe_window_activation` 的回调照常触发；要模拟「切走再回来」，再开一个窗口（`cx.add_window(\|_, _\| gpui_kit::EmptyView)`）激活它，再激活回来 |
 | 剪贴板 | 测试平台有自己的剪贴板：应用里 `cx.write_to_clipboard(..)` 写进去，测试里 `cx.read_from_clipboard()` 读出来，不碰系统剪贴板 |
 | 保存 / 打开对话框 | `cx.simulate_new_path_selection(..)` / `simulate_path_prompt_response(..)` 回答；测试平台的 `reveal_path` 是 `unimplemented!()`，测试里不要走到它 |
+| 系统对话框（`window.prompt`） | `cx.has_pending_prompt()` 看有没有，`cx.simulate_prompt_answer("按钮文字")` 回答，再 `run_until_parked` 让等答案的任务跑完 |
+| 点红色按钮 | `gpui_kit::VisualTestContext::from_window(window, cx).simulate_close()`：调注册的 `on_window_should_close` 回调，返回窗口是否真的关了 |
+| 退出 | 测试平台的 `quit` 什么都不做：要断言「退出了」，看应用自己记下的标志（`AppRoot::quitting`） |
 | 测滚动位置 | 测试窗口照常布局和绘制，`list` 会把滚过头的位置拉回来：fixture 的对话很短，整个放得下时 `scroll_to` 到第二张卡，下一帧就回到顶端。先 `cx.simulate_window_resize(window, size(..))` 把窗口压矮（`brackets_*` 用 300px 高） |
 
 这类测试能证明按键到动作到状态的整条路径，证明不了系统把物理按键交给 GPUI 的那一段，也不看像素。
@@ -238,13 +259,14 @@ use core::prelude::v1::test;
 
 ## 脚本化交互与截图
 
-现有六个截图脚本（`scripts/screenshot*.sh`），每一张截的是什么写在各脚本的文件头和步骤注释里：
+现有七个截图脚本（`scripts/screenshot*.sh`），每一张截的是什么写在各脚本的文件头和步骤注释里：
 
 | 命令 | 驱动方式 | 截图 | 可调变量 |
 |---|---|---|---|
 | `make screenshot` | `ASM_SPIKE_AUTOPLAY=1` | 3 张：初始、自动滚动后、自动过滤加排序后 | 无 |
 | `make screenshot-search` | `ASM_SEARCH_AUTOPLAY=1` | 7 张：文本搜索、下一个命中、两字 CJK、正则、Tools 范围、按 Matches 排序、清空 | `ASM_AUTOPLAY_QUERY` / `ASM_AUTOPLAY_CJK` / `ASM_AUTOPLAY_REGEX` 换查询 |
 | `make screenshot-detail` | `ASM_DETAIL_AUTOPLAY=1` | 最多 12 张：选中、展开步骤、展开一步、全部展开、搜索命中、下一个命中、特殊回合、70MB 文件、History 行（第一个 prompt 不少于 3 条的）、代码块（展开离开头最近的带代码块的回复）、从顶部按两次 `]`、Metadata | `ASM_AUTOPLAY_SESSION` / `ASM_AUTOPLAY_REGEX` / `ASM_AUTOPLAY_SPECIAL` 指定 session 和查询；`ASM_AUTOPLAY_STEP` 取 `cut-output`、`thinking` 或 `mcp`，决定展开哪种步骤 |
+| `make screenshot-resident` | `ASM_RESIDENT_AUTOPLAY=<gate 目录>` | 12 张：启动后（窗口、菜单栏条、Dock 条）、关窗后（菜单栏条、Dock 条）、弹出的菜单、窗口隐藏时 Scan Now 之后（菜单栏条、Dock 条）、再弹一次菜单、Open Sessions 之后（窗口、菜单栏条、Dock 条）；最后经菜单 Quit，进程必须退出 | 必须设 `ASM_DB`、`ASM_CLAUDE_DIR`（指向副本）；`RESIDENT_BEFORE_SCAN` 是隐藏期间、Scan Now 之前执行的命令；`RESIDENT_HOLD=<秒>` 让窗口在那之后多隐藏一段时间，期间打出每次 `auto-scan: timer` 的时刻（看定时扫描在隐藏时是否准时），并加截 `2b-held-*`；`ASM_RESIDENT_QUERY=<词>` 在第一张截图前先搜索，1-shown 与 6-open 应显示同样的搜索词、结果和选中；`RESIDENT_CLICK=1` 用 cliclick 真点菜单里的 Scan Now；`RESIDENT_NOTICE=1` 从没显示过第一次关窗说明的状态开始；`ASM_RESIDENT_MENU_AT=x,y` 改菜单弹出的位置 |
 | `make screenshot-cost` | `ASM_COST_AUTOPLAY=1` | 最多 9 张：Opus 5.5 按 Ctx 降序比 Fable 5.2、换 Sonnet 5.5、有其他模型的 session 比 Haiku 5.5、按 In 排序、按 Hit% 升序、指定 session 的 Conversation 顶部与第一处缓存失效、它的 Metadata、隐藏 Started / Size / Kind | `ASM_AUTOPLAY_CACHE_SESSION` 指定看缓存失效的 session，没给就跳过那 3 张 |
 | `make screenshot-usage` | `ASM_USAGE_AUTOPLAY=<gate 目录>` | 3–4 张：启动后用量读完（`1-ready`）、Scan for Changes 之后、Rebuild Index 之后，可选再开着 `USAGE_HOLD` 秒后一张；每张的状态栏都有 `Today $X` | 必须设 `ASM_DB`、`ASM_CLAUDE_DIR`（指向副本，否则拒绝运行）；`USAGE_BEFORE_SCAN` 是扫描前执行的 shell 命令，`USAGE_HOLD` 是最后开着的秒数 |
 | `make screenshot-clicks` | cliclick 真点击，启动三次 | 22 张：1–11 是下拉菜单、过滤、Preview 模式、选中行和 Metadata tab，12–15 是自定义区间与日期选择器，16–20 是回合卡（第二次启动，预选 `5f6eea99`），21–22 是普通行和 History 行的右键菜单（第三次启动） | 坐标写在脚本里；换机器要换一个不再变化的 session 并重量坐标 |
@@ -256,6 +278,10 @@ use core::prelude::v1::test;
 下拉菜单这类弹出层目前没有找到程序化打开的办法，只能用 cliclick 真点击。点击坐标是相对窗口的固定值，任何让控件移位的布局改动都要重新校对；工具栏按钮的位置取决于左边按钮的标签长度（选了项目、出现日期选择器都会把右边的按钮推开）。脚本启动的窗口不在前台，第一次点击只会激活窗口；GPUI 按上一帧的悬停状态判定点中了什么，指针瞬移过去立刻点击可能落空。所以 `screenshot-clicks.sh` 先点一下标题栏，每次点击前先把指针移过去停 200ms。详情面板的标题限制为单行也是这个原因：两行标题会把下面的 tab 和对话顶栏推下去 25px。表格行的右键菜单用 `cliclick rc:` 打开；History 行在表里的位置每天都变，脚本先用 Kind 下拉把列表收窄到 History，让它成为第一行再右键。导出的系统保存对话框不要用脚本点：app 从 agent 会话里启动时，对话框访问 iCloud Drive 会弹出记在 Claude Code 二进制名下的系统授权（2026-10-27 遇到），允许或拒绝都是用户的决定。
 
 **不要用固定的 `sleep` 等界面就绪。** 新编译的二进制首次启动要几秒才出窗口，等不够就截到空窗口或上一帧的画面；`set -euo pipefail` 下这类失败经常没有任何输出，看起来就像脚本正常跑完了。做法是让 app 在每一步稳定后打一行标记（`autoplay-search: <step>`），脚本轮询窗口 id 和日志里的标记，超时就报错并指向 app 日志。`screenshot-search.sh` 是这个写法的参考；`screenshot-detail.sh`（`ASM_DETAIL_AUTOPLAY`，详情面板的 12 步）同样写法，没有可做的步骤打 `autoplay-detail: <step> skipped`，脚本跳过不截。
+
+**`screenshot-resident` 的步骤也由文件驱动，顺序由脚本定。** autoplay 启动读完用量后打 `autoplay-resident: shown · <标题> | <三行> · status bar <Today>`，之后按序号执行脚本放进 gate 目录的命令文件（`1-close`、`2-menu`、`3-scan`…），每条做完打 `autoplay-resident: <命令> · …`：`close`（红色按钮的路径）、`menu`（在固定位置弹出菜单栏项的菜单，打印左上角坐标）、`close-menu`、`scan`（先关菜单，再经菜单项触发 Scan Now，等扫描结束）、`wait-scan`（等脚本真点击触发的扫描）、`open`（经菜单项 Open Sessions，打印窗口是否激活、表格是否有焦点）、`quit`。菜单项经 `performActionForItemAtIndex:` 触发，走的是 target → 通道 → GPUI 任务这条真实路径。菜单不是点菜单栏项弹出的，因为 Thaw 把菜单栏项收在屏幕外；菜单栏条的截图里也就看不到它，它的标题以日志为准。`RESIDENT_CLICK=1` 时脚本只在日志表明菜单开着（`menu bar: menu open` 比 `menu closed` 多一行）时才点，否则改用程序化的 Scan Now，避免点到菜单后面的窗口。脚本把应用带到前台两次（启动、Open Sessions），这期间敲的键会进应用的窗口。
+
+需要副本数据的两个脚本（`screenshot-usage.sh`、`screenshot-resident.sh`）共用 `scripts/shot-lib.sh`：拒绝真实数据目录（`require_copies`）、编译 `winid`、按窗口 ID 或屏幕区域截图。`screencapture` 偶尔报 `could not create image from window` / `from rect`，同一张图稍后再截就成功，所以这两个截图函数失败时重试一次。`winid --screen` 打印主屏的宽高（点），用来截菜单栏条和 Dock 条（Dock 位置读 `defaults read com.apple.dock orientation`）。
 
 **`screenshot-usage` 的步骤由文件驱动。** 用量验收要在两步之间改数据（删掉一半记录文件），所以 autoplay 不按固定间隔走：用量读完打 `autoplay-usage: ready · Today $X`，然后等 gate 目录里出现 `scan` 文件才做 Scan for Changes，扫描结束、表格重读后打 `autoplay-usage: scanned · …`；再等 `rebuild` 文件做 Rebuild Index，打 `autoplay-usage: rebuilt · …`。脚本在两步之间执行 `USAGE_BEFORE_SCAN`，然后 `touch` 对应的文件。之后 app 照常开着，自动扫描的日志行是 `auto-scan:`、`scan (automatic):`、`today:`。它会重建索引，所以脚本要求 `ASM_DB`、`ASM_CLAUDE_DIR` 都指向副本，`ASM_STATE` 默认在输出目录里新建；从 core 的 fixture 复制一份就能跑通全程（2026-11-16 自查过）。挪走记录文件用 `mv` 到别的目录，不必删除。
 
@@ -295,6 +321,7 @@ use core::prelude::v1::test;
 - `crates/app/src/keyboard_tests.rs` — 无界面窗口里的键盘测试，新写这类测试时照它的 `launch` / `wait_until` 写
 - `crates/app/src/table.rs` — 表格 delegate
 - `crates/app/src/style.rs` — 色值与主题安装
+- `crates/app/src/resident.rs` — 菜单栏项、菜单的 target、隐藏窗口与 activation policy
 - `crates/app/src/toolbar.rs` — 下拉菜单、搜索框与开关、搜索的防抖
 - `crates/app/src/detail.rs` — 详情面板的标题与 Metadata，对话的状态（行表、展开 / 折叠、命中位置与停靠）
 - `crates/app/src/turn_cards.rs` — 回合卡的绘制：`list` 的行、刻度的悬停与点击、命中的定位标记

@@ -1,8 +1,14 @@
 // Print the CGWindowID of the first on-screen window owned by <process name>.
 // With --bounds, print "id x y width height" (screen points) instead, for click automation.
 // With --pid N, only a window of that process counts (another instance may share the name).
+// `winid --screen` prints "width height" of the main display in points (menu bar and Dock strips).
 import CoreGraphics
 import Foundation
+if CommandLine.arguments.count > 1 && CommandLine.arguments[1] == "--screen" {
+    let size = CGDisplayBounds(CGMainDisplayID()).size
+    print("\(Int(size.width)) \(Int(size.height))")
+    exit(0)
+}
 let name = CommandLine.arguments[1]
 let wantBounds = CommandLine.arguments.contains("--bounds")
 let pid = CommandLine.arguments.firstIndex(of: "--pid").flatMap { Int(CommandLine.arguments[$0 + 1]) }

@@ -20,7 +20,7 @@ tags:
 
 | 线程 | 持有 | 工作 |
 |---|---|---|
-| 主线程 | 全部行、过滤排序后的顺序、选中、视图状态、内存里的用量（`UsageData`） | 渲染；过滤与排序；应用后台事件；算今天的费用；定时发起自动扫描 |
+| 主线程 | 全部行、过滤排序后的顺序、选中、视图状态、内存里的用量（`UsageData`）、菜单栏项（`resident::Resident`，GPUI 全局） | 渲染；过滤与排序；应用后台事件；算今天的费用；定时发起自动扫描；更新菜单栏项、执行它的菜单命令 |
 | `asm-store` | 索引的读写连接（`Db` 自带用量账本的连接）、模型目录 | 读索引、扫描并写索引（同时记账）、读账本、读取模型窗口、收藏与目录迁移 |
 | `asm-search` | 索引的只读连接 | 文本搜索查全文索引；正则搜索扫 transcript 文件 |
 | `asm-reader` | 无（不碰索引） | 给详情面板直接读一个 session 的记录文件（或 History session 在 `history.jsonl` 里的 prompt），转换成回合卡；写导出的 TXT |
@@ -118,7 +118,7 @@ Rebuild
 
 ## 自动扫描
 
-应用开着时自己做增量扫描（`AppRoot::auto_scan`），触发有两个：窗口变为激活（`observe_window_activation`），和一个每 `AUTO_SCAN_IDLE`（600 秒）醒一次的循环任务（`_auto_scan`）。菜单的 Scan for Changes / Rebuild Index 照旧。
+应用开着时自己做增量扫描（`AppRoot::auto_scan`），触发有三个：窗口变为激活（`observe_window_activation`），窗口从菜单栏重新显示（`show_window`，日志 `auto-scan: window shown`），和一个每 `AUTO_SCAN_IDLE`（600 秒）醒一次的循环任务（`_auto_scan`）。菜单的 Scan for Changes / Rebuild Index 和菜单栏菜单的 Scan Now 照旧是手动扫描（`rescan`）。
 
 | 规则 | 原因 |
 |---|---|
@@ -132,6 +132,27 @@ Rebuild
 计时用 `cx.background_executor().now()`，不用 `Instant::now()`：测试里 `advance_clock` 能推进它，30 秒和 10 分钟的用例不用真等（`keyboard_tests.rs` 的 `scans_triggered_within_thirty_seconds_run_once`、`ten_minutes_later_…`）。`scan_in_flight` 在 `AppRoot::new` 里就是 true（store 线程打开索引后马上扫描），由 `ScanDone` / `ScanSkipped` / `Failed` 清掉；所以启动时窗口第一次激活不会多扫一次。
 
 日志：发起时打 `auto-scan: <触发>`，结束打 `scan (automatic): <报告>`，今天的费用变了打 `today: …`，换日打 `usage day: <旧> → <新>`。
+
+## 窗口隐藏之后
+
+关窗不是关窗：红色按钮（`on_window_should_close` 的回调返回 false）、`⌘W` 和 File > Close Window（`CloseWindow` action）都走 `AppRoot::close_requested`，它把窗口 `orderOut:` 掉、把 activation policy 切到 Accessory（没有 Dock 图标、不在 `⌘Tab`、菜单栏交还给别的应用），记下 `window_hidden`。窗口对象、`AppRoot`、`Store`、搜索线程、所有任务都原样留着，所以：
+
+| 部分 | 窗口隐藏时 |
+|---|---|
+| store / 读取 / 搜索线程 | 照常运行，请求和事件照常进出 |
+| 自动扫描的定时器 | 照常每 600 秒醒一次（是 `AppRoot` 的任务，实体还在） |
+| 事件的应用 | 照常：行、用量、今天的费用都更新到 `AppRoot` 里 |
+| 渲染 | 不发生：GPUI 在窗口被遮挡时停掉 display link，`cx.notify()` 只标脏，重开时一次重绘（usage-p2-probe 实测隐藏期间 `render` 调用 0 次）。所以 `on_store_events` 不需要为隐藏的窗口跳过任何计算 |
+| 菜单栏项 | `sync_resident` 在扫描开始 / 结束、收到用量、换日时把标题和三行信息推过去，内容没变就不推 |
+| 出错 | `Failed` 只改状态栏（看不见）和菜单第三行的计数；不弹通知。通知只由窗口里的操作引起，窗口隐藏时不会发生 |
+
+菜单栏菜单的命令从 AppKit 进来：菜单项的 target（`resident::MenuTarget`，`define_class!` 定义的 NSObject）只把一个 `ResidentCommand` 送进 `async_channel`，`AppRoot::listen_to_menu` 起的任务收到后调 `on_resident_command`。AppKit 的回调里不碰 GPUI 的 `App`（那时它可能正被借用）。Finder / Spotlight 再次打开应用时 AppKit 调 `applicationShouldHandleReopen:`（只在没有可见窗口时），`main()` 里的 `on_reopen` 往同一条通道送 `OpenSessions`。
+
+重开（`show_window`）的顺序固定：先切回 Regular，再 `cx.activate(true)`（`activateIgnoringOtherApps:`），再 `window.activate_window()`，然后焦点给表格、`roll_day`、`auto_scan("window shown")`。不用 `NSApp.activate()`：它是协作式的，由定时器、autoplay 这类不是点击的路径触发时拉不到前台（试验 0/4，真实点击菜单项时可以）。`activateIgnoringOtherApps:` 已被 Apple 标为弃用，哪天失效了，点击菜单项触发的 `NSApp.activate()` 是退路。
+
+第一次关窗（`state.json` 的 `resident_notice_shown` 为假）先弹 `window.prompt`（窗口上的 sheet），答案经一个任务回来：「好」隐藏窗口，「立即退出」退出；两种都把标记写进 `state.json`。对话框开着时再次关窗什么都不做。
+
+退出只有 `cx.quit()` 一条路（`⌘Q` 的 `Quit` action、菜单栏菜单的 Quit、「立即退出」）；`NSApp terminate:`（Sparkle 的 Install and Relaunch、注销、关机）不经过 `windowShouldClose:`，不受影响。`main()` 写明 `QuitMode::Explicit`，最后一个窗口关掉也不退出（窗口其实从不关）。
 
 ### 扫描期间请求要排队
 
@@ -255,6 +276,7 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 | 搜索框里按 Enter 或 Escape | 表格 |
 | 在日期区间选择器里选完区间（或点了快捷项） | 表格 |
 | 导出 TXT 的保存对话框关闭（保存或取消） | 表格 |
+| 窗口重新显示（菜单栏菜单的 Open Sessions、Finder 再次打开），不管关窗前焦点在哪 | 表格 |
 
 新增会拿走焦点的界面（弹出层、对话框）时，关闭后要把焦点还给表格或搜索框。
 
@@ -271,6 +293,7 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 | 详情面板是否可见 | 滚动位置 |
 | 选中的 session | |
 | 搜索选项（模式、大小写、Scope、Labels） | |
+| 第一次关窗的说明是否已经显示过（`resident_notice_shown`） | |
 
 规则：
 
@@ -297,7 +320,8 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 - `crates/app/src/toolbar.rs` — 过滤条件的应用、搜索的防抖与重跑
 - `crates/app/src/table.rs` — 全部行与过滤排序后的顺序、搜索对象的生成
 - `crates/app/src/settings.rs` — 视图状态的读写与容错测试
-- `crates/app/src/keyboard_tests.rs` — 启动焦点与搜索的键盘路径（`cmd-f`、Enter、Escape、`n`、`cmd-g`）、`cmd-c` / `cmd-shift-c` 复制（用测试平台的剪贴板）的行为测试；状态栏的 Today、自动扫描（定时、窗口激活、30 秒节流、不改摘要、不滚回选中行）、跨过 4:00 换日
+- `crates/app/src/resident.rs` — 菜单栏项与菜单（`install`、`Resident`、`MenuTarget`）、隐藏窗口与 activation policy、菜单文字的纯函数（标题取整、三行信息、连续失败的判定）
+- `crates/app/src/keyboard_tests.rs` — 启动焦点与搜索的键盘路径（`cmd-f`、Enter、Escape、`n`、`cmd-g`）、`cmd-c` / `cmd-shift-c` 复制（用测试平台的剪贴板）的行为测试；状态栏的 Today、自动扫描（定时、窗口激活、30 秒节流、不改摘要、不滚回选中行）、跨过 4:00 换日；关窗即隐藏（红色按钮、`cmd-w`）、隐藏时定时扫描与 Scan Now、重开后视图不变且焦点在表格、第一次关窗的说明只弹一次
 - `crates/core/src/ledger.rs`、`crates/core/src/usage.rs` — 账本与 4:00 分日、`UsageData` 的合计；表结构与迁移规则见 [数据层设计](data-layer-design.md)
 - `crates/core/src/index/indexer.rs` — 流式扫描与单事务写入
 - `kb/notes/2026-09-21-m2-real-data.md`、`kb/notes/2026-09-21-m3-search.md` — 上述数字的来源与当时的取舍
