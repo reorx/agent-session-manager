@@ -184,7 +184,7 @@ app 新增 `usage_view.rs`：`UsageState`（范围、指标、点进来的那一
 - `UsageFilter { project: Option<String>, cli: bool, sdk: bool, bg: bool, model: Option<String> }`。session 的类型由 `LedgerSession` 的 `is_background` / `entrypoint` 按 `session.rs::SessionKind::of` 的后三条规则得出（抽一个不依赖 `SessionSummary` 的函数供两边用）。模型比较用 `pricing::normalize` 之后的 id。
 - `UsageRange { Today, Yesterday, Days7, Days30, ThisMonth, LastMonth, Custom, Day }`（`Serialize` / `Deserialize`）；`Span { from_ms: i64, until_ms: i64 }`。
   - `range_span(range, today: NaiveDate, custom, day, tz) -> Span`：都用 `day_start_ms`；Custom 没选过时是本月 1 日到今天。
-  - `previous_span(range, span, now_ms, tz) -> Option<Span>`：按 PRD 的表；需要按钟点截断时，上界是「上一段最后一天的起点 + （现在 − 今天的起点），向上取到整点」。
+  - `previous_span(range, span, now_ms, tz) -> Option<Span>`：按 PRD 的表；需要按钟点截断时，在上一段对应的用量日上构造与现在相同的本地钟点（凌晨 0–3 点属于次日），按本地钟点向上取整到小时，再裁剪到上一段结束边界。上一月较短时先构造完整候选时刻再裁剪，不能先把日期压到月末。遇到不存在的钟点取下一有效时刻；重复钟点取较早一次，与 `day_start_ms` 一致。
 - `Metric { Cost, In, Out, HitRate }`。
 - `summary(&self, span, filter) -> Summary`：`Summary { totals: Totals, by_model: Vec<(String, Totals)>, by_project: Vec<ProjectUsage>, by_session: Vec<SessionTotal>, sessions: usize, projects: usize }`，各组按费用降序。`ProjectUsage { key, name, totals, sessions }`，`name` 取路径最后一段，没有路径用 key；`SessionTotal { id, title, project_name, totals }`。
 - `series(&self, slots: &[Span], filter) -> Vec<SlotTotals>`：每个槽位的合计和按「颜色槽」的分组。颜色槽由 `model_slot(model) -> usize` 决定：`claude-opus-5-5` → 0，`claude-sonnet-5-5` → 1，`claude-fable-5-2` → 2，`claude-haiku-5-5` → 3，其余 → 4。
@@ -309,3 +309,5 @@ app：
 - **图表区**：`render_chart_panel` 画标题、副标题、指标切换和图例，下面是 `id("usage-chart")`、高 236 的空容器（`usage_view::CHART_ID` / `CHART_H`），账本为空时里面写 `No usage recorded yet`。副标题：单天是 `Today, Mon Nov 16` / `Fri Nov 13`，多天是 `Last 30 days · click a bar to see its hours`。
 - 颜色按上文加在 `style.rs`，另加 `token_web_search()`、`share_bar()`（项目占比条）和 `warn()`（未计价的提示）；涨跌直接用 `cost_up()` / `cost_down()`，没有另加 `delta_up` / `delta_down`。
 - 测试名与上文一致；另加 `usage_view.rs` 的 `the_cost_breakdown_and_the_model_table_add_up_to_the_cost`（6）、`sessions_are_listed_by_their_cost_inside_the_range`、`a_range_s_bounds_follow_the_four_o_clock_days`（4），`keyboard_tests.rs` 的 `the_view_its_range_and_the_chart_metric_come_back_after_a_restart`（2）、`todays_cost_in_the_status_bar_opens_todays_usage_and_matches_it`（1、3）、`open_usage_in_the_menu_bar_menu_shows_the_window_on_usage`（1）、`a_hidden_usage_view_scans_every_ten_minutes`。点击类入口（工具栏切换、状态栏 Today、项目行）在测试里直接调点击处理函数调用的方法，没有模拟点击：gpui-kit 的 `click(id)` 只认登记了 `.test_support()` 的元素。
+
+2026-11-16 审阅返工：修复较短上一月的终点裁剪及 DST 下同钟点比较。聚合在范围判定后才计价；空序列直接返回，有序非重叠槽位按二分定位（O(H log S)），任意重叠/乱序槽位保留原语义。沿用同一真实账本副本、release 构建和 1,000 次测量，30 天 summary + series 平均 **1.326 ms**（之前 2.512 ms）；证据 `tmp/2026-11-12-usage-stats/usage-p3-core/r1-bench.log`。公开 API 不变。

@@ -66,7 +66,7 @@ impl UsageData {
 }
 
 const HOUR: i64 = 3_600_000;
-use chrono::Datelike;
+use chrono::{Datelike, Timelike};
 use serde::{Serialize, Deserialize};
 use crate::{model::LedgerSession, session::SessionKind};
 
@@ -109,10 +109,21 @@ pub fn previous_span<T: TimeZone>(range: UsageRange, span: Span, now_ms: i64, tz
     let today=usage_day(now_ms,tz);
     let partial=range!=UsageRange::Day && first<=today && today<end;
     let until_ms=if partial {
-        let last=(previous_first+Duration::days(days-1)).min(previous_end-Duration::days(1));
-        let elapsed=now_ms-day_start_ms(today,tz);
-        let boundary=day_start_ms(last,tz)+elapsed;
-        ((boundary.div_euclid(HOUR)+i64::from(boundary.rem_euclid(HOUR)!=0))*HOUR).min(day_start_ms(last+Duration::days(1),tz))
+        let last = previous_first + Duration::days(days - 1);
+        let now = tz.timestamp_millis_opt(now_ms).single().expect("valid timestamp").naive_local();
+        let date = last + Duration::days(i64::from(now.hour() < DAY_START_HOUR));
+        let mut local = date.and_time(now.time());
+        // Round the wall clock before resolving DST. Missing hours advance to the next
+        // existing instant; repeated hours use their earliest occurrence, like day_start_ms.
+        if local.minute() != 0 || local.second() != 0 || local.nanosecond() != 0 {
+            local = local.with_minute(0).unwrap().with_second(0).unwrap()
+                .with_nanosecond(0).unwrap() + Duration::hours(1);
+        }
+        while tz.from_local_datetime(&local).earliest().is_none() {
+            local += Duration::seconds(1);
+        }
+        tz.from_local_datetime(&local).earliest().unwrap().timestamp_millis()
+            .min(day_start_ms(previous_end, tz))
     } else { day_start_ms(previous_end,tz) };
     Some(Span{from_ms:day_start_ms(previous_first,tz),until_ms})
 }
@@ -161,21 +172,20 @@ fn project_name(s:&LedgerSession)->String {
     s.project_path.as_deref().and_then(|p|std::path::Path::new(p).file_name()).and_then(|p|p.to_str()).unwrap_or(&s.project_key).to_string()
 }
 impl UsageData {
-    fn visit(&self,filter:&UsageFilter,price:impl Fn(&str)->Option<ModelPrice>,mut visit:impl FnMut(&LedgerSession,&crate::model::HourlyUsage,Totals)) {
+    fn visit(&self,filter:&UsageFilter,mut visit:impl FnMut(&LedgerSession,&crate::model::HourlyUsage)) {
         for s in self.sessions.values().filter(|s|filter.accepts(&s.session)) {
             for h in &s.hours {
                 if filter.model.as_deref().is_some_and(|m|pricing::normalize(m)!=pricing::normalize(&h.model)) {continue;}
-                let p=price(&h.model);
-                let t=Totals{responses:h.responses,tokens:h.tokens,cost:p.map(|p|pricing::price_tokens(&p,&h.tokens,h.fast,h.long_prompt)).unwrap_or_default(),unpriced_responses:if p.is_none(){h.responses}else{0}};
-                visit(&s.session,h,t);
+                visit(&s.session,h);
             }
         }
     }
     pub fn summary(&self,span:Span,filter:&UsageFilter)->Summary {self.summary_with(span,filter,pricing::price)}
     pub fn summary_with(&self,span:Span,filter:&UsageFilter,price:impl Fn(&str)->Option<ModelPrice>)->Summary {
         let mut result=Summary::default(); let mut models=BTreeMap::<String,Totals>::new(); let mut projects=BTreeMap::<String,ProjectUsage>::new(); let mut sessions=BTreeMap::<String,SessionTotal>::new();
-        self.visit(filter,price,|s,h,t| {
+        self.visit(filter,|s,h| {
             if !span.contains_hour(h.hour) || h.responses==0 {return;}
+            let t = hour_totals(h, &price);
             result.totals.add(&t); models.entry(pricing::normalize(&h.model).into()).or_default().add(&t);
             let fresh=!sessions.contains_key(&s.id);
             sessions.entry(s.id.clone()).or_insert_with(||SessionTotal{id:s.id.clone(),title:s.title.clone(),project_name:project_name(s),totals:Totals::default()}).totals.add(&t);
@@ -190,7 +200,31 @@ impl UsageData {
     pub fn series(&self,slots:&[Span],filter:&UsageFilter)->Vec<SlotTotals> {self.series_with(slots,filter,pricing::price)}
     pub fn series_with(&self,slots:&[Span],filter:&UsageFilter,price:impl Fn(&str)->Option<ModelPrice>)->Vec<SlotTotals> {
         let mut result=vec![SlotTotals::default();slots.len()];
-        self.visit(filter,price,|_,h,t| {for (s,r) in slots.iter().zip(&mut result) {if s.contains_hour(h.hour) {r.totals.add(&t);r.by_model[model_slot(&h.model)].add(&t);}}});result
+        if slots.is_empty() { return result; }
+        // Standard chart slots are sorted and disjoint. Retain the original semantics
+        // for callers supplying overlapping or unordered intervals.
+        let ordered = slots.iter().all(|s| s.from_ms <= s.until_ms)
+            && slots.windows(2).all(|w| w[0].until_ms <= w[1].from_ms);
+        self.visit(filter, |_, h| {
+            if ordered {
+                let i = slots.partition_point(|s| s.until_ms.div_euclid(HOUR) <= h.hour);
+                if slots.get(i).is_some_and(|s| s.contains_hour(h.hour)) {
+                    let t = hour_totals(h, &price);
+                    result[i].totals.add(&t);
+                    result[i].by_model[model_slot(&h.model)].add(&t);
+                }
+            } else {
+                let mut total = None;
+                for (slot, out) in slots.iter().zip(&mut result) {
+                    if slot.contains_hour(h.hour) {
+                        let t = total.get_or_insert_with(|| hour_totals(h, &price));
+                        out.totals.add(t);
+                        out.by_model[model_slot(&h.model)].add(t);
+                    }
+                }
+            }
+        });
+        result
     }
     pub fn project_entries(&self)->Vec<ProjectEntry> {
         let mut entries=BTreeMap::<String,ProjectEntry>::new();
@@ -199,5 +233,15 @@ impl UsageData {
     }
     pub fn model_entries(&self)->Vec<(String,u64)> {
         let mut entries=BTreeMap::new(); for h in self.sessions.values().flat_map(|s|&s.hours).filter(|h|h.responses>0) {*entries.entry(pricing::normalize(&h.model).to_string()).or_default()+=h.responses;} entries.into_iter().collect()
+    }
+}
+
+fn hour_totals(h: &crate::model::HourlyUsage, price: &impl Fn(&str) -> Option<ModelPrice>) -> Totals {
+    let p = price(&h.model);
+    Totals {
+        responses: h.responses,
+        tokens: h.tokens,
+        cost: p.map(|p| pricing::price_tokens(&p, &h.tokens, h.fast, h.long_prompt)).unwrap_or_default(),
+        unpriced_responses: if p.is_none() { h.responses } else { 0 },
     }
 }

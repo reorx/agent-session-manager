@@ -166,3 +166,50 @@ fn real_ledger_aggregation_timings() {
     for _ in 0..1000 {std::hint::black_box(data.summary(span,&UsageFilter::default()));std::hint::black_box(data.series(&slots,&UsageFilter::default()));}
     println!("sessions={} buckets={} summary+30day_series_mean_ms={:.3}",data.sessions.len(),data.sessions.values().map(|s|s.hours.len()).sum::<usize>(),start.elapsed().as_secs_f64());
 }
+
+#[test]
+fn short_previous_month_clips_the_whole_instant() {
+    let tz=FixedOffset::east_opt(28800).unwrap();
+    for (now,end) in [
+        ("2026-03-31T15:53:00+08:00","2026-03-01T04:00:00+08:00"),
+        ("2026-03-29T04:00:00+08:00","2026-03-01T04:00:00+08:00"),
+        ("2026-03-28T15:53:00+08:00","2026-02-28T16:00:00+08:00"),
+        ("2024-03-30T04:00:00+08:00","2024-03-01T04:00:00+08:00"),
+        ("2024-03-29T15:53:00+08:00","2024-02-29T16:00:00+08:00"),
+        ("2026-05-31T15:53:00+08:00","2026-05-01T04:00:00+08:00"),
+    ] {
+        let span=range_span(UsageRange::ThisMonth,usage_day(ms(now),&tz),None,None,&tz);
+        assert_eq!(previous_span(UsageRange::ThisMonth,span,ms(now),&tz).unwrap().until_ms,ms(end),"{now}");
+    }
+}
+
+#[test]
+fn previous_period_uses_wall_clock_across_dst() {
+    let tz=chrono_tz::America::New_York;
+    for (now,end) in [
+        ("2026-03-08T03:30:00-04:00","2026-03-07T04:00:00-05:00"),
+        ("2026-11-01T02:30:00-05:00","2026-10-31T03:00:00-04:00"),
+        ("2026-03-09T02:30:00-04:00","2026-03-08T03:00:00-04:00"),
+        ("2026-11-02T01:00:00-05:00","2026-11-01T01:00:00-04:00"),
+    ] {
+        let span=range_span(UsageRange::Today,usage_day(ms(now),&tz),None,None,&tz);
+        assert_eq!(previous_span(UsageRange::Today,span,ms(now),&tz).unwrap().until_ms,ms(end),"{now}");
+    }
+}
+
+#[test]
+fn aggregation_prices_only_matching_hours_and_preserves_arbitrary_slots() {
+    use std::cell::Cell;
+    let mut data=UsageData::default();
+    data.apply((0..300).map(|h|session(&h.to_string(),h,"claude-opus-5-5")).collect());
+    let count=Cell::new(0);
+    let price=|m:&str|{count.set(count.get()+1);pricing::price(m)};
+    let span=Span{from_ms:3600000,until_ms:7200000};
+    data.summary_with(span,&UsageFilter::default(),price); assert_eq!(count.replace(0),1);
+    data.series_with(&[],&UsageFilter::default(),price); assert_eq!(count.replace(0),0);
+    for slots in [vec![span],vec![Span{from_ms:0,until_ms:7200000},span],vec![span,Span{from_ms:0,until_ms:7200000}],vec![span,Span{from_ms:10800000,until_ms:14400000}]] {
+        let series=data.series_with(&slots,&UsageFilter::default(),price);
+        assert!(count.replace(0)<=2);
+        for (slot,total) in slots.iter().zip(series) {assert_eq!(total.totals,data.summary(*slot,&UsageFilter::default()).totals);}
+    }
+}

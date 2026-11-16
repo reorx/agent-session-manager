@@ -71,3 +71,20 @@ Cargo integration test 的当前目录在 crate 内，性能测试的账本路�
 
 - [Usage 视图计划](../plans/2026-11-16-usage-stats/usage-view.md) — 依据与实测回填。
 - [数据层设计](../docs/data-layer-design.md) — 更新现状入口。
+
+## 协调者摘要（usage-p3-core-r1）
+
+- 修复审阅 R1、R2、R3，公开 API 不变，未改 app。
+- R1：先构造完整候选终点，再裁剪到上一段结束；覆盖普通年/闰年二月、30 天月、04:00 和刚好末日的部分比较。
+- R2：按本地钟点比较，凌晨归目标用量日的次日；本地整点向上取整，不存在时刻推进到下一有效时刻，重复时刻取较早一次。spec Tech Design 同步纠正。
+- R3：范围外不计价、空 slots 直接返回；标准图表槽位二分定位，重叠和乱序槽位保持原语义，匹配多个槽位只计价一次。
+- 修改前 3 个新增回归测试均失败，修改后 usage 16 passed / 1 ignored，证据 `r1-red.log`、`r1-usage.log`。
+- 同一真实账本副本 3,361 sessions / 5,510 桶，release 30 日 summary + series 1,000 次平均 **1.326 ms**，此前 2.512 ms。
+- 证据目录沿用 `tmp/2026-11-12-usage-stats/usage-p3-core/`，性能输出 `r1-bench.log`。
+- 提交：本节与代码、测试、spec 同一提交，hash 见最终回复。
+- 交给协调者：可复审 R1–R3；app 无需适配。GUI 未验证，沿用独立验收任务。
+- 踩过的坑：技术方案里的「经过时长」不等于 DST 下的同一本地钟点，已同步更正文档。
+
+- 最终 core 全套：380 passed / 0 failed / 7 ignored（`r1-core.log`）。
+
+- 最终 app 全套：202 passed / 0 failed / 2 ignored（`r1-app.log`）。
