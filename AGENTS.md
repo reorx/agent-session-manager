@@ -10,7 +10,9 @@ M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监�
 
 asm skill 与 CLI（`kb/plans/2026-11-15-asm-skill-and-cli/`）的 P1 找会话已完成（2026-11-17）：面向 agent 的 `search` / `session` / `projects`、`transcript` 按范围读、`skills/asm/`，真实数据与 skill 端到端验收都已通过。
 
-进行中：缓存失效判定（`kb/plans/2026-11-16-cache-break-accuracy.md`，第 2 步起在写代码，记录在 `tmp/2026-11-16-cache-break-accuracy/`）。它签收后再拆 asm P2（缓存检查），协调记录在 `tmp/2026-11-14-asm-skill-cli/status.md`。
+缓存失效判定（`kb/plans/2026-11-16-cache-break-accuracy.md`）已完成（2026-11-17）：用量按 `iterations` 计费、按祖先调用比较、请求记录给出原因、分段时长，60 天真实数据与参考脚本逐条一致，记录在 `tmp/2026-11-16-cache-break-accuracy/`。
+
+接下来：asm P2（缓存检查，`kb/plans/2026-11-15-asm-skill-and-cli/cache-health.md`），协调记录在 `tmp/2026-11-14-asm-skill-cli/status.md`。
 
 ## 结构
 

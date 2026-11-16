@@ -307,8 +307,10 @@ tags:
   - 跑 `asm cost --compare`、`make test`、`make parity`；
   - 账本：在真实账本的副本上（`sqlite3 "file:…/usage-ledger.sqlite?mode=ro" ".backup <副本>"`，`ASM_DB` 指向副本旁的索引，不碰真实数据目录）重建一次，核对这 4 次响应的新值和 Usage 视图的变化；
   - 用 `asm session-old ID --conversation` 的 `read_ms` 在最大的几个会话上量读取耗时，与改动前比较。
-- [ ] 7. **截图**：选一个第一处失效是新原因的会话，跑 `ASM_AUTOPLAY_CACHE_SESSION=<id> make screenshot-cost`，看回合卡说明行。
-- [ ] 8. **收尾**：更新文档、known-issues，写 session 总结，commit。
+- [x] 7. **截图**：选一个第一处失效是新原因的会话，跑 `ASM_AUTOPLAY_CACHE_SESSION=<id> make screenshot-cost`，看回合卡说明行。
+  - 2026-11-17 完成（代码 `51ec13f`）：6 个会话（sign_in、request_settings、request_unchanged、system_or_tools、earlier_messages 各 1 个，加 1 个 idle），说明行的原因、写入量、空闲时长与审计 TSV 一致，文案与 `cache_note` 测试逐字一致，无截断。分段时长没有可单独截图的样本，由单元测试覆盖。报告与截图在 `tmp/2026-11-16-cache-break-accuracy/cbreak-shots/`、`screenshots/`。
+- [x] 8. **收尾**：更新文档、known-issues，写 session 总结，commit。
+  - 2026-11-17 完成：文档与 known-issues 在 `fd96f4d`（`kb/sessions/2026-11-17-cache-break-wrap.md`）；各步总结在 `kb/sessions/2026-11-17-cache-break-{iter,tracker,audit}.md`。
 
 ### 测试与验证
 
