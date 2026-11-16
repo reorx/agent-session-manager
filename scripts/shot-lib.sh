@@ -1,5 +1,5 @@
-# Helpers shared by the screenshot scripts that run on a COPY of the data
-# (screenshot-usage.sh, screenshot-resident.sh). Source it after setting HERE (scripts/) and
+# Helpers shared by the screenshot scripts that run on a COPY of the data (screenshot-usage.sh,
+# screenshot-resident.sh, screenshot-usage-view.sh). Source it after setting HERE (scripts/) and
 # ROOT (the repo); it sets WINID (SHOT_WINID replaces it: test-screenshot-resident.sh's stand-in).
 
 WINID="${SHOT_WINID:-$ROOT/tmp/winid}"
@@ -17,6 +17,17 @@ require_copies() {
     echo "ASM_CLAUDE_DIR is the real ~/.claude: use a copy" >&2
     exit 2
   fi
+}
+
+# Refuses to go on unless ASM_DB is set and outside the real data directory; the transcripts
+# (ASM_CLAUDE_DIR) may be the real ones, which the app only reads (screenshot-usage-view.sh).
+require_db_copy() {
+  local real_data="$HOME/Library/Application Support/dev.reorx.AgentSessionManager"
+  if [ -z "${ASM_DB:-}" ]; then
+    echo "set ASM_DB to a copy (e.g. under tmp/): $1" >&2
+    exit 2
+  fi
+  case "$ASM_DB" in "$real_data"/*) echo "ASM_DB is in the real data directory: $ASM_DB" >&2; exit 2 ;; esac
 }
 
 # Compiles scripts/winid.swift into tmp/winid when it is missing or older than the source.

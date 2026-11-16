@@ -63,6 +63,9 @@ screenshot-detail: build ## Tour the Conversation tab (turn cards, steps, search
 screenshot-usage: build ## Usage acceptance on a copy (needs ASM_DB and ASM_CLAUDE_DIR): capture Today after start-up, Scan for Changes (USAGE_BEFORE_SCAN runs first) and Rebuild Index, then hold USAGE_HOLD seconds; types and clicks nothing
 	scripts/screenshot-usage.sh "$(BIN)" "$(SHOT_DIR)"
 
+screenshot-usage-view: build ## Tour the Usage view on a copy (needs ASM_DB outside the real data directory; the usage ledger next to it): Today by the hour, a pinned tooltip, Yesterday, 30 days in Cost / In / Hit rate, a day's tooltip, drill into it and back, a project, This month, 900 px wide, back to Sessions, an empty range, then an empty data directory; checks each step, exits 1 when one failed. ASM_USAGE_VIEW_STEPS=a,b runs only those steps
+	scripts/screenshot-usage-view.sh "$(BIN)" "$(SHOT_DIR)"
+
 screenshot-resident: build ## Menu bar acceptance on a copy (needs ASM_DB and ASM_CLAUDE_DIR): shown, closed into the menu bar, its menu, Scan Now while hidden (RESIDENT_BEFORE_SCAN runs first), the menu again, Open Sessions, Quit through the menu; exits 1 when a check failed. RESIDENT_HOLD=<s> keeps it hidden to watch the timer, ASM_RESIDENT_QUERY=<q> searches first, RESIDENT_FRONT_APP=<app> puts it in front first, RESIDENT_CLICK=1 clicks Scan Now and Open Sessions for real, RESIDENT_NOTICE=1 shows the first-close notice; options in the script
 	scripts/screenshot-resident.sh "$(BIN)" "$(SHOT_DIR)"
 
@@ -134,5 +137,5 @@ release-local: build-release ## The whole release chain locally into dist/releas
 clean: ## Remove this project's build artifacts only (the target dir is shared across projects)
 	cargo clean -p $(APP) -p $(CORE)
 
-.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search screenshot-detail screenshot-cost screenshot-usage bin asm transcript-reader build-transcript-reader parity icon clean \
+.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search screenshot-detail screenshot-cost screenshot-usage screenshot-usage-view bin asm transcript-reader build-transcript-reader parity icon clean \
 	build-release notarize-app dmg notarize appcast test-release release-local

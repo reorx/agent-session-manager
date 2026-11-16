@@ -56,7 +56,7 @@ tags:
 | 真实数据读取与索引 | ✅ | 解析器、增量 SQLite 索引、history.jsonl 补位、损坏自动重建；界面热启动约 200ms 出表（5488 行），冷索引 1.27GB 约 4s 且表格流式填充；Index 菜单可手动 Scan / Rebuild |
 | 实时更新 | 🟡 定时 | 2026-11-16：应用开着时自动增量扫描（窗口回到前台、每 10 分钟，30 秒内只扫一次），有变化才刷新表格；关掉窗口后照常扫描；不监听文件。用量账本见 `../plans/2026-11-16-usage-stats/usage-ledger.md` |
 | 常驻菜单栏 | ✅ | 2026-11-16：启动后菜单栏有一个图标和今天的费用（取整到美元）；红色按钮和 `⌘W` 只隐藏窗口，Dock 图标随之消失，应用留在菜单栏继续扫描；菜单里有今天的费用、In / Out、上次扫描的时刻，Open Sessions、Open Usage、Scan Now、Quit；从 Finder 重开时窗口和关掉前一样。见 4.10 与 `../plans/2026-11-16-usage-stats/menubar-resident.md` |
-| Usage 视图 | 🟡 图表待做 | 2026-11-16：`⌃2` / 工具栏 `Usage` 切到用量视图：范围（Today / Yesterday / 7 / 30 days / This month / Last month / Custom），和会话表共用 Project / Kind / Model 过滤；五张指标卡（Cost / In / Out / Calls / Sessions，与上一段时间对比）、钱花在哪（按 token 种类）、按模型、按项目（点一行按项目过滤）、费用最高的 session；Usage 开着时每分钟扫描一次。按小时 / 按天的柱状图还是空白区域，点柱子看某一天待图表一起做。见 4.11 与 `../plans/2026-11-16-usage-stats/usage-view.md` |
+| Usage 视图 | ✅ | 2026-11-16：`⌃2` / 工具栏 `Usage` 切到用量视图：范围（Today / Yesterday / 7 / 30 days / This month / Last month / Custom），和会话表共用 Project / Kind / Model 过滤；五张指标卡（Cost / In / Out / Calls / Sessions，与上一段时间对比）；按小时 / 按天的柱状图（按模型堆叠，可切 Cost / In / Out / Hit rate，按小时时叠前一天的虚线框和现在线，按天时有 7 日均线，悬停看明细，点一天的柱子看它的小时）；钱花在哪（按 token 种类）、按模型、按项目（点一行按项目过滤）、费用最高的 session；Usage 开着时每分钟扫描一次。从 Usage 跳到会话（第 4 期）未做。见 4.11 与 `../plans/2026-11-16-usage-stats/usage-view.md` |
 | 快捷键与菜单 | ✅ 部分 | 退出、`cmd-w` 关窗（留在菜单栏）、`ctrl-1` / `ctrl-2` 切换会话表与 Usage、折叠详情面板、`cmd-f`、`cmd-1..4`、`cmd-shift-r` 重建索引、`cmd-c` / `cmd-shift-c` 复制 ID / resume 命令、`[` / `]` 按回合跳转；File 菜单的 Close Window；View 菜单可显示 / 隐藏没有 prompt 的空 session；表格行有右键菜单。启动后和窗口重开后焦点在表格上，不需要先点击就能用快捷键 |
 | 设置与状态持久化 | ✅ 视图状态 / ⬜ 设置页 | 项目与时间过滤（含自定义区间）、排序、Preview 模式、空 session 开关、详情面板开合、选中行存 `state.json`，下次启动恢复 |
 | 安装与自动更新 | ✅ | 2026-10-28 发布 1.0：Homebrew cask（`brew install --cask reorx/tap/agent-session-manager`）或 GitHub Release 的 dmg，Apple Silicon、macOS 14 起，Developer ID 签名并经 Apple 公证；应用内每天检查一次更新（也可菜单 Check for Updates…），用户确认后安装并重启；About 面板显示版本。见 `release.md` |
@@ -200,13 +200,13 @@ M2 新增：`cmd-shift-r` 重建索引，Index 菜单（Scan for Changes / Rebui
 - **退出**：`⌘Q`、应用菜单的 Quit、菜单栏菜单的 Quit；Sparkle 的 Install and Relaunch、注销、关机照常退出。
 - 用 Thaw / Bartender 这类菜单栏管理工具时，新的菜单栏项可能先被收进隐藏区，要在工具里把它拖到可见区。
 
-### 4.11 Usage 视图 🟡 图表待做
+### 4.11 Usage 视图 ✅
 
 和会话表共用一个窗口：工具栏最左边是 `Sessions | Usage` 切换（`⌃1` / `⌃2`、View 菜单同样），重启后停在上次的视图。数据来自用量账本，记录文件删了也还在。口径见 `../plans/2026-11-16-usage-stats/index.md`（按 API 响应时间归日，一天从 4:00 开始）。
 
 - **工具栏**：范围按钮 Today / Yesterday / 7 days / 30 days / This month / Last month，`Custom…` 后出现日期区间选择器；Project / Kind / Model 三个下拉和会话表是同一组过滤（Project 列出账本里所有有调用的项目，包括被隐藏的；Kind 只有 CLI / SDK / BG；Model 按调用数列出账本里所有模型）；右侧是数据的时刻 `as of 16:44`（扫描中是 `scanning…`）和立即扫描按钮。
 - **指标卡**：Cost（与上一段时间对比，今天比的是昨天的同一时刻之前；有没有价格的模型时注明多少调用未计价）、In（缓存读取占比、缓存写入、未缓存）、Out（对比）、Calls（每次调用的平均费用）、Sessions（涉及的项目数）。
-- **图表**：按小时（单天）或按天（多天），可切 Cost / In / Out / Hit rate，图例按模型着色；本期只有标题、指标切换和图例，绘图区域留白，点柱子看那一天的小时（Escape 返回）随图表一起做。
+- **图表**：单天按小时、多天按天，可切 Cost / In / Out / Hit rate。柱子按模型堆叠（Opus / Sonnet / Fable / Haiku 各一色，其余合成「Earlier models」），Hit rate 是一条折线。按小时时每根柱子后面有前一天同一小时的虚线框，今天的图上有一条标着时刻的现在线、还没到的小时空着；按天时有一条 7 日移动平均虚线（右侧标最后的值），周末的日期标签变浅，今天的柱子上标 `so far`。鼠标停在柱子上弹出明细：各模型的值、合计、In · 命中率 · Out、调用数，按小时时加前一天同一小时，按天时加 7 日均值和「Click to see its hours」。点一天的柱子看那一天的小时，工具栏出现这一天的标签，点它的 ✕ 或按 Escape 回到原来的范围。图例只列出图上有的模型和虚线。
 - **下方四块**：钱花在哪（Cache read / Cache write / Output / Uncached input 的费用和占比，有 web search 时加一行）、按模型、按项目（前 7 个，其余合成一行；点一行按项目过滤，再点取消）、费用最高的 6 个 session（范围内的费用）。窗口窄于 960 时两列改成上下排列，整个视图可纵向滚动。
 - **空状态**：账本还没有数据时卡片是 `—`、图的位置写 `No usage recorded yet`；范围内没有调用时卡片是 `$0.00` / `0`，各表写 `No calls in this range`；账本不可用时整个视图只有一句说明。
 - **刷新**：切到 Usage 时扫一次（30 秒内扫过就不扫），Usage 开着时每分钟扫一次，回到会话表或关掉窗口后恢复每 10 分钟；没有变化时界面不动。Usage 显示期间搜索结果不重跑，回到会话表时才补上。

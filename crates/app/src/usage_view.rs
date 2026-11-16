@@ -6,7 +6,10 @@
 //! is built again only when one of those changed (`AppRoot::refresh_usage`); render only reads its
 //! strings. The chart (`usage_chart.rs`) draws `UsageSnapshot::chart`.
 
-use std::time::Instant;
+use std::cell::Cell;
+use std::rc::Rc;
+use std::path::PathBuf;
+use std::time::{Duration as StdDuration, Instant};
 
 use agent_session_core::format::fmt_tokens;
 use agent_session_core::model::Tokens;
@@ -27,6 +30,7 @@ use crate::resident::thousands;
 use crate::settings::ViewState;
 use crate::style::{self, FluentBuilder};
 use crate::toolbar::{segment, segmented};
+use crate::usage_chart::UsageChart;
 
 /// The key context of the view: `escape` leaves a day clicked on the chart there.
 pub const KEY_CONTEXT: &str = "Usage";
@@ -49,8 +53,11 @@ pub struct UsageState {
     pub date_picker: Entity<DatePickerState>,
     /// Built by `AppRoot::refresh_usage` while the view is shown; render only reads it.
     pub snapshot: UsageSnapshot,
-    /// The chart bar under the mouse (`usage_chart.rs`).
+    /// A chart bar whose tooltip shows without the mouse (autoplay's hover step); the mouse
+    /// brings its own tooltip (`usage_chart.rs`).
     pub hover: Option<usize>,
+    /// Where the chart was last painted: a click in the chart area finds its bar from it.
+    pub chart_bounds: Rc<Cell<Bounds<Pixels>>>,
     /// The Project dropdown: every project with calls in the ledger, transcripts gone or not.
     pub projects: Vec<ProjectEntry>,
     /// The Model dropdown: every model in the ledger and its calls, most calls first.
@@ -73,6 +80,7 @@ impl UsageState {
             date_picker,
             snapshot: UsageSnapshot::default(),
             hover: None,
+            chart_bounds: Rc::default(),
             projects: Vec::new(),
             models: Vec::new(),
             kind_counts: [0; 3],
@@ -260,7 +268,6 @@ impl ChartSlot {
     }
 
     /// The stacked segments in `metric`, bottom first (zero for a hit rate: it is a line).
-    #[allow(dead_code)] // for usage_chart.rs
     pub fn stack(&self, metric: Metric) -> [f64; 5] {
         match metric {
             Metric::HitRate => [0.0; 5],
@@ -364,8 +371,7 @@ pub fn fmt_delta(cur: f64, prev: f64) -> Option<(String, Tone)> {
     Some((format!("{} {:.1}%", if change >= 0.0 { "▲" } else { "▼" }, change.abs() * 100.0), tone))
 }
 
-/// A value of `metric` as the chart's tooltip and legend write it.
-#[allow(dead_code)] // for usage_chart.rs
+/// A value of `metric` as the chart's tooltip and labels write it.
 pub fn fmt_metric(metric: Metric, value: f64) -> String {
     match metric {
         Metric::Cost => fmt_money(value),
@@ -649,7 +655,14 @@ fn chart<T: TimeZone>(data: &UsageData, q: &UsageQuery, span: Span, now_ms: i64,
                 legend.push(Legend::Model(slot, MODEL_SLOT_NAMES[slot].into()));
             }
         }
-        legend.push(if hourly { Legend::Ghost } else { Legend::Average });
+        // the dashed box and line only when there is one to see
+        let ghost = slots.iter().any(|s| s.ghost.is_some_and(|g| g.responses > 0));
+        let average = slots.iter().any(|s| s.average.is_some_and(|a| a > 0.0));
+        if hourly && ghost {
+            legend.push(Legend::Ghost);
+        } else if !hourly && average {
+            legend.push(Legend::Average);
+        }
     }
     let now = (hourly && first == today)
         .then(|| slots.iter().position(|s| s.span.from_ms <= now_ms && now_ms < s.span.until_ms))
@@ -925,15 +938,24 @@ impl AppRoot {
             metrics = metrics.child(segment(("usage-metric", ix), label, u.metric == metric).on_click(cx.listener(move |this, _, _, cx| this.set_usage_metric(metric, cx))));
         }
         let no_usage = u.snapshot.empty == Empty::NoUsage;
-        let area = div().id(CHART_ID).w_full().h(px(CHART_H)).flex_none().when(no_usage, |el| {
-            el.flex().items_center().justify_center().text_size(px(12.5)).text_color(style::muted()).child(Empty::NoUsage.message())
-        });
+        let area = div().id(CHART_ID).w_full().h(px(CHART_H)).flex_none();
+        let area = if no_usage {
+            area.flex().items_center().justify_center().text_size(px(12.5)).text_color(style::muted()).child(Empty::NoUsage.message())
+        } else {
+            // a click on a day's bar opens its hours (`Plot` has no click of its own)
+            area.child(div().size_full().font_family(style::mono(cx)).child(UsageChart::new(chart.clone(), u.chart_bounds.clone(), u.hover)))
+                .when(!chart.hourly, |el| el.cursor_pointer())
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, cx| {
+                    this.click_chart(e.position, cx);
+                }))
+        };
         panel()
             .border_b_1()
             .border_color(style::hairline())
             .child(
                 h_flex()
                     .w_full()
+                    .flex_wrap()
                     .gap(px(10.))
                     .items_center()
                     .mb(px(10.))
@@ -1101,7 +1123,7 @@ fn render_legend(legend: &[Legend]) -> Div {
         let (mark, name): (Div, SharedString) = match entry {
             Legend::Model(slot, name) => (swatch(style::model_color(*slot)), name.clone()),
             Legend::Ghost => (div().size(px(9.)).rounded(px(2.)).border_1().border_dashed().border_color(style::chart_ghost()), "day before".into()),
-            Legend::Average => (div().w(px(14.)).h(px(0.)).border_t_2().border_dashed().border_color(style::chart_ghost()), "7-day average".into()),
+            Legend::Average => (div().w(px(14.)).h(px(0.)).border_t_2().border_dashed().border_color(style::chart_average()), "7-day average".into()),
             Legend::HitRate => (div().w(px(14.)).h(px(2.)).bg(style::model_color(0)), "hit rate".into()),
         };
         row = row.child(h_flex().gap(px(5.)).items_center().child(mark).child(name));
@@ -1209,8 +1231,176 @@ fn usage_kind_counts(data: &UsageData) -> [usize; 3] {
     counts
 }
 
+/// The steps of the Usage view's autoplay (`ASM_USAGE_VIEW_AUTOPLAY`), in order.
+pub const AUTOPLAY_STEPS: [&str; 14] =
+    ["today", "today-hover", "yesterday", "d30", "d30-in", "d30-hit", "d30-hover", "drill", "back", "project", "month", "narrow", "sessions", "empty"];
+/// The window width of the autoplay's `narrow` step: under `NARROW_W`, so the panels stack.
+const AUTOPLAY_NARROW_W: f32 = 900.;
+
+impl AppRoot {
+    /// Scripted tour of the Usage view for screenshots (`make screenshot-usage-view`). Once the
+    /// start-up scan and the ledger are in, it runs `AUTOPLAY_STEPS` (or the ones named in
+    /// `ASM_USAGE_VIEW_STEPS`, comma-separated) and prints `autoplay-usage-view: <step> · <state>`
+    /// after each has been drawn (`<step> skipped · <why>` when it cannot be done, `done` at the
+    /// end). Then it holds that view until the script drops `<step>.shot` into `gate` (at most
+    /// 30 s), so a slow capture never sees the next step:
+    /// - `today` / `yesterday` / `d30` / `month`: Usage, that range, the chart in Cost;
+    /// - `today-hover` / `d30-hover`: the tooltip of the highest bar (by the hour: of now, when
+    ///   today has no calls yet) shown without the mouse (`UsageState::hover`), in Cost;
+    /// - `d30-in` / `d30-hit`: the chart in In / Hit rate;
+    /// - `drill` / `back`: into the most expensive of the 30 days, and out again (Escape's path);
+    /// - `project`: the Project filter set to the most expensive project of the 30 days;
+    /// - `narrow`: the window 900 px wide (the panels stack), its width restored after the capture;
+    /// - `sessions`: the session table, the project still set;
+    /// - `empty`: Usage, no project, a Custom range in 2000 (no calls).
+    pub(crate) fn usage_view_autoplay(&self, gate: PathBuf, window: &Window, cx: &mut Context<Self>) -> Task<()> {
+        let only: Option<Vec<String>> = std::env::var("ASM_USAGE_VIEW_STEPS").ok().filter(|v| !v.trim().is_empty()).map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
+        let settled = |this: &AppRoot| !this.scan_in_flight && !this.today_label.is_empty() && matches!(this.index_status, crate::IndexStatus::Idle(_));
+        cx.spawn_in(window, async move |this, cx| {
+            if !crate::autoplay_wait(&this, cx, 1200, |this, _| settled(this)).await {
+                println!("autoplay-usage-view: never settled");
+                return;
+            }
+            for step in AUTOPLAY_STEPS.iter().filter(|s| only.as_ref().is_none_or(|only| only.iter().any(|o| o == *s))) {
+                let Ok(done) = this.update_in(cx, |this, window, cx| this.usage_autoplay_step(step, window, cx)) else { return };
+                let restore = match done {
+                    Ok(restore) => restore,
+                    Err(why) => {
+                        println!("autoplay-usage-view: {step} skipped · {why}");
+                        continue;
+                    }
+                };
+                // the scan that showing the view starts, then a frame or two
+                crate::autoplay_wait(&this, cx, 300, |this, _| settled(this)).await;
+                cx.background_executor().timer(StdDuration::from_millis(700)).await;
+                let Ok(state) = this.update_in(cx, |this, window, cx| this.usage_autoplay_state(window, cx)) else { return };
+                println!("autoplay-usage-view: {step} · {state}");
+                let shot = gate.join(format!("{step}.shot"));
+                for _ in 0..300 {
+                    if shot.exists() {
+                        break;
+                    }
+                    cx.background_executor().timer(StdDuration::from_millis(100)).await;
+                }
+                if let Some(size) = restore {
+                    this.update_in(cx, |_, window, _| window.resize(size)).ok();
+                    cx.background_executor().timer(StdDuration::from_millis(300)).await;
+                }
+            }
+            println!("autoplay-usage-view: done");
+        })
+    }
+
+    /// One step of `usage_view_autoplay`; `Ok(Some(size))` when the window is to get that size
+    /// back after the capture.
+    fn usage_autoplay_step(&mut self, step: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<Option<Size<Pixels>>, String> {
+        let range = |this: &mut Self, range: UsageRange, cx: &mut Context<Self>| {
+            this.usage_view.hover = None;
+            if this.usage_view.metric != Metric::Cost {
+                this.set_usage_metric(Metric::Cost, cx);
+            }
+            this.set_usage_range(range, cx);
+        };
+        match step {
+            "today" => {
+                self.set_view(MainView::Usage, window, cx);
+                range(self, UsageRange::Today, cx);
+            }
+            "yesterday" => range(self, UsageRange::Yesterday, cx),
+            "d30" => range(self, UsageRange::Days30, cx),
+            "month" => range(self, UsageRange::ThisMonth, cx),
+            "d30-in" => self.set_usage_metric(Metric::In, cx),
+            "d30-hit" => self.set_usage_metric(Metric::HitRate, cx),
+            "today-hover" | "d30-hover" => {
+                self.set_usage_metric(Metric::Cost, cx);
+                let chart = &self.usage_view.snapshot.chart;
+                let highest = chart
+                    .slots
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.totals.responses > 0)
+                    .max_by(|a, b| a.1.totals.cost.total().total_cmp(&b.1.totals.cost.total()))
+                    .map(|(ix, _)| ix);
+                let ix = highest.or_else(|| chart.now.as_ref().map(|(at, _)| *at as usize)).ok_or("no bar with calls")?;
+                self.usage_view.hover = Some(ix);
+                cx.notify();
+            }
+            "drill" => {
+                let chart = &self.usage_view.snapshot.chart;
+                let day = chart.slots.iter().filter(|s| s.totals.responses > 0).max_by(|a, b| a.totals.cost.total().total_cmp(&b.totals.cost.total())).map(|s| s.day);
+                let day = day.ok_or("no day with calls")?;
+                if !self.drill_into_day(day, cx) {
+                    return Err(format!("{day} did not open"));
+                }
+            }
+            "back" => self.leave_day(cx),
+            "project" => {
+                let key = self.usage_view.snapshot.projects.first().and_then(|p| p.key.clone()).ok_or("no project with calls")?;
+                self.set_project(Some(key), cx);
+            }
+            "narrow" => {
+                let size = window.viewport_size();
+                window.resize(gpui_kit::size(px(AUTOPLAY_NARROW_W), size.height));
+                return Ok(Some(size));
+            }
+            "sessions" => self.set_view(MainView::Sessions, window, cx),
+            "empty" => {
+                self.set_view(MainView::Usage, window, cx);
+                self.set_project(None, cx);
+                let (first, last) = (NaiveDate::from_ymd_opt(2000, 1, 3).expect("a date"), NaiveDate::from_ymd_opt(2000, 1, 9).expect("a date"));
+                // as a pick in the date picker would, which then shows it
+                self.usage_view.date_picker.update(cx, |picker, cx| picker.set_date((first, last), window, cx));
+                self.set_usage_custom_range(first, last, cx);
+            }
+            other => return Err(format!("unknown step {other}")),
+        }
+        Ok(None)
+    }
+
+    /// What the autoplay prints after a step: `view=usage range=Last 30 days metric=cost
+    /// chart=daily/30 hover=12 empty=no calls=1234 cost=$… project=<key> width=1440 today=Today $…
+    /// today-matches=yes`. The script checks these.
+    fn usage_autoplay_state(&self, window: &Window, cx: &App) -> String {
+        let u = &self.usage_view;
+        let snap = &u.snapshot;
+        let chart = &snap.chart;
+        let empty = match snap.empty {
+            Empty::No => "no",
+            Empty::NoUsage => "no-usage",
+            Empty::NoCalls => "no-calls",
+            Empty::Unavailable => "unavailable",
+        };
+        let metric = match u.metric {
+            Metric::Cost => "cost",
+            Metric::In => "in",
+            Metric::Out => "out",
+            Metric::HitRate => "hit",
+        };
+        // Today's cost card against the status bar's Today: the same number (acceptance 3)
+        let today_matches = match (u.range, self.usage_available) {
+            (UsageRange::Today, Some(true)) if u.day.is_none() && self.current_filter(cx).project.is_none() => {
+                if (snap.totals.cost.total() - self.today.cost.total()).abs() < 0.005 { "yes" } else { "no" }
+            }
+            _ => "-",
+        };
+        format!(
+            "view={} range={} metric={metric} chart={}/{} hover={} empty={empty} calls={} cost={} project={} width={:.0} {} today-matches={today_matches}",
+            if self.view == MainView::Usage { "usage" } else { "sessions" },
+            snap.range_label,
+            if chart.hourly { "hourly" } else { "daily" },
+            chart.slots.len(),
+            u.hover.map_or("-".to_string(), |ix| ix.to_string()),
+            snap.totals.responses,
+            fmt_money(snap.totals.cost.total()),
+            self.current_filter(cx).project.as_deref().unwrap_or("-"),
+            window.viewport_size().width.as_f32(),
+            self.today_label,
+        )
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use core::prelude::v1::test;
 
     use agent_session_core::model::{HourlyUsage, LedgerSession, SessionUsage};
@@ -1219,27 +1409,27 @@ mod tests {
 
     use super::*;
 
-    fn tz() -> FixedOffset {
+    pub(crate) fn tz() -> FixedOffset {
         FixedOffset::east_opt(8 * 3600).unwrap()
     }
 
-    fn ms(s: &str) -> i64 {
+    pub(crate) fn ms(s: &str) -> i64 {
         chrono::DateTime::parse_from_rfc3339(s).unwrap().timestamp_millis()
     }
 
-    fn day(s: &str) -> NaiveDate {
+    pub(crate) fn day(s: &str) -> NaiveDate {
         s.parse().unwrap()
     }
 
     /// 15:53 on Monday 2026-11-16, +8.
-    fn now() -> i64 {
+    pub(crate) fn now() -> i64 {
         ms("2026-11-16T15:53:00+08:00")
     }
 
     /// Tokens of one call in these tests.
     const CALL: Tokens = Tokens { input: 1_000, cache_write_5m: 0, cache_write_1h: 2_000, cache_read: 47_000, output: 500, web_search: 0 };
 
-    fn times(n: u64) -> Tokens {
+    pub(crate) fn times(n: u64) -> Tokens {
         Tokens {
             input: CALL.input * n,
             cache_write_5m: 0,
@@ -1251,12 +1441,12 @@ mod tests {
     }
 
     /// What `n` calls of `model` cost.
-    fn cost(model: &str, n: u64) -> f64 {
+    pub(crate) fn cost(model: &str, n: u64) -> f64 {
         price_tokens(&price(model).unwrap(), &times(n), false, false).total()
     }
 
     /// `n` calls of `model` by `session` (of project `/p/<project>`) in the hour starting at `at`.
-    struct Calls<'a> {
+    pub(crate) struct Calls<'a> {
         session: &'a str,
         project: &'a str,
         at: &'a str,
@@ -1264,7 +1454,7 @@ mod tests {
         n: u64,
     }
 
-    fn ledger(calls: &[Calls]) -> UsageData {
+    pub(crate) fn ledger(calls: &[Calls]) -> UsageData {
         let mut sessions: std::collections::BTreeMap<String, SessionUsage> = Default::default();
         for c in calls {
             let s = sessions.entry(c.session.to_string()).or_insert_with(|| SessionUsage {
@@ -1284,20 +1474,20 @@ mod tests {
         data
     }
 
-    fn query(range: UsageRange) -> UsageQuery {
+    pub(crate) fn query(range: UsageRange) -> UsageQuery {
         UsageQuery { range, custom: None, day: None, metric: Metric::Cost, filter: UsageFilter::default() }
     }
 
-    fn build(data: &UsageData, q: &UsageQuery) -> UsageSnapshot {
+    pub(crate) fn build(data: &UsageData, q: &UsageQuery) -> UsageSnapshot {
         UsageSnapshot::build(data, Some(true), q, now(), day("2026-11-16"), &tz())
     }
 
-    const OPUS: &str = "claude-opus-5-5";
-    const SONNET: &str = "claude-sonnet-5-5";
+    pub(crate) const OPUS: &str = "claude-opus-5-5";
+    pub(crate) const SONNET: &str = "claude-sonnet-5-5";
 
     /// Today: 3 Opus calls in s1 (alpha) at 09:00, 1 Sonnet call in s2 (beta) at 15:00.
     /// Yesterday: 2 Opus calls at 10:00 and 2 at 17:00 (after the hour of now).
-    fn two_days() -> UsageData {
+    pub(crate) fn two_days() -> UsageData {
         ledger(&[
             Calls { session: "s1", project: "alpha", at: "2026-11-16T09:00:00+08:00", model: OPUS, n: 3 },
             Calls { session: "s2", project: "beta", at: "2026-11-16T15:00:00+08:00", model: SONNET, n: 1 },

@@ -223,6 +223,23 @@ GPUI 和 gpui-component 都没有菜单栏项（`NSStatusItem`）的封装，`gp
 
 菜单栏管理工具（这台机器上是 Thaw）会把新的菜单栏项收进隐藏区（屏幕外），要用户在工具里拖到可见区；脚本不能指望点到它（见下文 `screenshot-resident`）。
 
+## 自绘图表：`Plot`
+
+Usage 视图的图（`usage_chart.rs`）没有用 gpui-component 现成的 `BarChart` / `LineChart`：它们画不了按模型堆叠、前一天的虚线框、移动平均和现在线叠在一张图上。做法是实现 `gpui_kit::component::plot::Plot`，在 `paint` 里用库提供的零件（`Grid`、`PlotAxis`、`shape::Bar`、`shape::Line`、`label::PlotLabel`）和 `window.paint_quad` / `paint_path` 自己画。
+
+| 要点 | 做法 |
+|---|---|
+| 成为元素 | `#[derive(IntoPlot)]`，作用域里要有 `Plot` trait。生成的元素样式是 `size: full`，填满父元素：高度由外面的 `div().h(..)` 定（`CHART_H`） |
+| 几何 | 全部放进纯函数 `Layout`（绘图区、每根柱子的位置、`slot_at(x)`、`y(value)`），先写测试（`usage_chart::tests`）。画图、提示框、点击都只经它算位置，三者不会对不上是哪根柱子 |
+| `PlotAxis` | `x_label` / `y_label` 在调用那一刻按已设的 `x(..)` / `y(..)` 和 `*_label_side` 算位置：先 `.x(..)`、`.y(..)`、`.y_label_side(..)`，再给标签，否则标签不显示或在错的一边。`y_axis(false)` 只画标签不画竖线 |
+| 字体 | `PlotLabel` / `AxisText` 用当前文本样式的字体（`window.text_style()`），也就是外层 div 的 `font_family`；`font_weight` 被忽略，要加粗只能换字体。图的外层 div 设等宽字体，提示框自己设回无衬线 |
+| 堆叠柱 | `shape::Bar` 一次画一组同样圆角的矩形：顶段（圆角 3px）和其余段（方角，段间留 1.5px）分两次画 |
+| 虚线 | 线用 `PathBuilder::stroke(..).dash_array(&[..])`（均线、现在线）；虚线框用 `outline(bounds, color, BorderStyle::Dashed).corner_radii(..)` 画一个 quad，比拼四条虚线路径简单，圆角也对 |
+| 悬停提示框 | `id()` 返回 `Some` 才开启。`tooltip_state(position, ..)` 的 `position` 相对图的左上角，返回 `TooltipState`（这里用 `slot_at` 定柱子）；`tooltip(..)` 返回任意元素，`plot::tooltip::Tooltip` 是带浮层定位的外壳，`CrossLine::band(..)` 给所在列加浅色底。悬停状态存在元素内部（每帧按 hitbox 重算），外面读不到也设不了 |
+| 不靠鼠标显示提示框 | `Plot::prepaint` 可以返回额外的子元素：鼠标不在图上时，在这里按 `UsageState::hover` 造一个提示框并 `prepaint_as_root`，autoplay 截图和测试就能「钉住」某根柱子的提示框 |
+| 点击 | `Plot` 没有点击回调。图外面套一层 div，`on_mouse_down` 交给 `AppRoot::click_chart`；图在 `paint` 里把自己的 bounds 写进 `Rc<Cell<Bounds<Pixels>>>`（`UsageState::chart_bounds`），点击处理用同一个 `Layout::slot_at` 换算。Plot 的 hitbox 是 `HitboxBehavior::Normal`，不挡外层 div 的鼠标事件 |
+| 测试 | 无界面测试窗口照常布局和绘制：`VisualTestContext::simulate_mouse_move` / `simulate_click` 按坐标操作（坐标从记下的 bounds 算），提示框用 `.debug_selector(..)` 标记、`cx.debug_bounds(..)` 查有没有画出来（`keyboard_tests.rs` 的两个 chart 测试） |
+
 ## 测试
 
 界面层的测试大部分是纯逻辑，不起窗口：行转换、过滤、排序、视图状态读写、store 与搜索线程的事件序列。
@@ -259,7 +276,7 @@ use core::prelude::v1::test;
 
 ## 脚本化交互与截图
 
-现有七个截图脚本（`scripts/screenshot*.sh`），每一张截的是什么写在各脚本的文件头和步骤注释里：
+现有八个截图脚本（`scripts/screenshot*.sh`），每一张截的是什么写在各脚本的文件头和步骤注释里：
 
 | 命令 | 驱动方式 | 截图 | 可调变量 |
 |---|---|---|---|
@@ -269,9 +286,10 @@ use core::prelude::v1::test;
 | `make screenshot-resident` | `ASM_RESIDENT_AUTOPLAY=<gate 目录>` | 12 张：启动后（窗口、菜单栏条、Dock 条）、关窗后（菜单栏条、Dock 条）、弹出的菜单（按窗口 ID 截菜单本身）、窗口隐藏时 Scan Now 之后（菜单栏条、Dock 条）、再弹一次菜单、Open Sessions 之后（窗口、菜单栏条、Dock 条）；最后经菜单 Quit。每一步都有判定，任何一项不过退出码就是 1（见下文） | 必须设 `ASM_DB`、`ASM_CLAUDE_DIR`（指向副本）；`RESIDENT_BEFORE_SCAN` 是隐藏期间、Scan Now 之前执行的命令；`RESIDENT_HOLD=<秒>` 让窗口在那之后多隐藏一段时间，期间打出每次 `auto-scan: timer` 的时刻和间隔（超过 660 秒算不过），并加截 `2b-held-*`；`ASM_RESIDENT_QUERY=<词>` 在第一张截图前先搜索，1-shown 与 6-open 应显示同样的搜索词、结果和选中；`RESIDENT_FRONT_APP=<应用>`（如 Finder）在第二次弹菜单和 Open Sessions 之前用 `open -a` 把它带到前台；`RESIDENT_CLICK=1` 用 cliclick 真点菜单里的 Scan Now 和 Open Sessions；`RESIDENT_REOPEN=<.app>` 改用 `open` 再次打开应用（Finder 的路径，二进制必须是这个 .app 里的）；`RESIDENT_NOTICE=1` 从没显示过第一次关窗说明的状态开始；`ASM_RESIDENT_MENU_AT=x,y` 改菜单弹出的位置；`RESIDENT_SETTLE` 截图前等待的秒数 |
 | `make screenshot-cost` | `ASM_COST_AUTOPLAY=1` | 最多 9 张：Opus 5.5 按 Ctx 降序比 Fable 5.2、换 Sonnet 5.5、有其他模型的 session 比 Haiku 5.5、按 In 排序、按 Hit% 升序、指定 session 的 Conversation 顶部与第一处缓存失效、它的 Metadata、隐藏 Started / Size / Kind | `ASM_AUTOPLAY_CACHE_SESSION` 指定看缓存失效的 session，没给就跳过那 3 张 |
 | `make screenshot-usage` | `ASM_USAGE_AUTOPLAY=<gate 目录>` | 3–4 张：启动后用量读完（`1-ready`）、Scan for Changes 之后、Rebuild Index 之后，可选再开着 `USAGE_HOLD` 秒后一张；每张的状态栏都有 `Today $X` | 必须设 `ASM_DB`、`ASM_CLAUDE_DIR`（指向副本，否则拒绝运行）；`USAGE_BEFORE_SCAN` 是扫描前执行的 shell 命令，`USAGE_HOLD` 是最后开着的秒数 |
+| `make screenshot-usage-view` | `ASM_USAGE_VIEW_AUTOPLAY=<gate 目录>` | 15 张：Today 按小时、钉住最贵一小时的提示框、Yesterday、30 天（Cost / In / Hit rate）、最贵一天的提示框、点进那一天、回到 30 天、选最贵的项目、This month、900px 窄窗口、切回 Sessions（项目过滤保留）、没有调用的范围；再用空数据目录启动一次截「No usage recorded yet」。每步都有判定，不过退出码是 1 | 必须设 `ASM_DB`（不能在真实数据目录，账本是它旁边的 `usage-ledger.sqlite`）；`ASM_CLAUDE_DIR` 可以是真实的（只读）或副本；`ASM_USAGE_VIEW_STEPS=a,b` 只跑其中几步（名字见脚本头）；`USAGE_VIEW_FRESH=0` 不做第二次启动 |
 | `make screenshot-clicks` | cliclick 真点击，启动三次 | 22 张：1–11 是下拉菜单、过滤、Preview 模式、选中行和 Metadata tab，12–15 是自定义区间与日期选择器，16–20 是回合卡（第二次启动，预选 `5f6eea99`），21–22 是普通行和 History 行的右键菜单（第三次启动） | 坐标写在脚本里；换机器要换一个不再变化的 session 并重量坐标 |
 
-脚本都先 `wake-screen`，再用 `caffeinate` 让显示器在 app 运行期间不睡（中途睡着会截不到图）。除 `screenshot-usage` 外都跑在真实索引上，用一次性的 `state.json` 保证从默认视图开始，按窗口 ID 截图，输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）。autoplay 的步骤做不了时会跳过不截。`screenshot-cost.sh` 用 `winid --pid` 只找自己启动的窗口，用户开着的同名 app 不受影响。
+脚本都先 `wake-screen`，再用 `caffeinate` 让显示器在 app 运行期间不睡（中途睡着会截不到图）。除 `screenshot-usage`、`screenshot-resident`、`screenshot-usage-view` 外都跑在真实索引上，用一次性的 `state.json` 保证从默认视图开始，按窗口 ID 截图，输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）。autoplay 的步骤做不了时会跳过不截。`screenshot-cost.sh` 用 `winid --pid` 只找自己启动的窗口，用户开着的同名 app 不受影响。
 
 需要自动驱动界面时，优先加环境变量控制的内置脚本（`ASM_SPIKE_AUTOPLAY=1`：启动后滚动并选中，再切过滤、排序和 tab）。它走的是和用户操作相同的代码路径，不依赖屏幕坐标。
 
@@ -283,13 +301,15 @@ use core::prelude::v1::test;
 
 **判定。** 脚本按日志和窗口列表判每一步：标题等于状态栏 Today 取整；关窗后 `hidden=true`、窗口不在屏幕上、进程还在；扫描结束且（有 `RESIDENT_BEFORE_SCAN` 时）Today 变了；截菜单时菜单还开着、窗口列表里有本进程的菜单窗口（`winid --menu`）；重开后 `shown=true active=true table-focused=true`；Quit 后进程退出且退出码为 0。不过的项当场打印 `FAILED: …` 并继续收集证据，最后列出全部并退出 1；没法继续的（窗口没出现、关窗没隐藏、应用中途退出）立即退出 1。从第一次关窗说明退出，只有日志有 `window: first-close notice · 立即退出` 且退出码为 0 才算通过。判定本身有行为测试：`make test-screenshot-resident`（`scripts/test-screenshot-resident.sh`，用假的应用、`winid`、`screencapture`、`cliclick` 演 13 种情形，不起 GUI、不截屏、不点击）。
 
-**点击前的确认。** `RESIDENT_CLICK=1` 每次点击前用 `winid --at x,y`（`CGWindowListCopyWindowInfo` 里点击处最上层的窗口）确认那里是本进程的窗口（菜单），并且日志表明菜单开着；否则不点，记一项不过，改用程序化的选择。菜单项的位置是相对菜单左上角量出来的（Open Sessions +100、Scan Now +124）。
+**点击前的确认。** `RESIDENT_CLICK=1` 每次点击前用 `winid --at x,y`（`CGWindowListCopyWindowInfo` 里点击处最上层的窗口）确认那里是本进程的窗口（菜单），并且日志表明菜单开着；否则不点，记一项不过，改用程序化的选择。菜单项的位置是相对菜单左上角量出来的：2026-11-16 加了 Open Usage 后在 `3-menu.png` 上重量，Open Sessions +101、Open Usage +125、Scan Now +148（行中心），脚本用 100 和 148，两次真点击都选中了对的项。菜单再加减项要重量。
 
 **菜单会自己关。** 应用不在前台时程序化弹出的菜单，在前台是游戏时不到一秒就关了（usage-p2-accept：截图里只有菜单下面的窗口），前台是 Finder、终端时开着直到被关。日志 `menu bar: menu closed (open N s)` 给出菜单开了多久，判定会报出当时的前台应用。
 
-需要副本数据的两个脚本（`screenshot-usage.sh`、`screenshot-resident.sh`）共用 `scripts/shot-lib.sh`：拒绝真实数据目录（`require_copies`）、编译 `winid`（`SHOT_WINID` 可换成测试用的替身）、按窗口 ID 或屏幕区域截图。两个脚本都按进程 ID 找窗口（`winid - --pid N`）：.app 里的窗口所有者名是 `Agent Session Manager`，不是二进制名，按名字找会找不到。`screencapture` 偶尔报 `could not create image from window` / `from rect`，同一张图稍后再截就成功，所以这两个截图函数失败时重试一次。`winid --screen` 打印主屏的宽高（点），用来截菜单栏条和 Dock 条（Dock 位置读 `defaults read com.apple.dock orientation`）。
+需要副本数据的三个脚本（`screenshot-usage.sh`、`screenshot-resident.sh`、`screenshot-usage-view.sh`）共用 `scripts/shot-lib.sh`：拒绝真实数据目录（`require_copies` 要求索引和记录目录都是副本；`require_db_copy` 只要求索引不在真实数据目录，Usage 视图只读记录文件）、编译 `winid`（`SHOT_WINID` 可换成测试用的替身）、按窗口 ID 或屏幕区域截图。两个脚本都按进程 ID 找窗口（`winid - --pid N`）：.app 里的窗口所有者名是 `Agent Session Manager`，不是二进制名，按名字找会找不到。`screencapture` 偶尔报 `could not create image from window` / `from rect`，同一张图稍后再截就成功，所以这两个截图函数失败时重试一次。`winid --screen` 打印主屏的宽高（点），用来截菜单栏条和 Dock 条（Dock 位置读 `defaults read com.apple.dock orientation`）。
 
 **`screenshot-usage` 的步骤由文件驱动。** 用量验收要在两步之间改数据（删掉一半记录文件），所以 autoplay 不按固定间隔走：用量读完打 `autoplay-usage: ready · Today $X`，然后等 gate 目录里出现 `scan` 文件才做 Scan for Changes，扫描结束、表格重读后打 `autoplay-usage: scanned · …`；再等 `rebuild` 文件做 Rebuild Index，打 `autoplay-usage: rebuilt · …`。脚本在两步之间执行 `USAGE_BEFORE_SCAN`，然后 `touch` 对应的文件。之后 app 照常开着，自动扫描的日志行是 `auto-scan:`、`scan (automatic):`、`today:`。它会重建索引，所以脚本要求 `ASM_DB`、`ASM_CLAUDE_DIR` 都指向副本，`ASM_STATE` 默认在输出目录里新建；从 core 的 fixture 复制一份就能跑通全程（2026-11-16 自查过）。挪走记录文件用 `mv` 到别的目录，不必删除。
+
+**`screenshot-usage-view` 是固定顺序的导览，不用 `ASM_USAGE_AUTOPLAY`。** 那个变量的 gate 驱动的是改数据的扫描和重建，`make screenshot-usage` 靠它；Usage 视图的导览只切视图状态，所以另用 `ASM_USAGE_VIEW_AUTOPLAY=<gate 目录>`（`usage_view.rs::usage_view_autoplay`）。每步做完打 `autoplay-usage-view: <step> · view=… range=… metric=… chart=hourly/24|daily/N hover=… empty=no|no-usage|no-calls|unavailable calls=… cost=… project=… width=… <状态栏 Today> today-matches=yes|no|-`，然后等 gate 目录里的 `<step>.shot` 再走下一步（最多 30 秒）；做不了的步骤打 `<step> skipped · 原因`，脚本记一项不过。提示框步骤设的是 `UsageState::hover`（钉住），不动鼠标；窄窗口步骤用 `window.resize` 改到 900px，截完恢复。要看真实数字，把真实账本用只读方式备份到 `ASM_DB` 旁边：`sqlite3 "file:$HOME/Library/Application Support/dev.reorx.AgentSessionManager/usage-ledger.sqlite?immutable=1" ".backup <目录>/usage-ledger.sqlite"`（先确认没有 app 在写，WAL 为空）；今天的记录文件用 `cp -c`（APFS 克隆，不占空间）复制到一个副本目录当 `ASM_CLAUDE_DIR`，扫描就不会碰真实目录。`~/.claude/projects` 可能是符号链接，`find` 要写成 `projects/`。
 
 **脚本里"挑一个最有代表性的"要从当前可见的行里算，不要从全量数据里算。** 真实数据的分布很不均匀，按 session 数挑"最忙的项目"会稳定挑中某个工具批量产生的 history session，截出来的图说明不了任何功能。autoplay 选项目就是从过滤后的索引向量里取的。
 
@@ -331,5 +351,7 @@ use core::prelude::v1::test;
 - `crates/app/src/toolbar.rs` — 下拉菜单、搜索框与开关、搜索的防抖
 - `crates/app/src/detail.rs` — 详情面板的标题与 Metadata，对话的状态（行表、展开 / 折叠、命中位置与停靠）
 - `crates/app/src/turn_cards.rs` — 回合卡的绘制：`list` 的行、刻度的悬停与点击、命中的定位标记
+- `crates/app/src/usage_view.rs` — Usage 视图：`UsageSnapshot`（图的数据 `ChartData`）、各面板、`usage_view_autoplay`
+- `crates/app/src/usage_chart.rs` — Usage 的图：`Layout` 几何、`Plot` 实现、提示框、`click_chart`
 - [GPUI 框架调研](gpui-framework-research.md) — 心智模型、组件目录、选型理由
 - 设计稿链接与界面改版记录：`kb/notes/2026-09-16-design-refactor.md`

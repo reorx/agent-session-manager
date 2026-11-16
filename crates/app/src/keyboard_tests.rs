@@ -1354,6 +1354,84 @@ fn escape_leaves_a_drilled_day(cx: &mut TestAppContext) {
     assert_eq!(h.app.read_with(cx, |app, _| app.usage_view.range), UsageRange::Days7, "nothing more to leave");
 }
 
+/// The chart on screen in the test window: where it was painted and its layout.
+fn chart_on_screen(cx: &mut TestAppContext, h: &Harness) -> (gpui_kit::Bounds<gpui_kit::Pixels>, crate::usage_chart::Layout) {
+    cx.run_until_parked();
+    h.app.read_with(cx, |app, _| {
+        let bounds = app.usage_view.chart_bounds.get();
+        (bounds, crate::usage_chart::Layout::of(bounds, &app.usage_view.snapshot.chart))
+    })
+}
+
+#[gpui_kit::test]
+fn clicking_a_day_s_bar_opens_its_hours_and_other_clicks_do_nothing(cx: &mut TestAppContext) {
+    use agent_session_core::usage::UsageRange;
+    use gpui_kit::{Modifiers, VisualTestContext, point, px};
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    append_response(&h._dir.path().join("claude"), S1, "msg_today", "claude-opus-5", now_ms());
+    h.app.update(cx, |app, cx| app.rescan(false, cx));
+    wait_until(cx, &h, "today's call", |app, _| app.today.responses == 1);
+    press(cx, &h, "ctrl-2");
+    h.app.update(cx, |app, cx| app.set_usage_range(UsageRange::Days7, cx));
+    let (bounds, l) = chart_on_screen(cx, &h);
+    assert!(bounds.size.width > px(100.) && l.slots == 7, "the week was painted");
+    let at = |x: f32, y: f32| point(bounds.origin.x + px(x), bounds.origin.y + px(y));
+    let range = |cx: &mut TestAppContext| h.app.read_with(cx, |app, _| (app.usage_view.range, app.usage_view.day));
+
+    VisualTestContext::from_window(h.window, cx).simulate_click(at(l.center(5), l.bottom() - 2.), Modifiers::none());
+    assert_eq!(range(cx), (UsageRange::Days7, None), "yesterday has no calls: nothing opens");
+    VisualTestContext::from_window(h.window, cx).simulate_click(at(l.left - 20., l.bottom() - 2.), Modifiers::none());
+    assert_eq!(range(cx), (UsageRange::Days7, None), "over the value labels");
+
+    // anywhere in today's column, its bar is short
+    VisualTestContext::from_window(h.window, cx).simulate_click(at(l.center(6), l.top + 4.), Modifiers::none());
+    let today = h.app.read_with(cx, |app, _| app.usage_day);
+    assert_eq!(range(cx), (UsageRange::Day, Some(today)), "today by the hour");
+    let (_, hours) = chart_on_screen(cx, &h);
+    assert_eq!(hours.slots, 24);
+    VisualTestContext::from_window(h.window, cx).simulate_click(at(hours.center(10), hours.bottom() - 2.), Modifiers::none());
+    assert_eq!(range(cx), (UsageRange::Day, Some(today)), "an hour does not open anything");
+    press(cx, &h, "escape");
+    assert_eq!(range(cx), (UsageRange::Days7, None));
+}
+
+#[gpui_kit::test]
+fn a_bar_shows_its_tooltip_under_the_mouse_or_when_pinned(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, VisualTestContext, point, px};
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    press(cx, &h, "ctrl-2");
+    let (first, last) = september();
+    h.app.update(cx, |app, cx| app.set_usage_custom_range(first, last, cx));
+    let (bounds, l) = chart_on_screen(cx, &h);
+    let mut window = VisualTestContext::from_window(h.window, cx);
+    let tooltip = |window: &mut VisualTestContext| {
+        window.run_until_parked();
+        window.debug_bounds(crate::usage_chart::TOOLTIP_SELECTOR)
+    };
+    assert_eq!(tooltip(&mut window), None, "no tooltip until asked");
+
+    // autoplay's hover step: the mouse is elsewhere
+    h.app.update(&mut window, |app, cx| {
+        app.usage_view.hover = Some(3);
+        cx.notify();
+    });
+    assert!(tooltip(&mut window).is_some(), "the pinned bar's tooltip");
+    h.app.update(&mut window, |app, cx| {
+        app.usage_view.hover = None;
+        cx.notify();
+    });
+    assert_eq!(tooltip(&mut window), None);
+
+    // the mouse over a bar, then off the chart
+    window.simulate_mouse_move(point(bounds.origin.x + px(l.center(10)), bounds.origin.y + px(l.bottom() - 4.)), None, Modifiers::none());
+    let shown = tooltip(&mut window).expect("the tooltip under the mouse");
+    assert!(shown.size.width > px(150.));
+    window.simulate_mouse_move(point(bounds.origin.x + px(l.center(10)), bounds.origin.y + bounds.size.height + px(80.)), None, Modifiers::none());
+    assert_eq!(tooltip(&mut window), None, "gone with the mouse");
+}
+
 #[gpui_kit::test]
 fn a_filter_set_in_usage_is_still_set_in_sessions(cx: &mut TestAppContext) {
     use agent_session_core::usage::UsageRange;

@@ -9,7 +9,8 @@
 //! `ASM_COST_AUTOPLAY=1` to tour the Cost tab (`make screenshot-cost`),
 //! `ASM_USAGE_AUTOPLAY=<dir>` to scan and rebuild when files show up in `<dir>` (`make screenshot-usage`),
 //! `ASM_RESIDENT_AUTOPLAY=<dir>` to close, reopen and work the menu bar item's menu the same way
-//! (`make screenshot-resident`);
+//! (`make screenshot-resident`), `ASM_USAGE_VIEW_AUTOPLAY=<dir>` to tour the Usage view, one step
+//! per capture (`make screenshot-usage-view`);
 //! `ASM_CLAUDE_DIR`, `ASM_DB` and `ASM_STATE` point the app at other data.
 //!
 //! While the app is open it scans by itself (`auto_scan`): when its window comes to the front and
@@ -37,6 +38,7 @@ mod table;
 mod toolbar;
 mod turn_cards;
 mod updater;
+mod usage_chart;
 mod usage_view;
 
 use std::path::PathBuf;
@@ -501,6 +503,8 @@ impl AppRoot {
             this._autoplay = Some(this.usage_autoplay(PathBuf::from(gate), window, cx));
         } else if let Some(gate) = std::env::var_os("ASM_RESIDENT_AUTOPLAY").filter(|v| !v.is_empty()) {
             this._autoplay = Some(this.resident_autoplay(PathBuf::from(gate), window, cx));
+        } else if let Some(gate) = std::env::var_os("ASM_USAGE_VIEW_AUTOPLAY").filter(|v| !v.is_empty()) {
+            this._autoplay = Some(this.usage_view_autoplay(PathBuf::from(gate), window, cx));
         }
         this
     }

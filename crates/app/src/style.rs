@@ -319,9 +319,21 @@ pub fn token_input() -> Hsla {
 pub fn token_web_search() -> Hsla {
     hex(0x0e7490)
 }
-/// Usage view: the dashed box of the day before behind an hour's bar, the moving average.
+/// Usage view's chart: the dashed box of the day before behind an hour's bar.
 pub fn chart_ghost() -> Hsla {
     hex(0xa9a9b0)
+}
+/// Usage view's chart: the axis under the bars (the grid lines are `row_border`).
+pub fn chart_axis() -> Hsla {
+    hex(0xd8d8dd)
+}
+/// Usage view's chart: the label of a Saturday or Sunday.
+pub fn chart_weekend() -> Hsla {
+    hex(0xb0b0b6)
+}
+/// Usage view's chart: the dashed 7-day moving average, dark so it reads over every model color.
+pub fn chart_average() -> Hsla {
+    text().opacity(0.75)
 }
 /// Usage view: a project's share bar on its track (`row_border`).
 pub fn share_bar() -> Hsla {

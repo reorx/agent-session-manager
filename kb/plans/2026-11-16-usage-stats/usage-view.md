@@ -311,3 +311,23 @@ app：
 - 测试名与上文一致；另加 `usage_view.rs` 的 `the_cost_breakdown_and_the_model_table_add_up_to_the_cost`（6）、`sessions_are_listed_by_their_cost_inside_the_range`、`a_range_s_bounds_follow_the_four_o_clock_days`（4），`keyboard_tests.rs` 的 `the_view_its_range_and_the_chart_metric_come_back_after_a_restart`（2）、`todays_cost_in_the_status_bar_opens_todays_usage_and_matches_it`（1、3）、`open_usage_in_the_menu_bar_menu_shows_the_window_on_usage`（1）、`a_hidden_usage_view_scans_every_ten_minutes`。点击类入口（工具栏切换、状态栏 Today、项目行）在测试里直接调点击处理函数调用的方法，没有模拟点击：gpui-kit 的 `click(id)` 只认登记了 `.test_support()` 的元素。
 
 2026-11-16 审阅返工：修复较短上一月的终点裁剪及 DST 下同钟点比较。聚合在范围判定后才计价；空序列直接返回，有序非重叠槽位按二分定位（O(H log S)），任意重叠/乱序槽位保留原语义。沿用同一真实账本副本、release 构建和 1,000 次测量，30 天 summary + series 平均 **1.326 ms**（之前 2.512 ms）；证据 `tmp/2026-11-12-usage-stats/usage-p3-core/r1-bench.log`。公开 API 不变。
+
+### 图表与 autoplay 实现与差异（usage-p3-chart，2026-11-16）
+
+实施步骤 7、9 的脚本部分、10 的 `gpui-kit-guide.md` 和 `product-prd.md` 已做；实机验收、`AGENTS.md` 留给协调者。图表不加焦点和保存项，`app-architecture.md` 的两张表不用改。交接见 [P3 chart 总结](../../sessions/2026-11-16-usage-p3-chart.md)。
+
+- **绘制**：`usage_chart.rs` 的 `UsageChart` 自己实现 `Plot`（`#[derive(IntoPlot)]` 可用，不用手写 `Element`），零件是 `Grid`、`PlotAxis`、`shape::Bar`、`shape::Line`、`PlotLabel` 和 `paint_quad` / `paint_path`。几何全在纯函数 `Layout` 里：绘图区左 56、上 22、下 28，右边按小时 20、按天 86（放均线的值）；柱宽是槽宽的 64%，在 3 到 22（小时）/ 26（天）之间。
+- **堆叠**：只有最上一段有 3px 圆角（顶段和其余段分两次 `Bar` 画），段与段之间留 1.5px 白缝，值为 0 的模型不画。风险里担心的「整根同一圆角」这样解决。
+- **前一天的虚线框**：`outline(.., BorderStyle::Dashed)` 画一个圆角 3 的 quad，比柱子宽 3px，在柱子后面；前一天那一小时为 0 时不画。
+- **7 日均线**颜色是 `chart_average()`（正文色 75% 不透明，界面稿的 `#1d1d1f` .75），不是上文颜色表写的 `chart_ghost()`：灰色虚线压在蓝柱上看不清。`chart_ghost()` 只给虚线框。另加 `chart_axis()`（`#d8d8dd`，横轴）和 `chart_weekend()`（`#b0b0b6`，周末的日期标签）。
+- **Hit rate 折线**用 Opus 的蓝（`model_color(0)`）加白心圆点，和视图那一期已有的图例 `hit rate` 一致；界面稿是深灰 `#3a3a40`。纵轴下限由快照按数据算：真实账本 11-01 有 2 次调用、缓存读取都是 0，30 天的 Hit rate 图因此从 0% 开始，是数据如此。
+- **横轴标签**：小时每 3 个标一个（04、07、10…）；天从最后一天往前数，槽宽不够 44pt 时隔几天标一个，所以今天总有标签。今天的标签用正文色（界面稿是粗体，`PlotLabel` 忽略 `font_weight`），周末用 `chart_weekend()`。
+- **今天的柱子**上标 `so far`（界面稿是 `截至 HH:MM`，按上文 PRD 用 `so far`）；现在线是 `accent()` 的 2/2 点线，上方标时刻（`17:16`）。
+- **悬停明细**：标题 `Mon Nov 16 · 09:00–10:00`（小时）、`Fri Nov 13`（天）、`Mon Nov 16 · so far`（今天）；各模型一行（只列有值的，带色块），分隔线，`Total`、`In · hit · Out`、`Calls`，按小时加 `Day before`，按天加 `7-day average`；底部小字：未来的小时 `Not yet`，没有调用 `No calls`，按天且有调用 `Click to see its hours`。界面稿是中文，应用界面是英文。所在列用 `CrossLine::band` 加浅底。
+- **`UsageState::hover` 的含义改成「钉住」**：鼠标悬停的状态在 Plot 元素内部，外面读不到也设不了；`hover` 是 autoplay 和测试钉住的槽位，鼠标不在图上时由 `Plot::prepaint` 画出它的明细。它不存进 `state.json`。
+- **点击**：Plot 没有点击回调，外层 div 的 `on_mouse_down` 交给 `AppRoot::click_chart`，用 `paint` 记下的 bounds（`UsageState::chart_bounds`）和同一个 `Layout::slot_at` 换算；只有按天的图显示手形指针。
+- **图例只列出图上有的虚线**：按小时时前一天没有调用就不列 `day before`，按天时均线全为 0 就不列 `7-day average`（`UsageSnapshot::build`）。范围内没有调用时只剩空坐标轴，不画 0 处的均线和 `7-day avg $0.00`。
+- **图的标题行可以换行**：900pt 宽时图例原先被挤出窗口右边，现在换到第二行。
+- **autoplay 用新变量 `ASM_USAGE_VIEW_AUTOPLAY=<gate 目录>`**，不扩展 `ASM_USAGE_AUTOPLAY`：后者的 gate 驱动改数据的扫描和重建（`make screenshot-usage` 靠它），Usage 视图的导览是固定顺序、只切视图状态。步骤：`today`、`today-hover`、`yesterday`、`d30`、`d30-in`、`d30-hit`、`d30-hover`、`drill`、`back`、`project`、`month`、`narrow`（`window.resize` 到 900 宽，截完恢复）、`sessions`、`empty`（2000-01-03 到 01-09 的 Custom，同时设进日期选择器）；`ASM_USAGE_VIEW_STEPS=a,b` 只跑其中几步。每步打 `autoplay-usage-view: <step> · view=… range=… metric=… chart=… hover=… empty=… calls=… cost=… project=… width=… <状态栏> today-matches=…`，等 gate 里的 `<step>.shot` 再走。脚本是 `scripts/screenshot-usage-view.sh`（`make screenshot-usage-view`），另用空数据目录启动一次截 `No usage recorded yet`；它只要求 `ASM_DB` 是副本（`shot-lib.sh::require_db_copy`）。上文「实机验收」里的 `ASM_USAGE_AUTOPLAY=1` 和 `screenshot-usage.sh` 以此为准。
+- **测试**：`usage_chart.rs` 7 个（上文两个之外，`values_map_onto_the_plot_area_from_the_bottom`、`hours_are_labeled_every_third_and_days_count_back_from_today`、`the_tooltip_of_an_hour_lists_its_models_its_tokens_and_the_day_before`、`the_tooltip_of_a_day_has_the_average_and_says_a_click_opens_it`、`the_legend_lists_the_dashed_marks_only_when_there_are_some`）；`keyboard_tests.rs` 2 个（`clicking_a_day_s_bar_opens_its_hours_and_other_clicks_do_nothing`、`a_bar_shows_its_tooltip_under_the_mouse_or_when_pinned`），用 `VisualTestContext::simulate_click` / `simulate_mouse_move` 按坐标走 GPUI 的鼠标分发，不是直接调方法。
+- **常驻菜单的点击偏移**：加了 Open Usage 后在菜单截图上重量，Open Sessions +101、Open Usage +125、Scan Now +148；`screenshot-resident.sh` 原先推算的 148 是对的，`RESIDENT_CLICK=1` 两次真点击都选中了对的项。
