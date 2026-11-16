@@ -30,7 +30,7 @@ impl AppRoot {
             let confirmed = answer.await == Ok(0);
             this.update_in(cx, |this, window, cx| {
                 if confirmed { this.store.request(StoreRequest::Unfavorite(id)); }
-                this.focus_table(window, cx);
+                this.focus_view(window, cx);
             }).ok();
         }).detach();
     }
@@ -45,7 +45,7 @@ impl AppRoot {
                     Ok(Err(error)) => window.push_notification(format!("{error}"), cx),
                     _ => {}
                 }
-                this.focus_table(window, cx);
+                this.focus_view(window, cx);
             }).ok();
         }).detach();
     }

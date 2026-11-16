@@ -121,7 +121,7 @@ Rebuild
 主窗口有两个视图（`AppRoot::view`，`model.rs` 的 `MainView`）：会话表和 Usage。切换只有一个入口 `AppRoot::set_view`（`⌃1` / `⌃2`、View 菜单、工具栏左端的 `Sessions | Usage`、状态栏的 `Today $…`、菜单栏菜单的 Open Sessions / Open Usage 都走它）。
 
 - **Usage 屏幕上的一切来自一份快照**（`usage_view.rs` 的 `UsageSnapshot`），由纯函数 `UsageSnapshot::build(UsageData, 账本是否可用, 查询, 现在, 用量日, 时区)` 生成，render 只取其中的字符串。快照只在 Usage 显示时重算（`refresh_usage`）：切到 Usage、`roll_day`（收到用量、扫描结束、窗口激活、定时器醒来都会经过它）、过滤变化（`apply_filter`，只在 Project / Kind / Model 变了时）、范围 / 指标 / 点选某天变化。会话表显示时调用它直接返回；内容和上一份相同就不 `notify`，所以没有变化的扫描界面不动。在真实账本副本上重算一次 1.5–4.5ms
-- **过滤与会话表共用**：Project、Kind（CLI / SDK / BG）、Model 就是会话表的那几个，在 Usage 里改了，回到会话表照样生效。隐藏的项目、空 session、收藏、History、会话表的时间范围不影响 Usage（花掉的钱都要算）。Usage 的时间范围是自己的一套（`UsageState::range` / `custom`），和会话表的 Updated 互不影响
+- **过滤与会话表共用**：Project、Kind（CLI / SDK / BG）、Model 就是会话表的那几个，在 Usage 里改了，回到会话表照样生效。Model 存的是去掉日期和 `[1m]` 的名字（`pricing::normalize`，账本就这样记模型），会话行的主模型（`SessionRow::primary_model`）也存成这样，两边才对得上；旧版本存下的带日期的值在比较时同样去掉。隐藏的项目、空 session、收藏、History、会话表的时间范围不影响 Usage（花掉的钱都要算）。Usage 的时间范围是自己的一套（`UsageState::range` / `custom`），和会话表的 Updated 互不影响
 - **Usage 显示时不搜索**：扫描后的整表重读在 Usage 下只记下 `search_stale = Refresh`，在 Usage 里改过滤只记下 `Rerun`（取较重的那个）；回到会话表时 `set_view` 按记下的跑 `refresh_search` 或 `run_search`。原因是 Usage 每分钟扫一次，正则搜索一次可能要几秒，看不见的结果没必要跟着重跑
 - **只属于会话表的动作在 Usage 下直接返回**：Toggle Detail、收藏、Preview 1–4、隐藏项目、显示空 session、命中 / 回合跳转、正则 / 大小写开关。`⌘F` 先切回会话表再聚焦搜索框；Escape 在 Usage 下是 `leave_day`（退出点进去的那一天）
 - **点选某一天**（`drill_into_day`）只在多天的图上、那天有调用时生效，`range` 变成 `Day`，记下来的 `back` 是点之前的范围；Escape 或小标签的 ✕ 调 `leave_day` 回去。保存视图状态时 `Day` 存成 `back`
@@ -209,7 +209,7 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 
 ## 收藏与目录切换
 
-收藏、取消收藏和更换目录都在 store 线程执行，与扫描串行。界面发出 `Favorite`、`Unfavorite` 或 `SetFavoritesDir`，文件操作完成后扫描更新行，再发送完成通知。取消最后一份副本前，界面等待原生确认框；文件选择器和确认框关闭后恢复表格焦点。
+收藏、取消收藏和更换目录都在 store 线程执行，与扫描串行。界面发出 `Favorite`、`Unfavorite` 或 `SetFavoritesDir`，文件操作完成后扫描更新行，再发送完成通知。取消最后一份副本前，界面等待原生确认框；文件选择器和确认框关闭后把焦点还给当前视图。
 
 扫描先发现原目录和收藏目录，再按 session id 去重，收藏始终优先。路径离开本次发现集合后会移除其增量状态；同 id 有另一份胜出时从头重读，避免旧消息或费用重复。所有主文件和 subagent 状态最终只指向胜出的路径。
 
@@ -286,10 +286,10 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 | `cmd-f` | 搜索框（在 Usage 里先切回会话表） |
 | 搜索框里按 Enter 或 Escape | 表格 |
 | 在日期区间选择器里选完区间（或点了快捷项） | 表格；Usage 工具栏的那个选择器还给 Usage 视图 |
-| 导出 TXT 的保存对话框关闭（保存或取消） | 表格 |
+| 导出 TXT 的保存对话框、更换收藏目录的文件选择器、取消最后一份收藏的确认框关闭 | 当前视图（`focus_view`）：更换收藏目录在 Usage 里也能用，那时表格不在屏幕上，焦点给它就等于没有焦点（审阅 R1） |
 | 窗口重新显示，不管关窗前焦点在哪 | Open Sessions：表格；Open Usage：Usage 视图；Finder / Spotlight 再次打开（`ResidentCommand::Reopen`）：关窗前的那个视图 |
 
-新增会拿走焦点的界面（弹出层、对话框）时，关闭后要把焦点还给表格或搜索框。
+新增会拿走焦点的界面（弹出层、对话框）时，关闭后要把焦点还给当前视图（`focus_view`）或搜索框；只在会话表里出现的界面才可以直接给表格。
 
 `ctrl-1` / `ctrl-2` 不绑上下文，搜索框里也能切（`⌘1`–`⌘4` 已是 Preview 模式）。单键快捷键都绑在表格的上下文（`"DataTable"`）上，搜索框里打字不受影响：`n` / `shift-n` 在命中之间跳，`[` / `]` 在卡片之间跳。`[` / `]` 只在详情面板显示、且停在 Conversation tab 时起作用（`AppRoot::step_turn`）：把下一张卡（回合或 AUTO，不含 compact 分隔线）的卡头滚到顶端，`[` 先回到当前卡的开头；到第一张或最后一张不动，不改变展开状态（`DetailState::step_turn`，`keyboard_tests.rs` 的 `brackets_*` 两个测试）。
 

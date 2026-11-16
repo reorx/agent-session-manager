@@ -9,7 +9,7 @@ use agent_session_core::format::{fmt_datetime, fmt_time, fmt_tokens, fmt_usd};
 use agent_session_core::claude::model_catalog::ModelCatalog;
 use agent_session_core::cost::primary_model;
 use agent_session_core::model::{ModelUsage, SessionSummary};
-use agent_session_core::pricing::{context_window, display_name};
+use agent_session_core::pricing::{context_window, display_name, normalize};
 use agent_session_core::session::SessionKind;
 use agent_session_core::usage::{day_start_ms, usage_day};
 use chrono::{Datelike, Days, Local, Months, NaiveDate};
@@ -106,7 +106,8 @@ pub struct SessionRow {
     /// Their share of `input_tokens`: the Hit% column; `None` without any input.
     pub cache_hit: Option<f32>,
     pub cache_hit_fmt: SharedString,
-    /// The model that cost the most (`cost::primary_model`); `None` without any API call.
+    /// The model that cost the most (`cost::primary_model`), without its date or `[1m]`
+    /// (`pricing::normalize`, as the usage ledger names models); `None` without any API call.
     pub primary_model: Option<SharedString>,
     /// API calls grouped by what decides their price, for the Cost tab and the projected total.
     pub model_usage: Vec<ModelUsage>,
@@ -309,7 +310,7 @@ impl SessionRow {
             cache_read_fmt: format_tokens(s.tokens_cache_read, s),
             cache_hit: s.cache_hit_ratio().map(|r| r as f32),
             cache_hit_fmt: format_hit(s),
-            primary_model: primary_model(&s.model_usage).map(|m| SharedString::from(m.to_string())),
+            primary_model: primary_model(&s.model_usage).map(|m| SharedString::from(normalize(m).to_string())),
             model_usage: s.model_usage.clone(),
             unpriced: s.unpriced_models.iter().cloned().collect::<Vec<_>>().join(", ").into(),
             branch: or_none(s.git_branch.as_deref()),
@@ -607,7 +608,8 @@ impl Filter {
         let since_ok = self.since_ms.is_none_or(|since| row.updated_at >= since)
             && self.until_ms.is_none_or(|until| row.updated_at < until);
         let shown = (self.show_empty || row.prompts > 0) && !self.hidden_projects.contains(&row.project_key);
-        let model_ok = self.model.is_none() || row.primary_model == self.model;
+        // a pick saved by an older version may still carry a date
+        let model_ok = self.model.as_deref().is_none_or(|m| row.primary_model.as_deref() == Some(normalize(m)));
         (!self.favorites_only || row.favorite) && project_ok && since_ok && shown && model_ok && self.kinds.contains(row.kind)
     }
 
@@ -1147,6 +1149,22 @@ pub mod tests {
         assert!(!filter.matches(&on("c", vec![usage("claude-opus-5-5", 0, 0, 1), usage("claude-fable-5-1", 0, 0, 1)])), "Fable costs more there");
         assert!(!filter.matches(&on("d", vec![])), "no calls, no model");
         assert!(Filter::default().matches(&on("d", vec![])));
+    }
+
+    /// Usage hands the filter a model without its date or `[1m]` (`pricing::normalize`), and a
+    /// state saved before may hold either: sessions match it whichever way it is written.
+    #[test]
+    fn the_model_filter_matches_a_main_model_with_or_without_its_date_or_window() {
+        let dated = on("a", vec![usage("claude-haiku-4-5-20251001", 0, 0, 1)]);
+        let long = on("b", vec![usage("claude-opus-4-6[1m]", 0, 0, 1)]);
+        for (pick, row) in [("claude-haiku-4-5", &dated), ("claude-haiku-4-5-20251001", &dated), ("claude-opus-4-6", &long), ("claude-opus-4-6[1m]", &long)] {
+            assert!(Filter { model: Some(pick.into()), ..Default::default() }.matches(row), "{pick}");
+        }
+        assert!(!Filter { model: Some("claude-haiku-4-5".into()), ..Default::default() }.matches(&long));
+        // one menu entry a model, named as Usage names it
+        let rows = [dated.clone(), on("c", vec![usage("claude-haiku-4-5", 0, 0, 1)]), long.clone()];
+        let got: Vec<(String, usize)> = model_entries(rows.iter()).iter().map(|e| (e.model.to_string(), e.count)).collect();
+        assert_eq!(got, [("claude-haiku-4-5".to_string(), 2), ("claude-opus-4-6".to_string(), 1)]);
     }
 
     #[test]

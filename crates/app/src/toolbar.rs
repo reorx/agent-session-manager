@@ -14,7 +14,7 @@ use gpui_kit::component::{ActiveTheme, Disableable, Icon, IconName, Sizable, h_f
 use gpui_kit::*;
 
 use crate::model::{DisplayMode, Filter, Kind, MainView, ModelEntry, RangePreset, ScopeSet};
-use crate::usage_view::{RANGE_BUTTONS, fmt_day};
+use crate::usage_view::{RANGE_BUTTONS, fmt_day_in};
 use agent_session_core::pricing::{display_name, normalize};
 use agent_session_core::usage::UsageRange;
 use crate::search::{LABELS, MAX_RESULT_SESSIONS, SearchEvent, SearchMode};
@@ -192,10 +192,11 @@ impl AppRoot {
         self.apply_filter(filter, cx);
     }
 
-    /// Only sessions whose main model is `model` (a model id), or all of them.
+    /// Only sessions whose main model is `model` (a model id), or all of them. Kept without its
+    /// date or `[1m]`: the session table and Usage share it, and Usage names models that way.
     pub fn set_model_filter(&mut self, model: Option<SharedString>, cx: &mut Context<Self>) {
         let mut filter = self.current_filter(cx);
-        filter.model = model;
+        filter.model = model.map(|m| normalize(&m).to_string().into());
         self.apply_filter(filter, cx);
     }
 
@@ -565,7 +566,7 @@ impl AppRoot {
 
     fn model_menu(&self, cx: &Context<Self>) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
         let this = cx.entity().downgrade();
-        let current = self.current_filter(cx).model;
+        let current: Option<SharedString> = self.current_filter(cx).model.map(|m| normalize(&m).to_string().into());
         let mut entries = self.models.clone();
         // a saved pick whose sessions are gone (or not loaded yet) stays listed, so it can be undone
         if let Some(model) = current.as_ref().filter(|m| !entries.iter().any(|e| e.model == **m)) {
@@ -701,9 +702,15 @@ fn date_presets(today: NaiveDate) -> Vec<DateRangePreset> {
     ]
 }
 
+/// The Usage toolbar's Model button, and its `as of` with the refresh button (tests).
+pub const USAGE_MODEL_SELECTOR: &str = "usage-toolbar-model";
+pub const USAGE_END_SELECTOR: &str = "usage-toolbar-end";
+
 impl AppRoot {
     /// The Usage view's toolbar: ranges, `Custom…` (and its picker), Project / Kind / Model, and
-    /// on the right when the data is from and a button that scans now.
+    /// on the right when the data is from and a button that scans now. Too narrow a window for
+    /// one row (1,140 px, 1,330 with the date picker) wraps it onto a second;
+    /// `as of` and the refresh button stay right-aligned on whichever row they land.
     fn render_usage_controls(&self, bar: Div, cx: &mut Context<Self>) -> Div {
         let u = &self.usage_view;
         let filter = self.current_filter(cx);
@@ -714,7 +721,7 @@ impl AppRoot {
         // a day clicked on the chart: its chip, ✕ goes back
         if let (UsageRange::Day, Some(day)) = (u.range, u.day) {
             ranges = ranges.child(
-                segment("usage-day", format!("{} ✕", fmt_day(day)), true)
+                segment("usage-day", format!("{} ✕", fmt_day_in(day, self.usage_day.year())), true)
                     .tooltip(|window, cx| gpui_kit::component::tooltip::Tooltip::new("Back to the range before (Esc)").build(window, cx))
                     .on_click(cx.listener(|this, _, _, cx| this.leave_day(cx))),
             );
@@ -729,7 +736,11 @@ impl AppRoot {
             (false, Some(at)) => format!("as of {}", at.format("%H:%M")).into(),
             (false, None) => "".into(),
         };
-        bar.child(ranges)
+        bar.h_auto()
+            .min_h(px(TOOLBAR_H))
+            .py(px(4.))
+            .flex_wrap()
+            .child(ranges)
             .child(
                 tool_button("usage-custom", custom, cx)
                     .tooltip("Pick the first and last day")
@@ -742,17 +753,22 @@ impl AppRoot {
             .child(separator())
             .child(trigger("usage-project", "Project", project, cx).dropdown_menu(self.usage_project_menu(cx)))
             .child(trigger("usage-kind", "Kind", usage_kind_label(&filter).into(), cx).dropdown_menu(self.usage_kind_menu(cx)))
-            .child(trigger("usage-model", "Model", filter.model.as_ref().map_or_else(|| "All".into(), |m| display_name(m).into()), cx).dropdown_menu(self.usage_model_menu(cx)))
-            .child(div().flex_1())
-            .child(div().flex_none().text_size(px(11.)).text_color(style::muted()).child(as_of))
+            .child(div().debug_selector(|| USAGE_MODEL_SELECTOR.into()).child(trigger("usage-model", "Model", filter.model.as_ref().map_or_else(|| "All".into(), |m| display_name(m).into()), cx).dropdown_menu(self.usage_model_menu(cx))))
             .child(
-                tool_button("usage-rescan", false, cx)
-                    .w(px(26.))
-                    .px(px(0.))
-                    .tooltip("Scan for new calls now")
-                    .child(Icon::new(IconName::RotateCw).size(px(13.)).text_color(style::label()))
-                    .disabled(self.scan_in_flight)
-                    .on_click(cx.listener(|this, _, _, cx| this.rescan(false, cx))),
+                h_flex()
+                    .debug_selector(|| USAGE_END_SELECTOR.into())
+                    .ml_auto()
+                    .gap(px(6.))
+                    .child(div().flex_none().text_size(px(11.)).text_color(style::muted()).child(as_of))
+                    .child(
+                        tool_button("usage-rescan", false, cx)
+                            .w(px(26.))
+                            .px(px(0.))
+                            .tooltip("Scan for new calls now")
+                            .child(Icon::new(IconName::RotateCw).size(px(13.)).text_color(style::label()))
+                            .disabled(self.scan_in_flight)
+                            .on_click(cx.listener(|this, _, _, cx| this.rescan(false, cx))),
+                    ),
             )
     }
 

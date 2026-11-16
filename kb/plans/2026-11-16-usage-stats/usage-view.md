@@ -36,7 +36,7 @@ tags:
 
 **工具栏（Usage 模式）**
 
-从左到右：`Sessions | Usage` 切换，时间范围，自定义范围，Project / Kind / Model 三个下拉，右侧是数据截至的时刻和一个刷新按钮。搜索框、Scope、Updated、Preview 这些会话表专用的控件在 Usage 模式下不显示。
+从左到右：`Sessions | Usage` 切换，时间范围，自定义范围，Project / Kind / Model 三个下拉，右侧是数据截至的时刻和一个刷新按钮。搜索框、Scope、Updated、Preview 这些会话表专用的控件在 Usage 模式下不显示。窗口窄得放不下一行时，工具栏换到第二行，数据时刻和刷新按钮留在所在那一行的最右边，不推出窗口。
 
 - **时间范围**是一排按钮：`Today`、`Yesterday`、`7 days`、`30 days`、`This month`、`Last month`，旁边是 `Custom…`。都按 4:00 分日。`7 days` 是含今天在内的最近 7 个用量日。选 Custom 后出现日期区间选择器（和会话表 Updated 的 Custom 是同一种控件），起止日都包含在内。默认是 Today。
 - **过滤**：Project、Kind、Model 和会话表共用同一份选择，在一边改了，切到另一边还在。
@@ -75,7 +75,7 @@ tags:
 
 **主图**
 
-- 范围是一天（Today、Yesterday、点进来的某一天，或 Custom 只选了一天）时，按小时画 24 根柱子，横轴从 04 到次日 03。每根柱子按模型堆叠。前一天同一小时的总量用虚线框叠在后面作对比。范围是今天时，在当前时刻画一条竖线，标出时刻。
+- 范围是一天（Today、Yesterday、点进来的某一天，或 Custom 只选了一天）时，按小时画 24 根柱子，横轴从 04 到次日 03。每根柱子按模型堆叠。前一天同一钟点的总量用虚线框叠在后面作对比（夏令时那天按钟点对，前一天没有这个钟点就不画）。范围是今天时，在当前时刻画一条竖线，标出时刻。
 - 范围多于一天时，每天一根柱子，按模型堆叠，再画一条 7 日移动平均线（当天及之前 6 天的平均）。今天那根柱子标 `so far`。
 - 图上方可以切指标：`Cost`、`In`、`Out`、`Hit rate`。Hit rate（缓存读取占 In 的比例）画成折线，不堆叠，纵轴不从 0 开始。
 - 悬停在一根柱子上显示明细：时间、各模型的数值、合计、In / 命中率 / Out、调用数，多天时还有 7 日均值，单天时还有前一天同一小时的值。
@@ -316,7 +316,7 @@ app：
 
 实施步骤 7、9 的脚本部分、10 的 `gpui-kit-guide.md` 和 `product-prd.md` 已做；实机验收、`AGENTS.md` 留给协调者。图表不加焦点和保存项，`app-architecture.md` 的两张表不用改。交接见 [P3 chart 总结](../../sessions/2026-11-16-usage-p3-chart.md)。
 
-- **绘制**：`usage_chart.rs` 的 `UsageChart` 自己实现 `Plot`（`#[derive(IntoPlot)]` 可用，不用手写 `Element`），零件是 `Grid`、`PlotAxis`、`shape::Bar`、`shape::Line`、`PlotLabel` 和 `paint_quad` / `paint_path`。几何全在纯函数 `Layout` 里：绘图区左 56、上 22、下 28，右边按小时 20、按天 86（放均线的值）；柱宽是槽宽的 64%，在 3 到 22（小时）/ 26（天）之间。
+- **绘制**：`usage_chart.rs` 的 `UsageChart` 自己实现 `Plot`（`#[derive(IntoPlot)]` 可用，不用手写 `Element`），零件是 `Grid`、`PlotAxis`、`shape::Bar`、`shape::Line`、`PlotLabel` 和 `paint_quad` / `paint_path`。几何全在纯函数 `Layout` 里：绘图区左 56、上 22、下 28，右边按小时 20、按天 86（放均线的值）；柱宽是槽宽的 64%，在 3 到 22（小时）/ 26（天）之间，且不宽过槽（返工 R4，见下）。
 - **堆叠**：只有最上一段有 3px 圆角（顶段和其余段分两次 `Bar` 画），段与段之间留 1.5px 白缝，值为 0 的模型不画。风险里担心的「整根同一圆角」这样解决。
 - **前一天的虚线框**：`outline(.., BorderStyle::Dashed)` 画一个圆角 3 的 quad，比柱子宽 3px，在柱子后面；前一天那一小时为 0 时不画。
 - **7 日均线**颜色是 `chart_average()`（正文色 75% 不透明，界面稿的 `#1d1d1f` .75），不是上文颜色表写的 `chart_ghost()`：灰色虚线压在蓝柱上看不清。`chart_ghost()` 只给虚线框。另加 `chart_axis()`（`#d8d8dd`，横轴）和 `chart_weekend()`（`#b0b0b6`，周末的日期标签）。
@@ -331,3 +331,17 @@ app：
 - **autoplay 用新变量 `ASM_USAGE_VIEW_AUTOPLAY=<gate 目录>`**，不扩展 `ASM_USAGE_AUTOPLAY`：后者的 gate 驱动改数据的扫描和重建（`make screenshot-usage` 靠它），Usage 视图的导览是固定顺序、只切视图状态。步骤：`today`、`today-hover`、`yesterday`、`d30`、`d30-in`、`d30-hit`、`d30-hover`、`drill`、`back`、`project`、`month`、`narrow`（`window.resize` 到 900 宽，截完恢复）、`sessions`、`empty`（2000-01-03 到 01-09 的 Custom，同时设进日期选择器）；`ASM_USAGE_VIEW_STEPS=a,b` 只跑其中几步。每步打 `autoplay-usage-view: <step> · view=… range=… metric=… chart=… hover=… empty=… calls=… cost=… project=… width=… <状态栏> today-matches=…`，等 gate 里的 `<step>.shot` 再走。脚本是 `scripts/screenshot-usage-view.sh`（`make screenshot-usage-view`），另用空数据目录启动一次截 `No usage recorded yet`；它只要求 `ASM_DB` 是副本（`shot-lib.sh::require_db_copy`）。上文「实机验收」里的 `ASM_USAGE_AUTOPLAY=1` 和 `screenshot-usage.sh` 以此为准。
 - **测试**：`usage_chart.rs` 7 个（上文两个之外，`values_map_onto_the_plot_area_from_the_bottom`、`hours_are_labeled_every_third_and_days_count_back_from_today`、`the_tooltip_of_an_hour_lists_its_models_its_tokens_and_the_day_before`、`the_tooltip_of_a_day_has_the_average_and_says_a_click_opens_it`、`the_legend_lists_the_dashed_marks_only_when_there_are_some`）；`keyboard_tests.rs` 2 个（`clicking_a_day_s_bar_opens_its_hours_and_other_clicks_do_nothing`、`a_bar_shows_its_tooltip_under_the_mouse_or_when_pinned`），用 `VisualTestContext::simulate_click` / `simulate_mouse_move` 按坐标走 GPUI 的鼠标分发，不是直接调方法。
 - **常驻菜单的点击偏移**：加了 Open Usage 后在菜单截图上重量，Open Sessions +101、Open Usage +125、Scan Now +148；`screenshot-resident.sh` 原先推算的 148 是对的，`RESIDENT_CLICK=1` 两次真点击都选中了对的项。
+
+### 返工 R1（usage-p3-chart，2026-11-16）
+
+处理审阅（`usage-p3-rv-app`）的 R1–R4 和实机验收（`usage-p3-accept`）发现的第 1、2、4 条，交接见 [P3 chart 总结](../../sessions/2026-11-16-usage-p3-chart.md) 末节。每条先写了在旧代码上失败的测试。
+
+- **对话框关闭后焦点给当前视图**（R1）：更换收藏目录、取消最后一份收藏的确认、导出 TXT 的对话框关闭后调 `focus_view`，不再固定给表格。Usage 里从 Favorites 菜单换目录后，焦点原先落在不在屏幕上的表格，`⌃1` 之类的键到不了应用。测试 `changing_the_favorites_folder_from_usage_gives_the_keys_back_to_usage`。
+- **Model 过滤两边用同一个名字**（R2）：`set_model_filter` 存去掉日期和 `[1m]` 的名字（`pricing::normalize`），`SessionRow::primary_model` 也存成这样，会话表的 Model 下拉随之把 `claude-haiku-4-5-20251001` 和 `claude-haiku-4-5` 并成一项；旧版本存在 `state.json` 里的带日期的值，`Filter::matches` 比较前同样去掉。原先在 Usage 里选 Haiku 4.5 切回会话表，主模型就是它的 session 也不见了。「Usage 按调用、会话表按主模型」这个含义上的差别没改（上文「风险与待定」）。测试 `a_model_picked_in_usage_keeps_its_sessions_in_sessions`、`the_model_filter_matches_a_main_model_with_or_without_its_date_or_window`。
+- **虚线框按钟点对**（R3）：夏令时那天有 23 或 25 个小时，第 n 个小时不再是前一天的第 n 个。`same_clock_hours` 按本地钟点配对：某个钟点第 k 次出现，对前一天这个钟点的第 k 次；前一天没有的钟点（拨快那晚的 02:00）不画框，拨慢那晚第二个 01:00 也不画框（前一天只有一个 01:00）。测试 `the_box_behind_an_hour_is_the_same_clock_hour_the_day_before_across_dst`（America/New_York 2026-03-07、03-08、10-31、11-01，`chrono-tz` 加进 app 的 dev-dependencies）。
+- **柱子不宽过自己的槽**（R4）：最小柱宽改成 `min(3, 槽宽)`。长的 Custom 范围（800px 画 365 天，槽宽 1.8px）原先柱宽 3px，伸进隔壁那天，鼠标在看得见的柱子边上时提示框和点击对的是另一天。测试 `a_bar_stays_inside_its_band_however_many_days_there_are`（365、730、1,000 天）。
+- **工具栏换行**（验收第 1 条）：Usage 工具栏 `flex_wrap`，高度至少 36、随行数增加；数据时刻和刷新按钮包在一起、`ml_auto`，在哪一行都靠右。无界面测试窗口里量过：一行放得下要 1,140pt（选了项目略宽，打开日期选择器要 1,330pt），再窄就换行；一直窄到 300pt，Model 和刷新按钮都还在窗口里。范围按钮那一组不会再拆开，窗口比它还窄时它自己会伸出去。会话表的工具栏没动。测试 `the_usage_toolbar_wraps_in_a_narrow_window_instead_of_running_off_it`（1400 / 900 / 700pt，带项目、带日期选择器）。
+- **纵轴刻度的小数位数跟着步长**（验收第 2 条）：`fmt_axis` 按步长决定小数：费用不到 1 美元的步长写够位数（`$0.0005`、`$0.005`，有小数时至少两位），0 写 `$0`；千以上 `$1.5k`；token 和命中率去掉多余的 0（`1.5k`、`99.25%`）。token 的步长只取 1、2、5 × 10ⁿ 且至少为 1（2.5k 用 `fmt_tokens` 写成 `3k`，500 的步长会把 1,500 和 2,000 都写成 `2k`）。原先一个小时的 Haiku 5.5 刻度是四个 `$0.00`。测试 `the_value_axis_says_each_line_s_value_and_no_two_alike`（一次到几千万次调用的 Cost / In / Out、空范围、11 种命中率，每个刻度读回去等于它的值、互不相同）。
+- **提示框不盖图例**（验收第 4 条）：`Tooltip` 把框放在光标旁边，光标在图的下半部时框往上开，比光标以上的空间高就伸出图外，盖住标题行和图例。现在只取鼠标的 x，框的顶边固定在绘图区顶边，比图高时往下伸进下面的区块。钉住的提示框同样。测试 `a_bar_s_tooltip_never_covers_the_chart_s_legend`。
+- **不在今年的范围写出年份**（P3 chart 总结交给协调者的那条）：Custom 在别的年份写 `Jan 3 – Jan 9, 2000`，跨年两端都写 `Dec 28, 2025 – Jan 3, 2026`，单日和点进来的某一天写 `Wed Dec 31, 2025`；图的副标题、工具栏里点进来那天的小标签同样。今年的不变。测试 `a_range_outside_this_year_says_its_year`。
+

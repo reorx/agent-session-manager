@@ -230,15 +230,16 @@ Usage 视图的图（`usage_chart.rs`）没有用 gpui-component 现成的 `BarC
 | 要点 | 做法 |
 |---|---|
 | 成为元素 | `#[derive(IntoPlot)]`，作用域里要有 `Plot` trait。生成的元素样式是 `size: full`，填满父元素：高度由外面的 `div().h(..)` 定（`CHART_H`） |
-| 几何 | 全部放进纯函数 `Layout`（绘图区、每根柱子的位置、`slot_at(x)`、`y(value)`），先写测试（`usage_chart::tests`）。画图、提示框、点击都只经它算位置，三者不会对不上是哪根柱子 |
+| 几何 | 全部放进纯函数 `Layout`（绘图区、每根柱子的位置、`slot_at(x)`、`y(value)`），先写测试（`usage_chart::tests`）。画图、提示框、点击都只经它算位置，三者不会对不上是哪根柱子。柱子再窄也不能宽过自己的槽：最小 3px 的柱宽在长的 Custom 范围（槽宽不到 3px）里会伸进隔壁那天，画出来的柱子点下去是另一天（审阅 R4），所以最小宽度取 `min(3, 槽宽)` |
 | `PlotAxis` | `x_label` / `y_label` 在调用那一刻按已设的 `x(..)` / `y(..)` 和 `*_label_side` 算位置：先 `.x(..)`、`.y(..)`、`.y_label_side(..)`，再给标签，否则标签不显示或在错的一边。`y_axis(false)` 只画标签不画竖线 |
 | 字体 | `PlotLabel` / `AxisText` 用当前文本样式的字体（`window.text_style()`），也就是外层 div 的 `font_family`；`font_weight` 被忽略，要加粗只能换字体。图的外层 div 设等宽字体，提示框自己设回无衬线 |
 | 堆叠柱 | `shape::Bar` 一次画一组同样圆角的矩形：顶段（圆角 3px）和其余段（方角，段间留 1.5px）分两次画 |
 | 虚线 | 线用 `PathBuilder::stroke(..).dash_array(&[..])`（均线、现在线）；虚线框用 `outline(bounds, color, BorderStyle::Dashed).corner_radii(..)` 画一个 quad，比拼四条虚线路径简单，圆角也对 |
-| 悬停提示框 | `id()` 返回 `Some` 才开启。`tooltip_state(position, ..)` 的 `position` 相对图的左上角，返回 `TooltipState`（这里用 `slot_at` 定柱子）；`tooltip(..)` 返回任意元素，`plot::tooltip::Tooltip` 是带浮层定位的外壳，`CrossLine::band(..)` 给所在列加浅色底。悬停状态存在元素内部（每帧按 hitbox 重算），外面读不到也设不了 |
+| 悬停提示框 | `id()` 返回 `Some` 才开启。`tooltip_state(position, ..)` 的 `position` 相对图的左上角，返回 `TooltipState`（这里用 `slot_at` 定柱子）；`tooltip(..)` 返回任意元素，`plot::tooltip::Tooltip` 是带浮层定位的外壳，`CrossLine::band(..)` 给所在列加浅色底。悬停状态存在元素内部（每帧按 hitbox 重算），外面读不到也设不了。`Tooltip::new(cursor, within)` 把框放在 `cursor` 旁边：`cursor` 在上半部时框往下开，在下半部时往上开，框比光标以上的空间高就伸出图外、盖住图上方的标题行和图例（实机验收看到过）。所以只把鼠标的 x 传进去，y 固定为绘图区顶端减去 `gap`：框的顶边就是绘图区的顶边，比图高时往下伸进下一块区域，不往上 |
 | 不靠鼠标显示提示框 | `Plot::prepaint` 可以返回额外的子元素：鼠标不在图上时，在这里按 `UsageState::hover` 造一个提示框并 `prepaint_as_root`，autoplay 截图和测试就能「钉住」某根柱子的提示框 |
 | 点击 | `Plot` 没有点击回调。图外面套一层 div，`on_mouse_down` 交给 `AppRoot::click_chart`；图在 `paint` 里把自己的 bounds 写进 `Rc<Cell<Bounds<Pixels>>>`（`UsageState::chart_bounds`），点击处理用同一个 `Layout::slot_at` 换算。Plot 的 hitbox 是 `HitboxBehavior::Normal`，不挡外层 div 的鼠标事件 |
-| 测试 | 无界面测试窗口照常布局和绘制：`VisualTestContext::simulate_mouse_move` / `simulate_click` 按坐标操作（坐标从记下的 bounds 算），提示框用 `.debug_selector(..)` 标记、`cx.debug_bounds(..)` 查有没有画出来（`keyboard_tests.rs` 的两个 chart 测试） |
+| 测试 | 无界面测试窗口照常布局和绘制：`VisualTestContext::simulate_mouse_move` / `simulate_click` 按坐标操作（坐标从记下的 bounds 算），提示框用 `.debug_selector(..)` 标记、`cx.debug_bounds(..)` 查有没有画出来、画在哪（`keyboard_tests.rs` 的 chart 测试）。同样的办法查布局：`simulate_resize` 把窗口改窄，再看 `debug_bounds` 是否还在窗口里（Usage 工具栏换行的测试）。fixture 的提示框比真实数据的矮，测提示框位置要把鼠标放在会让框往上开的地方（图的中线以下） |
+| 纵轴刻度 | 小数位数跟着步长走（`usage_view.rs::fmt_axis`）：一天的 Haiku 只有零点几美分，固定两位小数会写出一串 `$0.00`。token 的步长只取 1、2、5 × 10ⁿ（不取 2.5k，`fmt_tokens` 写不出 2.5k），且至少为 1 |
 
 ## 测试
 
@@ -301,7 +302,19 @@ use core::prelude::v1::test;
 
 **判定。** 脚本按日志和窗口列表判每一步：标题等于状态栏 Today 取整；关窗后 `hidden=true`、窗口不在屏幕上、进程还在；扫描结束且（有 `RESIDENT_BEFORE_SCAN` 时）Today 变了；截菜单时菜单还开着、窗口列表里有本进程的菜单窗口（`winid --menu`）；重开后 `shown=true active=true table-focused=true`；Quit 后进程退出且退出码为 0。不过的项当场打印 `FAILED: …` 并继续收集证据，最后列出全部并退出 1；没法继续的（窗口没出现、关窗没隐藏、应用中途退出）立即退出 1。从第一次关窗说明退出，只有日志有 `window: first-close notice · 立即退出` 且退出码为 0 才算通过。判定本身有行为测试：`make test-screenshot-resident`（`scripts/test-screenshot-resident.sh`，用假的应用、`winid`、`screencapture`、`cliclick` 演 13 种情形，不起 GUI、不截屏、不点击）。
 
-**点击前的确认。** `RESIDENT_CLICK=1` 每次点击前用 `winid --at x,y`（`CGWindowListCopyWindowInfo` 里点击处最上层的窗口）确认那里是本进程的窗口（菜单），并且日志表明菜单开着；否则不点，记一项不过，改用程序化的选择。菜单项的位置是相对菜单左上角量出来的：2026-11-16 加了 Open Usage 后在 `3-menu.png` 上重量，Open Sessions +101、Open Usage +125、Scan Now +148（行中心），脚本用 100 和 148，两次真点击都选中了对的项。菜单再加减项要重量。
+**点击前的确认。** `RESIDENT_CLICK=1` 每次点击前用 `winid --at x,y`（`CGWindowListCopyWindowInfo` 里点击处最上层的窗口）确认那里是本进程的窗口（菜单），并且日志表明菜单开着；否则不点，记一项不过，改用程序化的选择。有的 Mac 上 Dock 有一个盖满整个屏幕的窗口（层级 20，`kCGDockWindowLevel`，不透明度 1），点击会穿过它，只有 Dock 本身那一条接点击；`winid --at` 原来对任何坐标都答 Dock（usage-p3-accept 踩过），现在在屏幕的可见区域（`NSScreen.visibleFrame`，不含菜单栏和 Dock 条）里跳过这个窗口，在 Dock 条上照旧答 Dock。别的层级照常算数：别的应用的浮动面板、工具窗口在层级 3–19，确实会接住点击（usage-p3-accept 的 `topwin.py` 跳过 1–23 全部层级，会把这种点击放过去）。菜单项的位置是相对菜单左上角量出来的：2026-11-16 加了 Open Usage 后在 `3-menu.png` 上重量，Open Sessions +101、Open Usage +125、Scan Now +148（行中心），脚本用 100 和 148，两次真点击都选中了对的项。菜单再加减项要重量。
+
+**agent-desktop 能做什么**（usage-p3-accept 2026-11-16 实测，证据在 `tmp/2026-11-12-usage-stats/usage-p3-accept/ad-*.json`）。它走辅助功能接口，默认无头、不动光标，可以和别的验收同时跑；但 GPUI 自绘的内容几乎没有辅助功能元素，所以用处有限：
+
+| 对象 | 结果 |
+|---|---|
+| 找应用 | `list-apps` 里 debug 二进制的名字是 `agent-session-manager`；`--app "Agent Session Manager"` 报 `APP_NOT_FOUND`（.app 包没试过） |
+| 应用不在前台 | `list-windows` 给 `accessible: false`，窗口的 `snapshot` 报 `ACTION_NOT_SUPPORTED … window_without_accessibility_element`，只剩截图和坐标输入 |
+| 主菜单栏（`--surface menubar`） | 随时能读到整棵菜单（106 个元素，含 View 里的 Sessions / Usage / Find / Preview…）。应用不在前台时项全是 `disabled`，`click` 超时；在前台时 `find --surface menubar --role menuitem --name Usage --exact` 再 `click @ref` 走 `AXPress`，无头成功（日志 `view: Usage`），光标不动 |
+| 窗口里（应用在前台） | Sessions 视图有 43 个元素：搜索框（`Search sessions`）、表格行（无文字）、详情的三个 tab（`Metadata` / `Conversation` / `Cost`）、窗口按钮，其余按钮没有名字。Usage 视图只有窗口、一个 group、5 个无名按钮和窗口按钮：范围按钮、下拉、柱子、项目行、指标卡、状态栏都没有元素 |
+| 菜单栏状态项（Open Usage / Scan Now） | `--surface menu-bar-extras` 在这台机器上报 `PLATFORM_NOT_SUPPORTED`，无头验不了 |
+
+结论：能交给 agent-desktop 的只有主菜单栏的项（切视图、Find、Preview 模式等）和详情 tab，而且要先把应用带到前台，「不抢焦点」做不到。Usage 视图里的操作（范围、过滤、悬停、点柱子）用 autoplay，非真点不可时用 cliclick，并照 brief 在每次点击前确认前台应用和点击处的窗口。真点击前让指针在控件上停够（实测 ✕ 和 `Custom…` 第一下常落空，停 0.8 秒再点才成，见上文「指针瞬移过去立刻点击可能落空」）。
 
 **菜单会自己关。** 应用不在前台时程序化弹出的菜单，在前台是游戏时不到一秒就关了（usage-p2-accept：截图里只有菜单下面的窗口），前台是 Finder、终端时开着直到被关。日志 `menu bar: menu closed (open N s)` 给出菜单开了多久，判定会报出当时的前台应用。
 

@@ -199,7 +199,7 @@ impl AppRoot {
                         Ok(Err(error)) => window.push_notification(format!("{error}"), cx),
                         _ => {}
                     }
-                    this.focus_table(window, cx);
+                    this.focus_view(window, cx);
                 })
                 .ok();
             })

@@ -1493,7 +1493,9 @@ fn picking_a_custom_range_in_usage_hands_the_focus_back_to_usage(cx: &mut TestAp
     h.app.read_with(cx, |app, _| {
         assert_eq!((app.usage_view.range, app.usage_view.custom), (UsageRange::Custom, Some((first, last))));
         assert!(app.usage_view.snapshot.totals.responses > 0);
-        assert_eq!(app.usage_view.snapshot.range_label, "Sep 1 – Sep 30");
+        // the fixture's September is in 2026: other years write it out
+        let label = if chrono::Datelike::year(&app.usage_day) == 2026 { "Sep 1 – Sep 30" } else { "Sep 1 – Sep 30, 2026" };
+        assert_eq!(app.usage_view.snapshot.range_label, label);
     });
     assert_eq!(view_focus(cx, &h), (true, false), "the Usage view has the focus again");
     assert_eq!(saved_state(&h).usage_custom_range, Some((first, last)));
@@ -1643,4 +1645,115 @@ fn a_hidden_usage_view_scans_every_ten_minutes(cx: &mut TestAppContext) {
     assert_eq!(h.app.read_with(cx, |app, _| app.scans_done), base, "no scan a minute after the window went away");
     cx.executor().advance_clock(crate::AUTO_SCAN_IDLE - crate::USAGE_SCAN_IDLE);
     wait_until(cx, &h, "the scan ten minutes later", |app, _| app.scans_done == base + 1);
+}
+
+// ---- the Usage view, rework R1 ----------------------------------------------------------------
+
+#[gpui_kit::test]
+fn changing_the_favorites_folder_from_usage_gives_the_keys_back_to_usage(cx: &mut TestAppContext) {
+    use crate::model::MainView;
+    let h = launch(cx);
+    press(cx, &h, "ctrl-2");
+    // the Favorites menu works in either view
+    in_window(cx, &h, |window, cx| window.dispatch_action(Box::new(crate::ChangeFavoritesFolder), cx));
+    cx.run_until_parked();
+    assert!(cx.did_prompt_for_paths(), "the folder dialog is up");
+    cx.simulate_path_prompt_response(|_| None);
+    cx.run_until_parked();
+    assert_eq!(view(cx, &h), MainView::Usage);
+    assert_eq!(view_focus(cx, &h), (true, false), "back to Usage, not to the table it hides");
+    press(cx, &h, "ctrl-1");
+    assert_eq!((view(cx, &h), view_focus(cx, &h)), (MainView::Sessions, (false, true)), "so its keys work");
+}
+
+const S2: &str = "22222222-aaaa-4bbb-8ccc-000000000002";
+
+/// Usage lists models without their date or `[1m]`; the session table knows its sessions by
+/// the main model as written in the transcript (`claude-haiku-4-5-20251001`).
+#[gpui_kit::test]
+fn a_model_picked_in_usage_keeps_its_sessions_in_sessions(cx: &mut TestAppContext) {
+    use crate::model::MainView;
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    press(cx, &h, "ctrl-2");
+    let pick = h.app.read_with(cx, |app, _| app.usage_view.models.iter().map(|(m, _)| m.clone()).find(|m| m.starts_with("claude-haiku")).expect("the fixture's Haiku call"));
+    assert_eq!(pick, "claude-haiku-4-5", "Usage lists it without its date");
+    h.app.update(cx, |app, cx| app.set_model_filter(Some(pick.into()), cx));
+    press(cx, &h, "ctrl-1");
+    assert_eq!(view(cx, &h), MainView::Sessions);
+    h.app.read_with(cx, |app, cx| {
+        let delegate = app.table.read(cx).delegate();
+        let ids: Vec<String> = (0..delegate.ix.len()).map(|i| delegate.row(i).id.to_string()).collect();
+        assert_eq!(ids, [S2], "the session whose main model is Haiku 4.5");
+        let haiku: Vec<&str> = app.models.iter().filter(|e| e.model.starts_with("claude-haiku")).map(|e| e.model.as_ref()).collect();
+        assert_eq!(haiku, ["claude-haiku-4-5"], "one entry in the Sessions menu, the same as Usage's");
+    });
+
+    // a pick saved by an older version (the dated name) still finds it, and Usage still counts it
+    h.app.update(cx, |app, cx| app.set_model_filter(Some("claude-haiku-4-5-20251001".into()), cx));
+    assert_eq!(h.app.read_with(cx, |app, cx| app.current_filter(cx).model), Some("claude-haiku-4-5".into()), "kept without its date");
+    assert_eq!(h.app.read_with(cx, shown_rows), 1);
+    press(cx, &h, "ctrl-2");
+    let (first, last) = september();
+    h.app.update(cx, |app, cx| app.set_usage_custom_range(first, last, cx));
+    let haiku = h.app.read_with(cx, |app, _| app.usage_view.snapshot.totals);
+    assert_eq!((haiku.responses, haiku.unpriced_responses), (1, 0), "Usage still has its one call");
+}
+
+/// 900 px is narrower than the Usage toolbar: it wraps onto a second row instead of pushing
+/// Model, `as of` and the refresh button out of the window (acceptance, 12-narrow.png).
+#[gpui_kit::test]
+fn the_usage_toolbar_wraps_in_a_narrow_window_instead_of_running_off_it(cx: &mut TestAppContext) {
+    use agent_session_core::usage::UsageRange;
+    use gpui_kit::{VisualTestContext, px, size};
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    press(cx, &h, "ctrl-2");
+    h.app.update(cx, |app, cx| app.set_project(Some("-Users-me-Code-alpha".into()), cx));
+    let mut window = VisualTestContext::from_window(h.window, cx);
+    let check = |window: &mut VisualTestContext, what: &str, width: f32| {
+        window.simulate_resize(size(px(width), px(800.)));
+        window.run_until_parked();
+        for selector in [crate::toolbar::USAGE_MODEL_SELECTOR, crate::toolbar::USAGE_END_SELECTOR] {
+            let b = window.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} on screen"));
+            assert!(b.origin.x >= px(0.) && b.right() <= px(width), "{what} at {width} px: {selector} at {b:?}");
+        }
+    };
+    for width in [1400., 900., 700.] {
+        check(&mut window, "Today", width);
+    }
+    // Custom's date picker takes room too
+    h.app.update(&mut window, |app, cx| app.set_usage_range(UsageRange::Custom, cx));
+    for width in [1400., 900., 700.] {
+        check(&mut window, "Custom", width);
+    }
+}
+
+/// The tooltip box stays in the plot area, under the chart's title row and legend, wherever the
+/// mouse is on the bar (acceptance, 04-hover-bar.png: it covered the legend).
+#[gpui_kit::test]
+fn a_bar_s_tooltip_never_covers_the_chart_s_legend(cx: &mut TestAppContext) {
+    use gpui_kit::{Modifiers, VisualTestContext, point, px};
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    press(cx, &h, "ctrl-2");
+    let (first, last) = september();
+    h.app.update(cx, |app, cx| app.set_usage_custom_range(first, last, cx));
+    let (bounds, l) = chart_on_screen(cx, &h);
+    // the busiest day has the tallest tooltip
+    let busiest = h.app.read_with(cx, |app, _| {
+        let slots = &app.usage_view.snapshot.chart.slots;
+        (0..slots.len()).max_by_key(|ix| slots[*ix].totals.responses).unwrap()
+    });
+    let mut window = VisualTestContext::from_window(h.window, cx);
+    let plot_top = bounds.origin.y + px(l.top);
+    // just under the middle the box used to open upwards from the mouse, over the title row
+    let middle = bounds.size.height.as_f32() / 2.;
+    for (ix, y) in [(busiest, l.bottom() - 4.), (busiest, middle + 4.), (busiest, middle + 30.), (l.slots - 1, l.top + l.height * 0.7), (0, l.top + 2.)] {
+        window.simulate_mouse_move(point(bounds.origin.x + px(l.center(ix)), bounds.origin.y + px(y)), None, Modifiers::none());
+        window.run_until_parked();
+        let tip = window.debug_bounds(crate::usage_chart::TOOLTIP_SELECTOR).expect("a tooltip");
+        // the box starts at the plot area's top, its content a padding below
+        assert!(tip.origin.y >= plot_top, "bar {ix}, mouse {y} px down: the tooltip starts at {:?}, above the plot area at {plot_top:?}", tip.origin.y);
+    }
 }

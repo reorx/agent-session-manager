@@ -46,6 +46,8 @@ const SEGMENT_GAP: f32 = 1.5;
 const MIN_SEGMENT: f32 = 0.6;
 /// The text of the axes and the marks.
 const TEXT_SIZE: f32 = 10.5;
+/// Room between the mouse (or a pinned bar) and the side of the tooltip's box.
+const TOOLTIP_GAP: f32 = 12.;
 /// The tooltip's box in tests (`VisualTestContext::debug_bounds`).
 pub const TOOLTIP_SELECTOR: &str = "usage-chart-tooltip";
 
@@ -97,7 +99,9 @@ impl Layout {
             height: (height - TOP - BOTTOM).max(1.),
             slots,
             band,
-            bar: (band * BAR_SHARE).min(widest).max(MIN_BAR),
+            // at least 3 px, but never wider than its band: a long Custom range has bands
+            // under 3 px, and a bar reaching into the next day's band would be clicked as that day
+            bar: (band * BAR_SHARE).min(widest).max(MIN_BAR.min(band)),
             hourly,
         }
     }
@@ -254,16 +258,20 @@ impl UsageChart {
         UsageChart { chart, bounds, pinned }
     }
 
-    /// The tooltip of bar `ix`, its box next to `cursor`, its column lit.
-    fn tooltip_box(&self, ix: usize, cursor: Point<Pixels>, bounds: Bounds<Pixels>, cx: &App) -> Option<AnyElement> {
+    /// The tooltip of bar `ix`, its column lit, its box beside `x` (the mouse, or the pinned
+    /// bar's center) with its top at the plot area's: a box opening upwards from a mouse low in
+    /// the chart climbed over the title row and the legend.
+    fn tooltip_box(&self, ix: usize, x: Pixels, bounds: Bounds<Pixels>, cx: &App) -> Option<AnyElement> {
         let tip = tip(&self.chart, ix, &Local)?;
         let l = Layout::of(bounds, &self.chart);
+        // `Tooltip` puts the box `gap` below a point in the upper half of the plot
+        let cursor = point(x, px(l.top - TOOLTIP_GAP));
         let column = CrossLine::new(point(px(l.center(ix)), px(l.top))).band(px(l.band)).span(l.top - 8., l.height + 8.);
         let dot = (self.chart.metric == Metric::HitRate)
             .then(|| self.chart.slots[ix].value(Metric::HitRate))
             .flatten()
             .map(|v| Dot::new(point(px(l.center(ix)), px(l.y(v, self.chart.y_min, self.chart.y_max)))).size(px(9.)).stroke(style::model_color(0)).fill(style::model_color(0)));
-        Some(Tooltip::new(cursor, bounds.size).gap(px(12.)).cross_line(column).dots(dot).child(tip_content(tip, cx)).into_any_element())
+        Some(Tooltip::new(cursor, bounds.size).gap(px(TOOLTIP_GAP)).cross_line(column).dots(dot).child(tip_content(tip, cx)).into_any_element())
     }
 }
 
@@ -308,7 +316,7 @@ impl Plot for UsageChart {
             return Vec::new();
         }
         let l = Layout::of(bounds, &self.chart);
-        let Some(mut tooltip) = self.tooltip_box(ix, point(px(l.center(ix)), px(l.top + 12.)), bounds, cx) else { return Vec::new() };
+        let Some(mut tooltip) = self.tooltip_box(ix, px(l.center(ix)), bounds, cx) else { return Vec::new() };
         tooltip.prepaint_as_root(bounds.origin, bounds.size.into(), window, cx);
         vec![tooltip]
     }
@@ -437,7 +445,7 @@ impl Plot for UsageChart {
     }
 
     fn tooltip(&self, state: &TooltipState, cursor: Point<Pixels>, bounds: Bounds<Pixels>, _: &mut Window, cx: &mut App) -> Option<AnyElement> {
-        self.tooltip_box(state.index, cursor, bounds, cx)
+        self.tooltip_box(state.index, cursor.x, bounds, cx)
     }
 }
 
@@ -492,9 +500,27 @@ mod tests {
         // bars are never wider than 26 px nor narrower than 3
         assert_eq!(Layout::new(4000., 236., 7, false).bar, 26.);
         assert_eq!(Layout::new(4000., 236., 24, true).bar, 22.);
-        assert_eq!(Layout::new(300., 236., 120, false).bar, 3.);
+        assert_eq!(Layout::new(800., 236., 160, false).bar, 3., "3 px while the band has room for it");
         assert_eq!(Layout::new(800., 236., 0, false).slot_at(300.), None, "no bars, nothing under the cursor");
         assert!(Layout::new(10., 236., 7, false).width > 0., "a sliver of a window still has a plot area");
+    }
+
+    /// A long Custom range: bands under 3 px. A bar never reaches into the next day's band, so
+    /// what is drawn, its tooltip and its click are the same day.
+    #[test]
+    fn a_bar_stays_inside_its_band_however_many_days_there_are() {
+        for (width, slots) in [(800., 365), (800., 730), (300., 120), (1400., 1000)] {
+            let l = Layout::new(width, 236., slots, false);
+            assert!(l.band < 3., "{slots} days in {width} px: narrower than the widest least bar");
+            assert!(l.bar > 0. && l.bar <= l.band, "{slots} days: bar {} in band {}", l.bar, l.band);
+            for ix in 0..slots {
+                let (left, right) = (l.bar_left(ix), l.bar_left(ix) + l.bar);
+                assert!(left >= l.band_left(ix) - 1e-3 && right <= l.band_left(ix) + l.band + 1e-3, "{slots} days: bar {ix} inside its band");
+                let inside = (l.bar * 0.05).min(0.01);
+                assert_eq!(l.slot_at(left + inside), Some(ix), "{slots} days: the left edge of bar {ix} is its own");
+                assert_eq!(l.slot_at(right - inside), Some(ix), "{slots} days: the right edge of bar {ix} is its own");
+            }
+        }
     }
 
     #[test]

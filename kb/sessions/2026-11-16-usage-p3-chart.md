@@ -107,3 +107,61 @@ sqlite3 "file:$HOME/Library/Application Support/dev.reorx.AgentSessionManager/us
 - [P3 core 总结](2026-11-16-usage-p3-core.md) — 聚合接口
 - [gpui-kit 开发指南](../docs/gpui-kit-guide.md) — 更新：新增「自绘图表：`Plot`」一节、`screenshot-usage-view`、常驻菜单的偏移
 - [产品 PRD](../docs/product-prd.md) — 更新：Usage 视图状态和图表描述
+- [应用架构](../docs/app-architecture.md) — 返工 R1 更新：对话框关闭后的焦点、过滤共用的 Model 名
+
+## 协调者摘要（usage-p3-app-r1）
+
+- 结果：任务 `usage-p3-app-r1` 的 5 项都做完：审阅 R1–R4、实机验收第 1、2、4 条、范围标题的年份、`winid --at` 的层级、指南的 agent-desktop 一节。完成标准全部达到。
+- 提交：代码、测试、脚本、文档、spec、本节同一提交，hash 见最终回复。
+- 先红后绿：新加 10 个测试，在旧代码上全部失败（`r1-before.log`，每条的失败信息都对得上问题），改后全过（`r1-after.log`）。
+- 测试：`cargo test -p agent-session-manager` 220 passed / 0 failed / 2 ignored（`r1-app-tests.log`）；`make test` 合计 600 passed / 0 failed / 9 ignored（`r1-make-test.log`）；`make test-screenshot-resident` 通过。
+- 截图：`make screenshot-usage-view` 15 张，全部判定通过，退出码 0（`screenshots/r1/`，`r1-tour.log`）。打开看过：`12-narrow` 工具栏换行，Model、`as of`、刷新都在窗口里；`02`、`07` 提示框从绘图区顶端往下开，不盖图例；空范围标题是 `Jan 3 – Jan 9, 2000`。
+- 小数值的刻度：Haiku 当天 $0.02 的图，刻度是 `$0 / $0.005 / $0.010 / $0.015 / $0.020`（`r1-haiku/01-today.png`）。这次只跑了 `today` 一步，脚本的 `today-matches` 判定按设计不过：过滤后的 Cost 不等于状态栏。
+- `winid --at`：旧版对任何点都答 Dock，新版答出真实窗口，Dock 条上仍答 Dock（`winid-at.log`）。
+- 自己的决定：
+  - `winid` 只跳过 Dock 那个层级 20 的全屏窗口，而且只在屏幕可见区域内跳过；`topwin.py` 跳过 1–23 全部层级，会放过别的应用的浮动面板。
+  - 工具栏用 `flex_wrap` 加 `ml_auto` 换行，不收起控件。
+  - 夏令时那天，前一天没有的钟点和第二个 01:00 不画虚线框。
+  - token 刻度的步长不取 2.5。
+- 未验证：真实鼠标在右侧柱子上悬停（只在无界面窗口和钉住的截图里看过）；会话表工具栏在窄窗口下的样子。
+- 交给协调者：见本节「交给协调者」。
+
+### 做了什么（每条的测试）
+
+| 条目 | 改法 | 测试（旧代码上的失败） |
+|---|---|---|
+| R1 焦点 | 更换收藏目录、确认取消最后一份收藏、导出 TXT 三个对话框关闭后调 `focus_view`，不再固定调 `focus_table` | `changing_the_favorites_folder_from_usage_gives_the_keys_back_to_usage`（焦点落到表格：`(false, true)`） |
+| R2 Model 名 | `set_model_filter` 存 `pricing::normalize` 之后的名字；`SessionRow::primary_model` 也存成这样（Sessions 的下拉随之合并）；`Filter::matches` 比较前把旧 state 里带日期的值也规范化 | `a_model_picked_in_usage_keeps_its_sessions_in_sessions`（会话表空）、`model::tests::the_model_filter_matches_a_main_model_with_or_without_its_date_or_window` |
+| R3 夏令时 | `same_clock_hours`：按本地钟点配对，钟点第 k 次出现对前一天的第 k 次；前一天没有的钟点不画框 | `the_box_behind_an_hour_is_the_same_clock_hour_the_day_before_across_dst`（New York 03-07 的 03:00 对到 02:00）；app 加 `chrono-tz` dev 依赖 |
+| R4 柱宽 | 最小柱宽 `min(3, 槽宽)` | `a_bar_stays_inside_its_band_however_many_days_there_are`（365 天柱子出槽） |
+| 验收 1 窄窗口 | Usage 工具栏 `h_auto` + `min_h(36)` + `flex_wrap`，时刻和刷新包成一组 `ml_auto`。测试窗口里量：1,140pt 以下换行（日期选择器打开时 1,330pt），到 300pt 时 Model 和刷新都还在窗口里 | `the_usage_toolbar_wraps_in_a_narrow_window_instead_of_running_off_it`（900pt 时 Model 在 x=932） |
+| 验收 2 刻度 | `fmt_axis` 按步长决定小数位数（`decimals`、`axis_number`、`unit_of`）；token 步长只取 1/2/5 × 10ⁿ 且至少为 1 | `the_value_axis_says_each_line_s_value_and_no_two_alike`（四个 `$0.00`） |
+| 验收 4 提示框 | 只把鼠标的 x 交给 `Tooltip`，y 固定在绘图区顶端减 gap，所以框顶边就是绘图区顶边；钉住的提示框同样 | `a_bar_s_tooltip_never_covers_the_chart_s_legend`（框顶在绘图区上方 60px） |
+| 年份 | `range_label` 带上今年的年份做比较：别的年份写 `Jan 3 – Jan 9, 2000`，跨年写 `Dec 28, 2025 – Jan 3, 2026`，单日写 `Wed Dec 31, 2025`；副标题和点进那天的小标签同样 | `a_range_outside_this_year_says_its_year`；`picking_a_custom_range_in_usage_…` 的 `Sep 1 – Sep 30` 改成按当前年份算期望值，明年也能过 |
+| `winid --at` | 在 `NSScreen.visibleFrame` 内跳过 Dock 的层级 20 窗口，其余层级照算 | 手动探测（`winid-at.log`），`make test-screenshot-resident` 用替身不受影响 |
+| 文档 | 指南：Plot 表加柱宽、提示框位置、纵轴刻度、`simulate_resize` 测布局；点击前确认的 Dock 说明；新增「agent-desktop 能做什么」。`app-architecture.md`：焦点表、过滤共用的 Model 名。PRD 4.11、spec 新增「返工 R1」一节 | — |
+
+### 交给协调者
+
+- `AGENTS.md`：GPUI 规则「新增弹出层，关闭后要把焦点还回去」可改成「还给当前视图（`focus_view`）」。在 Usage 里也能打开的对话框，把焦点还给表格就等于没有焦点（R1）。
+- 会话表的工具栏在窄窗口下没量过。推测 900pt 时同样放不下（搜索框 220pt 加 Preview），不在本任务范围。
+- core 的 `cost::primary_model` 按原始模型名分组：同一个 session 里 `claude-haiku-4-5-20251001` 和 `claude-haiku-4-5` 都出现时，费用会被分成两组，主模型可能判错。很少见，app 这边没法修。
+- 以后的验收点击前用 `winid --at`，不要再用 `usage-p3-accept/topwin.py`：它跳过 1–23 全部层级，会放过别的应用的浮动面板。agent-desktop 对 .app 包的应用名没试过（debug 二进制是 `agent-session-manager`）。
+- 上一节「交给协调者」里的年份一条已在本次修掉。
+- 重新验收时要看：
+  - 窄窗口的工具栏；
+  - 真实鼠标悬停靠右、靠下的柱子；
+  - 小数值的刻度；
+  - 别的年份的范围标题。
+
+### 踩过的坑
+
+- **提示框测试第一版在旧代码上也通过。** 原因有两个：
+  - fixture 的提示框只有 158px 高，比真实数据的矮；
+  - 我取的「中线」是绘图区的中线（115），不是 `Tooltip` 判断开口方向用的图表中线（118）。
+
+  鼠标放到图表中线以下才复现。改测试前先在旧代码上确认它会失败。
+- **提示框内容的内边距是 6px，不是 8px**（主题的 rem 不是 16）。测试改成断言内容的顶边不高于绘图区顶边。
+- **`fmt_tokens` 写 k 时取整**：1,500 写成 `2k`，所以刻度不能用 500 这种步长配 `fmt_tokens`，改用按步长取小数的 `axis_number`。
+- **Usage 默认打开 Today**，而 fixture 的调用都在 9 月。断言 Usage 的总数前先设 Custom 范围。
+- **索引复制到新的数据路径、又换了 `ASM_FAVORITES_DIR`**，启动会弹「数据目录已更改，正在重建索引」（`RebuildingRoots`），在副本上重建一次。这是副本的设置引起的，不是本次改动；账本照旧，数字和状态栏一致。

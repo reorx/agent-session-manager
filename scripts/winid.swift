@@ -6,8 +6,12 @@
 // `winid --menu --pid N` prints "id x y width height" of that process's open menu (a window at
 // the pop-up menu level or above); exit 1 when none is on screen.
 // `winid --at X,Y` prints "pid owner" of the frontmost window under that point (screen points
-// from the top-left of the main display): a script makes sure a click lands in its own app.
+// from the top-left of the main display): a script makes sure a click lands in its own app. The
+// Dock's window over the whole screen (the Dock's level, 20) is skipped inside the screen's
+// visible frame: clicks go through it there. Every other window counts, other apps' floating
+// panels too (levels 3 to 19 take clicks).
 // `winid --screen` prints "width height" of the main display in points (menu bar and Dock strips).
+import AppKit
 import CoreGraphics
 import Foundation
 
@@ -36,11 +40,25 @@ let pid = value("--pid").flatMap { Int($0) }
 func owner(_ w: [String: Any]) -> Int { Int(number(w[kCGWindowOwnerPID as String])) }
 func windowID(_ w: [String: Any]) -> Int { Int(number(w[kCGWindowNumber as String])) }
 
+// The main screen's visible frame (without the menu bar and the Dock) in CG coordinates.
+func visibleFrame() -> CGRect? {
+    guard let screen = NSScreen.screens.first else { return nil }
+    let (full, visible) = (screen.frame, screen.visibleFrame)
+    // Cocoa counts from the bottom-left corner of the main screen, CG from its top-left
+    return CGRect(x: visible.minX, y: full.maxY - visible.maxY, width: visible.width, height: visible.height)
+}
+
 if let at = value("--at") {
     let xy = at.split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
     guard xy.count == 2 else { exit(2) }
     let point = CGPoint(x: xy[0], y: xy[1])
+    let dockLevel = Double(CGWindowLevelForKey(.dockWindow))
+    let clear = visibleFrame()?.contains(point) ?? false
     for w in list where number(w[kCGWindowAlpha as String]) > 0 && bounds(w).contains(point) {
+        // without this every point answered "Dock" on a Mac with that window (2026-11-16)
+        if clear && number(w[kCGWindowLayer as String]) == dockLevel && (w[kCGWindowOwnerName as String] as? String) == "Dock" {
+            continue
+        }
         print("\(owner(w)) \(w[kCGWindowOwnerName as String] as? String ?? "")")
         exit(0)
     }

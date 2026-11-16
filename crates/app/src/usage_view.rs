@@ -380,19 +380,55 @@ pub fn fmt_metric(metric: Metric, value: f64) -> String {
     }
 }
 
-/// The label of a value axis line `step` apart from the next: `$300`, `$1.5k`, `$0.25`, `120M`,
-/// `96%`.
+/// The label of a value axis line `step` apart from the next: `$300`, `$1.5k`, `$0.25`,
+/// `$0.005`, `120M`, `1.5k`, `96%`, `99.25%`. As many decimals as the step needs, so no two
+/// lines read alike (a day of Haiku is a fraction of a cent).
 pub fn fmt_axis(metric: Metric, value: f64, step: f64) -> String {
     match metric {
+        Metric::Cost if value == 0.0 => "$0".into(),
         Metric::Cost if value >= 1000.0 => {
-            let k = value / 1000.0;
-            if (k - k.round()).abs() < 1e-9 { format!("${k:.0}k") } else { format!("${k:.1}k") }
+            let (unit, suffix) = unit_of(value);
+            format!("${}{suffix}", axis_number(value, step, unit))
         }
-        Metric::Cost if step < 1.0 => format!("${value:.2}"),
-        Metric::Cost => format!("${value:.0}"),
-        Metric::In | Metric::Out => fmt_tokens(value.round() as u64),
-        Metric::HitRate if step < 0.01 => format!("{:.1}%", value * 100.0),
-        Metric::HitRate => format!("{:.0}%", value * 100.0),
+        // cents keep both digits: $2.50, not $2.5
+        Metric::Cost => match decimals(step) {
+            0 => format!("${value:.0}"),
+            d => format!("${value:.*}", d.max(2)),
+        },
+        Metric::In | Metric::Out => {
+            let (unit, suffix) = unit_of(value);
+            format!("{}{suffix}", axis_number(value, step, unit))
+        }
+        Metric::HitRate => format!("{}%", axis_number(value * 100.0, step * 100.0, 1.0)),
+    }
+}
+
+/// `value` in `unit` with the decimals the step needs there, trailing zeros dropped: `1.5`, `2`.
+fn axis_number(value: f64, step: f64, unit: f64) -> String {
+    let text = format!("{:.*}", decimals(step / unit), value / unit);
+    if text.contains('.') { text.trim_end_matches('0').trim_end_matches('.').to_string() } else { text }
+}
+
+/// The fewest decimals that write `x` exactly (at most 8).
+fn decimals(x: f64) -> usize {
+    (0..8)
+        .find(|d| {
+            let scaled = x * 10f64.powi(*d as i32);
+            (scaled - scaled.round()).abs() < 1e-6 * scaled.abs().max(1.0)
+        })
+        .unwrap_or(8)
+}
+
+/// The unit a number is written in: as is, thousands, millions, billions.
+fn unit_of(value: f64) -> (f64, &'static str) {
+    if value >= 1e9 {
+        (1e9, "B")
+    } else if value >= 1e6 {
+        (1e6, "M")
+    } else if value >= 1e3 {
+        (1e3, "k")
+    } else {
+        (1.0, "")
     }
 }
 
@@ -414,12 +450,17 @@ pub fn fmt_day(day: NaiveDate) -> String {
     day.format("%a %b %-d").to_string()
 }
 
+/// `Mon Nov 9`, and `Wed Dec 31, 2025` outside `year` (this year).
+pub fn fmt_day_in(day: NaiveDate, year: i32) -> String {
+    if day.year() == year { fmt_day(day) } else { format!("{}, {}", fmt_day(day), day.year()) }
+}
+
 impl UsageSnapshot {
     /// Everything the view shows for `q`, at `now_ms` on the usage day `today` in `tz`.
     /// `available`: `None` until the store said whether this run has a ledger.
     pub fn build<T: TimeZone>(data: &UsageData, available: Option<bool>, q: &UsageQuery, now_ms: i64, today: NaiveDate, tz: &T) -> Self {
         let span = range_span(q.range, today, q.custom, q.day, tz);
-        let range_label = range_label(q, span, tz).into();
+        let range_label = range_label(q, span, today.year(), tz).into();
         let chart = chart(data, q, span, now_ms, today, tz);
         if available == Some(false) {
             return UsageSnapshot { empty: Empty::Unavailable, span: Some(span), range_label, chart, ..Default::default() };
@@ -604,7 +645,8 @@ fn last_day<T: TimeZone>(span: Span, tz: &T) -> NaiveDate {
     usage_day(span.until_ms - 1, tz)
 }
 
-fn range_label<T: TimeZone>(q: &UsageQuery, span: Span, tz: &T) -> String {
+/// What the range is called; a day or a Custom range outside `year` (this year) says its year.
+fn range_label<T: TimeZone>(q: &UsageQuery, span: Span, year: i32, tz: &T) -> String {
     let (first, last) = (usage_day(span.from_ms, tz), last_day(span, tz));
     match q.range {
         UsageRange::Today => "Today".into(),
@@ -613,9 +655,11 @@ fn range_label<T: TimeZone>(q: &UsageQuery, span: Span, tz: &T) -> String {
         UsageRange::Days30 => "Last 30 days".into(),
         UsageRange::ThisMonth => "This month".into(),
         UsageRange::LastMonth => "Last month".into(),
-        UsageRange::Custom if first == last => fmt_day(first),
+        UsageRange::Custom if first == last => fmt_day_in(first, year),
+        UsageRange::Custom if first.year() != last.year() => format!("{} – {}", first.format("%b %-d, %Y"), last.format("%b %-d, %Y")),
+        UsageRange::Custom if first.year() != year => format!("{} – {}", first.format("%b %-d"), last.format("%b %-d, %Y")),
         UsageRange::Custom => format!("{} – {}", first.format("%b %-d"), last.format("%b %-d")),
-        UsageRange::Day => fmt_day(first),
+        UsageRange::Day => fmt_day_in(first, year),
     }
 }
 
@@ -671,11 +715,11 @@ fn chart<T: TimeZone>(data: &UsageData, q: &UsageQuery, span: Span, now_ms: i64,
             let s = slots[ix].span;
             (ix as f64 + (now_ms - s.from_ms) as f64 / (s.until_ms - s.from_ms) as f64, local(now_ms, tz).format("%H:%M").to_string().into())
         });
-    let label = range_label(q, span, tz);
+    let label = range_label(q, span, today.year(), tz);
     let subtitle = if !hourly {
         format!("{label} · click a bar to see its hours")
     } else if matches!(q.range, UsageRange::Today | UsageRange::Yesterday) {
-        format!("{label}, {}", fmt_day(first))
+        format!("{label}, {}", fmt_day_in(first, today.year()))
     } else {
         label
     };
@@ -708,22 +752,46 @@ fn slot_of(span: Span, label: String, day: NaiveDate, t: SlotTotals) -> ChartSlo
     }
 }
 
-/// The hours of `day`, each with the same hour of the day before behind it.
+/// The hours of `day`, each with the same clock hour of the day before behind it.
 fn hour_chart<T: TimeZone>(data: &UsageData, q: &UsageQuery, day: NaiveDate, now_ms: i64, today: NaiveDate, tz: &T) -> Vec<ChartSlot> {
     let spans = hour_slots(day, tz);
-    let before = data.series(&hour_slots(day - Duration::days(1), tz), &q.filter);
+    let before_spans = hour_slots(day - Duration::days(1), tz);
+    let before = data.series(&before_spans, &q.filter);
     let series = data.series(&spans, &q.filter);
+    let facing = same_clock_hours(&spans, &before_spans, tz);
     spans
         .iter()
         .zip(series)
-        .enumerate()
-        .map(|(ix, (span, t))| {
+        .zip(facing)
+        .map(|((span, t), facing)| {
             let mut slot = slot_of(*span, local(span.from_ms, tz).format("%H").to_string(), day, t);
-            slot.ghost = before.get(ix).map(|b| b.totals);
+            slot.ghost = facing.map(|ix| before[ix].totals);
             slot.future = day == today && span.from_ms > now_ms;
             slot
         })
         .collect()
+}
+
+/// For each of `hours`, the hour of `before` (the day before) that starts at the same clock
+/// time. A day with a DST change has 23 or 25 hours, so the n-th hour of one day is not the
+/// n-th of the other: the k-th time a clock time comes round faces its k-th time the day before
+/// (the night the clocks go back has two 01:00s), and an hour the day before did not have (the
+/// clocks went forward) faces none.
+fn same_clock_hours<T: TimeZone>(hours: &[Span], before: &[Span], tz: &T) -> Vec<Option<usize>> {
+    let clock = |spans: &[Span], shift: Duration| -> Vec<(NaiveDateTime, usize)> {
+        let mut seen: std::collections::HashMap<NaiveDateTime, usize> = Default::default();
+        spans
+            .iter()
+            .map(|s| {
+                let at = local(s.from_ms, tz) + shift;
+                let k = seen.entry(at).or_default();
+                *k += 1;
+                (at, *k)
+            })
+            .collect()
+    };
+    let earlier: std::collections::HashMap<(NaiveDateTime, usize), usize> = clock(before, Duration::days(1)).into_iter().enumerate().map(|(ix, at)| (at, ix)).collect();
+    clock(hours, Duration::zero()).iter().map(|at| earlier.get(at).copied()).collect()
 }
 
 /// A bar a day, with the moving average of the day and the six before (outside the range too).
@@ -757,7 +825,7 @@ fn value_axis(slots: &[ChartSlot], metric: Metric) -> (f64, f64, f64) {
         let lowest = slots.iter().filter_map(|s| s.value(metric)).fold(f64::INFINITY, f64::min);
         let lowest = if lowest.is_finite() { lowest } else { 0.9 };
         let floor = ((lowest * 100.0 - 1.0).floor() / 100.0).max(0.0);
-        let step = nice_step(1.0 - floor, 4);
+        let step = nice_step(1.0 - floor, 4, true);
         return ((floor / step).floor() * step, 1.0, step);
     }
     let highest = slots
@@ -766,12 +834,15 @@ fn value_axis(slots: &[ChartSlot], metric: Metric) -> (f64, f64, f64) {
         .flatten()
         .fold(0.0, f64::max);
     let top = if highest > 0.0 { highest } else { 1.0 };
-    let step = nice_step(top, 4);
+    // tokens are counted whole, and in steps that read whole in k / M (no 2.5k)
+    let tokens = matches!(metric, Metric::In | Metric::Out);
+    let step = if tokens { nice_step(top, 4, false).max(1.0) } else { nice_step(top, 4, true) };
     (0.0, (top / step).ceil() * step, step)
 }
 
-/// A round step (1, 2, 2.5, 5 × 10ⁿ) that splits `span` into about `parts`.
-fn nice_step(span: f64, parts: u32) -> f64 {
+/// A round step (1, 2, 5 × 10ⁿ, and 2.5 × 10ⁿ with `quarters`) that splits `span` into about
+/// `parts`.
+fn nice_step(span: f64, parts: u32, quarters: bool) -> f64 {
     if span <= 0.0 {
         return 1.0;
     }
@@ -782,7 +853,7 @@ fn nice_step(span: f64, parts: u32) -> f64 {
         1.0
     } else if f <= 2.0 {
         2.0
-    } else if f <= 2.5 {
+    } else if f <= 2.5 && quarters {
         2.5
     } else if f <= 5.0 {
         5.0
@@ -1405,7 +1476,7 @@ pub(crate) mod tests {
 
     use agent_session_core::model::{HourlyUsage, LedgerSession, SessionUsage};
     use agent_session_core::pricing::{price, price_tokens};
-    use chrono::FixedOffset;
+    use chrono::{FixedOffset, Timelike};
 
     use super::*;
 
@@ -1705,5 +1776,153 @@ pub(crate) mod tests {
         assert_eq!(custom.range_label, "Nov 2 – Nov 8");
         assert_eq!(custom.chart.slots.len(), 7);
         assert_eq!(build(&data, &query(UsageRange::Days30)).range_label, "Last 30 days");
+    }
+
+    #[test]
+    fn a_range_outside_this_year_says_its_year() {
+        let data = two_days();
+        let custom = |first: &str, last: &str| {
+            let mut q = query(UsageRange::Custom);
+            q.custom = Some((day(first), day(last)));
+            build(&data, &q)
+        };
+        assert_eq!(custom("2026-09-01", "2026-09-30").range_label, "Sep 1 – Sep 30", "this year goes without");
+        assert_eq!(custom("2000-01-03", "2000-01-09").range_label, "Jan 3 – Jan 9, 2000");
+        assert_eq!(custom("2025-12-28", "2026-01-03").range_label, "Dec 28, 2025 – Jan 3, 2026", "across the new year, both ends");
+        assert_eq!(custom("2025-07-04", "2025-07-04").range_label, "Fri Jul 4, 2025");
+        assert_eq!(custom("2025-07-04", "2025-07-04").chart.subtitle, "Fri Jul 4, 2025", "the chart's subtitle too");
+        let mut q = query(UsageRange::Day);
+        q.day = Some(day("2025-12-31"));
+        assert_eq!(build(&data, &q).range_label, "Wed Dec 31, 2025", "a day of last year clicked on the chart");
+        q.day = Some(day("2026-11-13"));
+        assert_eq!(build(&data, &q).range_label, "Fri Nov 13");
+    }
+
+    /// What an axis label says, back as a number: `$1.5k`, `$0.005`, `2.5M`, `99.25%`.
+    fn read_axis(label: &str) -> f64 {
+        let s = label.trim_start_matches('$');
+        let (number, scale) = if let Some(n) = s.strip_suffix('%') {
+            (n, 0.01)
+        } else if let Some(n) = s.strip_suffix('k') {
+            (n, 1e3)
+        } else if let Some(n) = s.strip_suffix('M') {
+            (n, 1e6)
+        } else if let Some(n) = s.strip_suffix('B') {
+            (n, 1e9)
+        } else {
+            (s, 1.0)
+        };
+        number.parse::<f64>().unwrap_or_else(|_| panic!("not a number: {label}")) * scale
+    }
+
+    /// No two lines of the value axis read alike, and each says its own value.
+    fn assert_axis(chart: &ChartData, what: &str) {
+        let labels: Vec<&str> = chart.ticks.iter().map(|(_, l)| l.as_ref()).collect();
+        let distinct: std::collections::BTreeSet<&str> = labels.iter().copied().collect();
+        assert_eq!(distinct.len(), labels.len(), "{what}: {labels:?}");
+        let step = chart.ticks[1].0 - chart.ticks[0].0;
+        for (value, label) in &chart.ticks {
+            assert!((read_axis(label) - value).abs() <= step * 1e-3, "{what}: {label} for {value} ({labels:?})");
+        }
+    }
+
+    #[test]
+    fn the_value_axis_says_each_line_s_value_and_no_two_alike() {
+        // n calls in one hour of today: from one call of Haiku (a tenth of a cent) to millions of Opus
+        let mut n = 1u64;
+        while n < 50_000_000 {
+            for model in ["claude-haiku-5-5", OPUS] {
+                let data = ledger(&[Calls { session: "s", project: "p", at: "2026-11-16T09:00:00+08:00", model, n }]);
+                for metric in [Metric::Cost, Metric::In, Metric::Out] {
+                    let mut q = query(UsageRange::Today);
+                    q.metric = metric;
+                    assert_axis(&build(&data, &q).chart, &format!("{n} calls of {model} by {metric:?}"));
+                }
+            }
+            n = n * 3 / 2 + 1;
+        }
+        // a range without calls: the bare axes
+        for metric in [Metric::Cost, Metric::In, Metric::Out, Metric::HitRate] {
+            let mut q = query(UsageRange::Custom);
+            q.custom = Some((day("2000-01-03"), day("2000-01-09")));
+            q.metric = metric;
+            assert_axis(&build(&two_days(), &q).chart, &format!("nothing by {metric:?}"));
+        }
+        // the hit rate, from a little under its lowest point to 100%
+        for read in [0, 300, 650, 900, 940, 975, 990, 995, 998, 999, 1_000] {
+            let mut data = UsageData::default();
+            data.replace_all(vec![SessionUsage {
+                session: LedgerSession { id: "s".into(), project_key: "-p-p".into(), ..Default::default() },
+                hours: vec![HourlyUsage {
+                    hour: ms("2026-11-16T09:00:00+08:00") / 3_600_000,
+                    model: OPUS.into(),
+                    responses: 1,
+                    tokens: Tokens { input: 1_000 - read, cache_read: read, output: 10, ..Default::default() },
+                    ..Default::default()
+                }],
+            }]);
+            let mut q = query(UsageRange::Today);
+            q.metric = Metric::HitRate;
+            assert_axis(&build(&data, &q).chart, &format!("a hit rate of {read}‰"));
+        }
+    }
+
+    /// `n` calls a clock hour for each hour of `days` in `tz`: the hour plus 1, and 100 more the
+    /// second time a clock hour comes round (the night the clocks go back).
+    fn every_hour<T: TimeZone>(days: &[NaiveDate], tz: &T) -> UsageData {
+        let mut at = Vec::new();
+        for d in days {
+            let mut seen = std::collections::BTreeMap::new();
+            for span in hour_slots(*d, tz) {
+                let clock = local(span.from_ms, tz).hour() as u64;
+                let k = seen.entry(clock).or_insert(0);
+                at.push((chrono::DateTime::from_timestamp_millis(span.from_ms).unwrap().to_rfc3339(), clock + 1 + 100 * *k));
+                *k += 1;
+            }
+        }
+        let calls: Vec<Calls> = at.iter().map(|(at, n)| Calls { session: "s", project: "p", at, model: OPUS, n: *n }).collect();
+        ledger(&calls)
+    }
+
+    /// The hours of `d` charted in `tz`: each one's label and the calls in its dashed box.
+    fn hours_and_boxes<T: TimeZone>(data: &UsageData, d: NaiveDate, tz: &T) -> Vec<(String, Option<u64>)> {
+        let mut q = query(UsageRange::Custom);
+        q.custom = Some((d, d));
+        let snap = UsageSnapshot::build(data, Some(true), &q, ms("2026-12-01T12:00:00Z"), day("2026-12-01"), tz);
+        snap.chart.slots.iter().map(|s| (s.label.to_string(), s.ghost.map(|g| g.responses))).collect()
+    }
+
+    fn hour(label: &str, boxed: Option<u64>) -> (String, Option<u64>) {
+        (label.to_string(), boxed)
+    }
+
+    /// The day's k-th 01:00 stands in front of the k-th 01:00 of the day before; an hour the
+    /// day before did not have gets no box.
+    #[test]
+    fn the_box_behind_an_hour_is_the_same_clock_hour_the_day_before_across_dst() {
+        let tz = &chrono_tz::America::New_York;
+        // spring: 02:00 on Sunday Mar 8 never comes; it is in the usage day of Mar 7 (04:00 to 04:00)
+        let data = every_hour(&[day("2026-03-06"), day("2026-03-07"), day("2026-03-08")], tz);
+        let short = hours_and_boxes(&data, day("2026-03-07"), tz);
+        assert_eq!(short.len(), 23);
+        assert_eq!(short[20..], [hour("00", Some(1)), hour("01", Some(2)), hour("03", Some(4))], "03:00 in front of 03:00, not of 02:00");
+        let after = hours_and_boxes(&data, day("2026-03-08"), tz);
+        assert_eq!(after.len(), 24);
+        assert_eq!(after[21..], [hour("01", Some(2)), hour("02", None), hour("03", Some(4))], "the day before had no 02:00");
+        // autumn: 01:00 comes twice on Sunday Nov 1, in the usage day of Oct 31
+        let data = every_hour(&[day("2026-10-30"), day("2026-10-31"), day("2026-11-01")], tz);
+        let long = hours_and_boxes(&data, day("2026-10-31"), tz);
+        assert_eq!(long.len(), 25);
+        assert_eq!(
+            long[20..],
+            [hour("00", Some(1)), hour("01", Some(2)), hour("01", None), hour("02", Some(3)), hour("03", Some(4))],
+            "the second 01:00 has none the day before"
+        );
+        let after = hours_and_boxes(&data, day("2026-11-01"), tz);
+        assert_eq!(after[20..], [hour("00", Some(1)), hour("01", Some(2)), hour("02", Some(3)), hour("03", Some(4))], "01:00 in front of the first 01:00");
+        // every other hour faces its own clock hour
+        for (label, boxed) in short.iter().chain(&long).filter(|(l, _)| l.as_str() > "03") {
+            assert_eq!(*boxed, Some(label.parse::<u64>().unwrap() + 1), "{label}");
+        }
     }
 }
