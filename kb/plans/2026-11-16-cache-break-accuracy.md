@@ -17,7 +17,7 @@ tags:
 
 2026-11-12 对照官方文档（`kb/refs/`）核对了费用和缓存的算法：价格表、缓存读写倍率、Hit% 的口径、按 5 分钟 / 1 小时判断缓存时长，都和官方一致。问题出在少数响应的用量读取，和回合卡上「缓存为什么重建」的判断。
 
-本机最近 60 天（按记录文件的修改时间）有 127,132 次主线调用，按现在的规则判出 811 次缓存重建：空闲超过缓存时长 494 次、compact 之后 249 次、换模型 33 次、原因不明 35 次。逐个查下来有五个问题：
+本机最近 60 天（按记录文件的修改时间）有 127,132 次主线调用，按现在的规则判出 811 次缓存重建：空闲超过缓存时长 494 次、compact 之后 249 次、换模型 33 次、原因不明 35 次。（2026-11-17 实施步骤 1 复核：这组数字出自已经修正了 iterations 的前期脚本，不是现行实现的输出。验收的基线以 `tmp/2026-11-16-cache-break-accuracy/cache-break-ref/report.md` 和它的 `before.tsv` 为准。）逐个查下来有五个问题：
 
 1. **用量只写在明细里的响应**：本机有 4 次 Opus 5.5 响应（d074913f、01dacff6、603da7ec、196366dd），用量的外层数字全是 0，真实数字只写在明细里。结果有三处出错：
    - 读缓存（每次约 36 万 token）和输出没有计费；
@@ -69,7 +69,7 @@ tags:
 
 | 原因 | 什么情况 | 回合卡说明（示例） | 需要请求记录 |
 |---|---|---|---|
-| compact 之后 | 现有 | `after compaction` | 否 |
+| compact 之后 | compact 之后第一次真正的重建（compact 后紧接着的那次调用读回了缓存时，标在下一次重建上） | `after compaction` | 否 |
 | 换模型 | 现有 | `model changed from Opus 4.7` | 否 |
 | 换 effort | 两次调用的 effort 不同 | `effort changed from high to xhigh` | 否 |
 | 切换 fast mode | 一次是 fast、一次是标准速度 | `fast mode turned on` / `fast mode turned off` | 否 |
@@ -104,10 +104,10 @@ tags:
 
 ### 验收标准
 
-- 4 个只在明细里有用量的响应：费用计入，`asm cost --compare` 的合计变化等于这 4 次的金额；回合卡上它们的误报消失，被掩盖的那次重建出现。
-- 4 次 rewind 后的「不明」不再报；另 4 次 rewind 后的空闲重建，按 rewind 回到的那一点重新判断，结果逐条列出。
-- 60 天全部重建的前后对比表：带请求记录的会话里没有「不明」；每种原因的次数与独立写的参考脚本一致；每一处改判都能逐条解释。
-- 带请求记录的 332 次空闲重建仍判为空闲，显示的间隔改为请求开始时间之间。
+- 4 个只在明细里有用量的响应：费用计入，`asm cost --compare` 的合计变化等于这 4 次的金额；回合卡上它们的误报消失，被掩盖的那次重建出现，原因是 compact。
+- 4 次 rewind 后的「不明」：3 次不再报，1 次按 rewind 回到的那一点改判为换模型（真的换了模型，不能为了符合「不再报」把它藏掉）。另 4 次 rewind 后的空闲重建，按 rewind 回到的那一点重新判断，参考脚本的结果是 3 次仍为空闲、1 次换模型，逐条列出。
+- 60 天全部重建的前后对比表：带请求记录的会话里没有「不明」（没有请求记录的会话里还剩约 9 次）；每种原因的次数与独立写的参考脚本一致；每一处改判都能逐条解释。精确数字以步骤 1 冻结的输入为准，不和本计划里的概数硬比。
+- 带请求记录的 332 次空闲重建（其中 5 次在现行规则下是换模型），改用请求开始时间算间隔后仍都超过缓存时长；最终原因按原因表的顺序定，参考脚本的结果是 314 空闲、5 换模型、5 登录方式、8 请求设置。显示的间隔改为请求开始时间之间。
 - 在 1 小时前缀后面跟 5 分钟写入的会话里，判断按丢掉那一段的时长。
 - 截图：一个会话的回合卡上显示一种新原因的说明行。
 - 用量账本：升级后重建索引，这 4 次响应在 `usage-ledger.sqlite` 里变成新的 token，所在 session 的小时汇总跟着变。Usage 视图里这几天的 Cost 变化等于 `asm cost --compare` 的合计变化，状态栏 Today 与 Usage 一致。
@@ -227,7 +227,7 @@ tags:
      - 请求没变：两边都有 `request`，其余都不成立；
      - 否则不明。
   5. 金额照旧：本次的缓存写入 × `price_tokens`，fast 取 `c.speed == "fast"`，长 prompt 取 `c.prompt > LONG_PROMPT`。
-  6. 记下本次的分段，清掉 `compacted`。
+  6. 记下本次的分段。本次算作一次重建（不论什么原因）时清掉 `compacted`；没有重建就保留，留给 compact 之后第一次真正的重建。新的用户回合开始时也清掉，避免很久以后的重建被归到 compact。用户 2026-11-17 定：4 个会话里 compact 之后的第一次响应读回了约 36 万缓存，紧接着的那次才少读约 34 万，这次应标 compact，不按请求记录标成「更早的消息被改写」或「system 或工具」。
 
 **core `claude/conversation.rs`**
 
@@ -280,6 +280,7 @@ tags:
 ### 实施步骤
 
 - [ ] 1. **参考脚本**：在 `tmp/<date>-cache-break-accuracy/expected_breaks.py` 用 Python 独立实现本 plan 的规则，在 60 天数据上输出每次重建（会话、回复时间、原因、少读、写入、间隔、时长）的 TSV，同时按现行规则输出一份，生成前后对比表。可以复用 `tmp/2026-11-16-cache-accuracy-plan/` 里的脚本。
+  - 2026-11-17 初版已完成（`tmp/2026-11-16-cache-break-accuracy/`：`expected_breaks.py`、`before.tsv` / `after.tsv`、`comparison.md`、`changes-explained.tsv`，报告在 `cache-break-ref/report.md`）。按上面新定的 compact 规则更新后，这一步才算完成。
 - [ ] 2. **iterations**：
   - `gen_fixtures.py` 加一个外层全 0、明细有数的响应，和一个带 `compaction` 项的响应，`uv run` 重跑并提交；
   - `tests/parse_transcript.rs` 写失败的测试（会话费用、token、context）；
@@ -296,7 +297,7 @@ tags:
 - [ ] 5. **app**：`cache_note` 的测试加上新原因 → 实现。
 - [ ] 6. **真实数据核对**：
   - 新增 `#[ignore]` 测试 `real_transcripts_cache_breaks`（`crates/core/tests/conversation.rs`）：`ASM_CACHE_AUDIT_DAYS=60 ASM_CACHE_AUDIT_OUT=<tsv>` 对 `~/.claude/projects/*/*.jsonl` 跑 `read_conversation`，输出与步骤 1 同格式的 TSV；
-  - 与参考脚本逐条比对，差异逐条解释，存进任务的 tmp 目录；
+  - 与参考脚本逐条比对，差异逐条解释，存进任务的 tmp 目录。参考脚本先按 2026-11-17 定的 compact 规则更新（见步骤 1）。比对用步骤 1 冻结的 `calls.jsonl` / manifest 作输入，对齐毫秒单位、文件筛选和完整的调用键；要重扫实时数据，就用参考脚本重新生成一对新旧 TSV 再比；
   - 跑 `asm cost --compare`、`make test`、`make parity`；
   - 账本：在真实账本的副本上（`sqlite3 "file:…/usage-ledger.sqlite?mode=ro" ".backup <副本>"`，`ASM_DB` 指向副本旁的索引，不碰真实数据目录）重建一次，核对这 4 次响应的新值和 Usage 视图的变化；
   - 用 `asm session-old ID --conversation` 的 `read_ms` 在最大的几个会话上量读取耗时，与改动前比较。
