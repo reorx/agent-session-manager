@@ -24,7 +24,7 @@ Agent Session Manager 的定位是本机 agent 会话的管理中心。除了人
 - 输出给管道时仍带颜色码；没有 JSON；结果里没有标题、首条 prompt、工作目录，要再查一次。
 - 会搜到正在进行的当前会话。
 - 读一个会话只能整份导出，大会话导出一百多 KB。
-- 看不到缓存命中率和缓存在哪里、为什么重建；有两种情况会让失效数字出错（`kb/known-issues.md`）。
+- 看不到缓存命中率和缓存在哪里、为什么重建；有两种情况会让失效数字出错（`kb/known-issues.md`），由 [cache-break-accuracy](../2026-11-16-cache-break-accuracy.md) 修正。
 - `asm` 不随 app 发布，只有开发机能用。
 
 本机数据量：3,636 份记录文件、7.4 GB；最近 30 天里，工具的输入输出约 3.15 亿字符，用户输入 2450 万，agent 回复 490 万，thinking 80 万。thinking 块只有约 9% 有正文，其余只留了签名。
@@ -63,7 +63,7 @@ Agent Session Manager 的定位是本机 agent 会话的管理中心。除了人
 | 期 | spec | 内容 |
 |---|---|---|
 | P1 | [session-search.md](session-search.md) | 找会话：新的搜索和会话命令、项目列表、按范围读会话、旧命令改名、通用约定；skill 的总说明、CLI 规范、找会话的方法 |
-| P2 | [cache-health.md](cache-health.md) | 缓存检查：总览和单个会话的重建明细；先修正两种出错的情况；skill 的缓存检查方法 |
+| P2 | [cache-health.md](cache-health.md) | 缓存检查：重建存进索引，总览和单个会话的重建明细；skill 的缓存检查方法。判定规则来自 [cache-break-accuracy](../2026-11-16-cache-break-accuracy.md)，它先做 |
 | P3 | [pluggable-text-index.md](pluggable-text-index.md) | 搜索优化：可选的分词全文索引和向量检索，接在统一的接口后面 |
 | P4 | [distribution.md](distribution.md) | 分发：`asm` 随 app 安装，skill 可以一键安装 |
 
@@ -96,7 +96,7 @@ P1 和 P2 期间，在本机通过 `make` 安装 CLI，在本仓库里使用 ski
 ### 顺序与依赖
 
 - P1 先做：通用约定（颜色、JSON、时间参数、排除当前会话、`--color`）在 P1 落地，P2 的 `asm cache` 直接沿用。
-- P2 依赖 P1 的通用约定和 `cli.md`；两期都改 `schema.sql`，各自提升 `SCHEMA_VERSION`。
+- P2 依赖 P1 的通用约定和 `cli.md`，以及 [cache-break-accuracy](../2026-11-16-cache-break-accuracy.md)（判定规则与 `CacheTracker`，用户 2026-11-16 决定先做）；两期都改 `schema.sql`，各自提升 `SCHEMA_VERSION`。
 - P3 依赖 P1 的搜索接口：新后端只替换「找到哪些消息」这一步，输出不变。
 - P4 最后：CLI 参数稳定后再打包发布。
 
@@ -112,7 +112,7 @@ P1 和 P2 期间，在本机通过 `make` 安装 CLI，在本仓库里使用 ski
 - `skills/asm/references/cli.md`（先于实现）和对应的场景文档。
 - `AGENTS.md`：「当前状态」加一行、「开发命令」里 `make asm` 的命令清单、`make parity` 的说明（改名）。
 - `README.md` 的 CLI 一节（如果列了命令）。
-- `kb/docs/product-prd.md` 的状态表；`kb/known-issues.md`（P2 删掉修好的两条）。
+- `kb/docs/product-prd.md` 的状态表；`kb/known-issues.md`（失效误判的两条由 cache-break-accuracy 删掉）。
 
 ### 跨期的风险
 

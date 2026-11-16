@@ -115,6 +115,7 @@ plans / notes / sessions（当时的方案、实测与取舍），改到对应�
 - `kb/plans/2026-11-10-cost-analysis.md` — 主模型定义、换模型计价口径、分组用量存表的原因；改 Cost tab、Model 过滤或 `asm cost --as` 前读
 - `kb/plans/2026-11-03-context-window-from-catalog.md` — 模型目录格式、合并优先级、刷新；改模型目录读取或窗口来源前读
 - `kb/plans/2026-11-12-columns-and-cache-breaks.md` — 列开关、命中率、缓存失效的判定与原因；改表格列、`conversation.rs::cache_check` 或回合卡说明行前读
+- `kb/plans/2026-11-16-cache-break-accuracy.md` — 失效判定的新规则：用量明细（`iterations`）、按 rewind 的祖先调用比较、请求记录（`api-request`）给出的原因、分段的缓存时长；改用量解析、失效判定（实现后在 `claude/cache.rs`）或回合卡失效文案前读
 - `kb/plans/2026-10-26-favorites.md` — 收藏快照、目录迁移、去重优先级、索引根目录守卫；改收藏流程前读
 - `kb/notes/2026-10-10-transcript-reader-xml.md`（导出格式）、`kb/notes/2026-10-10-transcript-reader.md`（压缩规则）；改导出内容前读
 - `kb/sessions/2026-10-28-release-1.0.md` — 1.0 发布的决定、升级测试证据、Sparkle 延后弹提示的原因
