@@ -315,6 +315,12 @@ fn matched(text: &str) -> Option<u32> {
     regex::Regex::new(r#"matched="(\d+)""#).unwrap().captures(first).map(|c| c[1].parse().unwrap())
 }
 
+/// The `context="N"` of the opening tag.
+fn context_turns(text: &str) -> Option<u32> {
+    let first = text.lines().next().unwrap();
+    regex::Regex::new(r#" context="(\d+)""#).unwrap().captures(first).map(|c| c[1].parse().unwrap())
+}
+
 fn fixture(name: &str) -> PathBuf {
     fixture_root().parent().unwrap().join(name)
 }
@@ -527,30 +533,116 @@ fn zoo_as(sid: &str) -> T {
 fn grep_keeps_the_turns_with_a_hit_and_their_context() {
     let tmp = tempfile::tempdir().unwrap();
     let path = zoo().write(tmp.path());
+    // (turns shown, matched="…", context="…")
     let kept = |opts: TranscriptOptions| {
         let text = read_with(&path, opts);
-        let turns = shown_turns(&text);
-        assert_eq!(matched(&text), Some(turns.len() as u32), "matched counts the turns kept: {text}");
-        turns
+        (shown_turns(&text), matched(&text), context_turns(&text))
     };
     let g = |t: &[&str]| TranscriptOptions { grep: grep(t), ..TranscriptOptions::default() };
-    assert_eq!(kept(g(&["NEEDLE"])), [3]);
-    assert_eq!(kept(g(&["needle", "turn five"])), [3, 5], "any TERM keeps a turn");
-    assert_eq!(kept(g(&["needle|five"])), [3, 5]);
-    assert_eq!(kept(TranscriptOptions { context: 1, ..g(&["needle"]) }), [2, 3, 4]);
-    assert_eq!(kept(TranscriptOptions { context: 9, ..g(&["needle"]) }), [1, 2, 3, 4, 5]);
-    assert_eq!(kept(TranscriptOptions { context: 1, turns: range("1-2"), ..g(&["needle"]) }), [2], "context outside the range is left out");
-    assert_eq!(kept(TranscriptOptions { turns: range("4-"), ..g(&["needle"]) }), Vec::<u32>::new());
-    assert_eq!(kept(g(&["nothing like this"])), Vec::<u32>::new());
-    // thinking and tool calls count only when they are shown
-    assert_eq!(kept(g(&["zebra"])), Vec::<u32>::new());
-    assert_eq!(kept(TranscriptOptions { thinking: true, ..g(&["zebra"]) }), [1]);
-    assert_eq!(kept(g(&["gnu"])), Vec::<u32>::new());
-    assert_eq!(kept(TranscriptOptions { tools: true, ..g(&["gnu"]) }), [4]);
-    assert_eq!(kept(TranscriptOptions { tools: true, ..g(&["$ make"]) }), [4], "input as in the tool-input kind");
-    assert_eq!(kept(g(&["Bash"])), Vec::<u32>::new(), "the turn summary is not text that is searched");
+    assert_eq!(kept(g(&["NEEDLE"])), (vec![3], Some(1), None));
+    assert_eq!(kept(g(&["needle", "turn five"])), (vec![3, 5], Some(2), None), "any TERM keeps a turn");
+    assert_eq!(kept(g(&["needle|five"])).0, [3, 5]);
+    // matched counts the turns with a hit, context the turns around them
+    assert_eq!(kept(TranscriptOptions { context: 1, ..g(&["needle"]) }), (vec![2, 3, 4], Some(1), Some(2)));
+    assert_eq!(kept(TranscriptOptions { context: 9, ..g(&["needle"]) }), (vec![1, 2, 3, 4, 5], Some(1), Some(4)));
+    assert_eq!(kept(TranscriptOptions { context: 1, ..g(&["needle", "turn four"]) }), (vec![2, 3, 4, 5], Some(2), Some(2)));
+    // a hit outside the range brings its context into it, from either side
+    assert_eq!(kept(TranscriptOptions { context: 1, turns: range("1-2"), ..g(&["needle"]) }), (vec![2], Some(0), Some(1)));
+    assert_eq!(kept(TranscriptOptions { context: 1, turns: range("4-"), ..g(&["needle"]) }), (vec![4], Some(0), Some(1)));
+    assert_eq!(kept(TranscriptOptions { turns: range("4-"), ..g(&["needle"]) }), (vec![], Some(0), None));
+    assert_eq!(kept(g(&["nothing like this"])), (vec![], Some(0), None));
+    // thinking is judged as in `asm search`'s default kinds, without --thinking
+    assert_eq!(kept(g(&["zebra"])).0, [1]);
+    // tool calls only with --tools, as `asm search` searches them only with --in tool
+    assert_eq!(kept(g(&["gnu"])).0, Vec::<u32>::new());
+    assert_eq!(kept(TranscriptOptions { tools: true, ..g(&["gnu"]) }).0, [4]);
+    assert_eq!(kept(TranscriptOptions { tools: true, ..g(&["$ make"]) }).0, [4], "input as in the tool-input kind");
+    assert_eq!(kept(g(&["Bash"])).0, Vec::<u32>::new(), "the turn summary is not text that is searched");
     let regex = Query::parse(&terms(&["ne+dle"]), true, false).unwrap();
-    assert_eq!(kept(TranscriptOptions { grep: Some(regex), ..TranscriptOptions::default() }), [3]);
+    assert_eq!(kept(TranscriptOptions { grep: Some(regex), ..TranscriptOptions::default() }).0, [3]);
+    // the turns in range left out because their only hits are in tool calls, for a note
+    let hidden = |opts: TranscriptOptions| read_transcript_with(&path, &opts).unwrap().tool_hits_hidden;
+    assert_eq!(hidden(g(&["gnu"])), 1);
+    assert_eq!(hidden(g(&["gnu", "needle"])), 1);
+    assert_eq!(hidden(TranscriptOptions { tools: true, ..g(&["gnu"]) }), 0);
+    assert_eq!(hidden(TranscriptOptions { turns: range("1-3"), ..g(&["gnu"]) }), 0, "only turns in range");
+    assert_eq!(hidden(g(&["four", "gnu"])), 0, "a turn with another hit is shown");
+}
+
+/// One turn: a plan, five calls (the third one's output has the hit), and a final reply.
+fn busy() -> T {
+    let mut t = T::new(SA);
+    t.prompt("do it").reply("plan");
+    for c in ["a", "b", "c", "d", "e"] {
+        let out = if c == "c" { "has NEEDLE".to_string() } else { c.repeat(3) };
+        t.tool(&format!("id-{c}"), "Bash", json!({"command": c}), &out);
+    }
+    t.reply("done");
+    t
+}
+
+fn bash(c: &str, out: &str) -> String {
+    format!("<tool name=\"Bash\">\n<input>\n$ {c}\n</input>\n<output>\n{out}\n</output>\n</tool>\n")
+}
+
+#[test]
+fn grep_shows_the_items_with_a_hit_and_their_neighbours_and_skips_the_rest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = busy().write(tmp.path());
+    let skip = |n: usize, chars: usize| {
+        format!("…[skipped {n} item{}, {chars} chars; --turns 1 without --grep shows them]\n", if n == 1 { "" } else { "s" })
+    };
+    let head = |matched: u32| format!("<transcript session_id=\"{SA}\" turns=\"1\" matched=\"{matched}\">\n\n<user turn=\"1\" ts=\"{}\">\ndo it\n</user>\n\n", at(1));
+    let tools = |t: &[&str]| TranscriptOptions { tools: true, grep: grep(t), ..TranscriptOptions::default() };
+
+    // the hit in the third call: the calls before and after it; "plan" + call a, call e + "done"
+    assert_eq!(
+        read_with(&path, tools(&["needle"])),
+        format!("{}{}{}{}{}{}\n</transcript>\n", head(1), skip(2, 10), bash("b", "bbb"), bash("c", "has NEEDLE"), bash("d", "ddd"), skip(2, 10))
+    );
+    // a hit in the first item: nothing before it to skip
+    assert_eq!(
+        read_with(&path, tools(&["plan"])),
+        format!("{}<agent>\nplan\n</agent>\n{}{}\n</transcript>\n", head(1), bash("a", "aaa"), skip(5, 35))
+    );
+    // a hit in the prompt shows the item after it
+    assert_eq!(read_with(&path, tools(&["do it"])), format!("{}<agent>\nplan\n</agent>\n{}\n</transcript>\n", head(1), skip(6, 41)));
+    // without --tools the calls are no items: the summary stays, both replies are shown
+    assert_eq!(
+        read_with(&path, TranscriptOptions { grep: grep(&["plan"]), ..TranscriptOptions::default() }),
+        format!("{}<turn-summary>\nCalled Bash 5 times.\n</turn-summary>\n<agent>\nplan\n</agent>\n<agent>\ndone\n</agent>\n\n</transcript>\n", head(1))
+    );
+    // the characters skipped are the ones the turn shows without --grep: long bodies cut
+    let mut t = T::new(SA);
+    t.prompt("go").tool("id-z", "Bash", json!({"command": "ls"}), &"z".repeat(5000)).reply("plan").reply("a").reply("NEEDLE");
+    let long = t.write(&tmp.path().join("long"));
+    let text = read_with(&long, tools(&["needle"]));
+    assert!(text.contains(&format!("</user>\n\n{}<agent>\na\n</agent>\n<agent>\nNEEDLE\n</agent>\n\n", skip(2, 2008))), "{text}");
+    // without --grep, --turns shows the whole turn
+    let whole = read_with(&path, TranscriptOptions { tools: true, turns: range("1"), ..TranscriptOptions::default() });
+    assert!(!whole.contains("…[skipped") && whole.contains(&bash("a", "aaa")) && whole.contains(&bash("e", "eee")), "{whole}");
+}
+
+#[test]
+fn a_thinking_hit_is_shown_without_thinking_and_context_turns_keep_only_their_prompt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut t = T::new(SA);
+    t.prompt("q").thinking("a zebra thought", "first").thinking("calm thought", "second").reply("third");
+    let path = t.write(tmp.path());
+    let text = read_with(&path, TranscriptOptions { grep: grep(&["zebra"]), ..TranscriptOptions::default() });
+    let skipped = "…[skipped 2 items, 11 chars; --turns 1 without --grep shows them]";
+    assert!(text.contains(&format!("<thinking>\na zebra thought\n</thinking>\n<agent>\nfirst\n</agent>\n{skipped}\n")), "{text}");
+    assert!(!text.contains("calm thought"), "thinking without a hit needs --thinking: {text}");
+    let text = read_with(&path, TranscriptOptions { thinking: true, grep: grep(&["zebra"]), ..TranscriptOptions::default() });
+    assert!(text.contains("<agent>\nfirst\n</agent>\n…[skipped 3 items, 23 chars; --turns 1 without --grep shows them]\n"), "{text}");
+
+    // a turn kept as context has no hit: everything after its prompt is skipped
+    let path = zoo().write(&tmp.path().join("zoo"));
+    let text = read_with(&path, TranscriptOptions { context: 1, grep: grep(&["needle"]), ..TranscriptOptions::default() });
+    assert!(text.contains(&format!("<user turn=\"2\" ts=\"{}\">\nturn two\n</user>\n\n…[skipped 1 item, 9 chars; --turns 2 without --grep shows them]\n\n", at(3))), "{text}");
+    assert!(text.contains("turn four\n</user>\n\n<turn-summary>\nCalled Bash 1 time.\n</turn-summary>\n…[skipped 1 item, 10 chars; --turns 4 without --grep shows them]\n\n"), "{text}");
+    let outline = read_with(&path, TranscriptOptions { outline: true, context: 1, grep: grep(&["needle"]), ..TranscriptOptions::default() });
+    assert!(outline.starts_with(&format!("{SB} · 5 turns, 1 matched, 2 as context · ")), "{outline}");
 }
 
 /// A tool call whose output is `output`.
@@ -615,6 +707,37 @@ fn long_tool_output_is_cut_around_the_hits() {
 }
 
 #[test]
+fn windows_count_characters_and_stop_at_the_end_of_the_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tools = TranscriptOptions { tools: true, grep: grep(&["needle"]), ..TranscriptOptions::default() };
+    // a hit amid multi-byte text: the window is 300 characters before it and 700 from its start
+    let text = format!("{}NEEDLE{}", "中".repeat(3000), "文".repeat(3000));
+    let path = one_call(&tmp.path().join("wide"), &text);
+    assert_eq!(
+        output_body(&read_with(&path, tools.clone())),
+        format!("{}\n…[cut 2200 chars]\n{}NEEDLE{}\n…[cut 2306 chars]", "中".repeat(500), "中".repeat(300), "文".repeat(694))
+    );
+    // a hit at the very end: its window ends with the text, no cut line after it
+    let text = format!("{}NEEDLE", "a".repeat(5000));
+    let path = one_call(&tmp.path().join("end"), &text);
+    assert_eq!(output_body(&read_with(&path, tools)), format!("{}\n…[cut 4200 chars]\n{}NEEDLE", "a".repeat(500), "a".repeat(300)));
+}
+
+#[test]
+fn a_document_is_a_placeholder_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut t = T::new(SA);
+    t.user(json!([{"type": "text", "text": "read this"}, {"type": "document", "source": {"data": "YWJj"}}]), "human").reply("ok");
+    t.user(json!([{"type": "document", "source": {"data": "YWJj"}}]), "human").reply("ok");
+    let path = t.write(tmp.path());
+    let text = read_with(&path, TranscriptOptions { turns: range("1-"), ..TranscriptOptions::default() });
+    assert!(text.contains("\nread this\n\n[Document omitted]\n</user>"), "{text}");
+    assert!(text.contains("\">\n[Document omitted]\n</user>"), "{text}");
+    let outline = read_with(&path, TranscriptOptions { outline: true, ..TranscriptOptions::default() });
+    assert!(outline.ends_with(&format!("   2  {}  [Document omitted]\n", at(3))), "{outline}");
+}
+
+#[test]
 fn long_other_text_and_tool_input_are_cut_too_but_prompts_and_replies_are_not() {
     let tmp = tempfile::tempdir().unwrap();
     let mut t = T::new(SA);
@@ -662,7 +785,6 @@ fn every_hit_the_search_reports_is_shown_in_its_turn() {
                     let export = read_with(&path, TranscriptOptions {
                         turns: range(&turn.to_string()),
                         grep: Some(q.clone()),
-                        thinking: true,
                         tools: true,
                         ..TranscriptOptions::default()
                     });
@@ -707,6 +829,32 @@ fn both_entrypoints_take_the_reading_options() {
     let out = reader_cmd("asm", tmp.path()).arg(&path).args(["--grep", "wombat", "--tools"]).output().unwrap();
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.starts_with(&format!("<transcript session_id=\"{SA}\" turns=\"3\" matched=\"1\">\n\n<user turn=\"1\" ts=\"2026-11-01 10:02\">")), "{text}");
+}
+
+#[test]
+fn without_reading_options_both_entrypoints_print_read_transcript() {
+    let tmp = tempfile::tempdir().unwrap();
+    for path in [wombat().write(tmp.path()), fixture("reader.jsonl"), fixture("conversation.jsonl")] {
+        let want = read_transcript(&path).unwrap().text;
+        for bin in ["asm", "transcript-reader"] {
+            let out = reader_cmd(bin, tmp.path()).arg(&path).output().unwrap();
+            assert_eq!(String::from_utf8(out.stdout).unwrap(), want, "{bin} {}", path.display());
+        }
+    }
+}
+
+#[test]
+fn grep_notes_on_stderr_the_turns_whose_hits_need_tools() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = busy().write(tmp.path());
+    for bin in ["asm", "transcript-reader"] {
+        let out = reader_cmd(bin, tmp.path()).arg(&path).args(["--grep", "needle"]).output().unwrap();
+        assert!(out.status.success(), "{bin}");
+        assert_eq!(matched(&String::from_utf8_lossy(&out.stdout)), Some(0));
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "note: 1 turn has hits only in tool calls; add --tools to read them\n", "{bin}");
+        let out = reader_cmd(bin, tmp.path()).arg(&path).args(["--tools", "--grep", "needle"]).output().unwrap();
+        assert!(out.stderr.is_empty(), "{bin}: {}", String::from_utf8_lossy(&out.stderr));
+    }
 }
 
 #[test]

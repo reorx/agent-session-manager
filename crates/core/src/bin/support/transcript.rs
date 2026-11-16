@@ -21,8 +21,9 @@ pub struct ReaderArgs {
     /// Only these turns: N, N-M or N- (turns start at 1)
     #[arg(long, value_name = "RANGE", value_parser = TurnRange::parse)]
     pub turns: Option<TurnRange>,
-    /// Only turns where any TERM occurs; `|` separates ways of saying one. Takes every following
-    /// word up to the next option; attach a TERM that starts with `-`: --grep=-rf
+    /// Only turns where any TERM occurs, and in them the items with a hit and one on each side
+    /// (tool calls count only with --tools); `|` separates ways of saying one. Takes every
+    /// following word up to the next option; attach a TERM that starts with `-`: --grep=-rf
     #[arg(long, value_name = "TERM", num_args = 1..)]
     pub grep: Vec<String>,
     /// The --grep TERMs are regular expressions
@@ -31,7 +32,7 @@ pub struct ReaderArgs {
     /// With --grep, also N turns before and after each turn with a hit
     #[arg(long, value_name = "N", requires = "grep")]
     pub context: Option<u32>,
-    /// Include the agent's thinking
+    /// Include the agent's thinking (with --grep, a thought with a hit is shown without it)
     #[arg(long)]
     pub thinking: bool,
     /// Each tool call with its input and output instead of the one-line summary
@@ -78,6 +79,11 @@ pub fn run(args: ReaderArgs, claude: &ClaudeDir, db: &std::path::Path, out: &mut
     let export = read_transcript_with(&path, &opts)?;
     if export.skipped_lines > 0 {
         eprintln!("warning: skipped {} malformed/incomplete JSONL records in {}", export.skipped_lines, path.display());
+    }
+    if export.tool_hits_hidden > 0 {
+        let n = export.tool_hits_hidden;
+        let (turns, have) = if n == 1 { ("turn", "has") } else { ("turns", "have") };
+        eprintln!("note: {n} {turns} {have} hits only in tool calls; add --tools to read them");
     }
     if let Some(output) = args.output {
         let mut file = OpenOptions::new().write(true).create_new(true).open(&output)

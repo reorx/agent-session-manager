@@ -677,10 +677,10 @@ asm transcript INPUT [--outline] [--turns RANGE] [--grep TERM... [--regex] [--co
 | `-o, --output FILE` | file | stdout | Write to FILE instead; FILE must not exist yet |
 | `--outline` | — | off | One line per turn instead of the text |
 | `--turns RANGE` | `N`, `N-M`, `N-` (turns start at 1) | all | Only these turns (`N-`: from N to the end) |
-| `--grep TERM...` | one or more TERMs (see TERMs) | — | Only turns where any TERM occurs in the parts shown (thinking with `--thinking`, tool calls with `--tools`), judged on their full text before any cutting. `--grep` can be repeated; a TERM that starts with `-` is attached: `--grep=-rf` |
+| `--grep TERM...` | one or more TERMs (see TERMs) | — | Only turns where any TERM occurs, and in them only the items around the hits (see below). Judged on the full text before any cutting, in the prompt, replies and thinking (`asm search`'s default kinds; thinking also without `--thinking`) and `other` text; in tool input and output only with `--tools`, as `asm search` searches them only when `--in` names them. `--grep` can be repeated; a TERM that starts with `-` is attached: `--grep=-rf` |
 | `--regex` | — | off | The `--grep` TERMs are regular expressions, see TERMs (needs `--grep`, else exit 2) |
 | `--context N` | number | `0` | Also N turns before and after each turn with a hit (needs `--grep`, else exit 2) |
-| `--thinking` | — | off | Include the agent's thinking |
+| `--thinking` | — | off | Include the agent's thinking. With `--grep`, a thought with a hit is shown without it |
 | `--tools` | — | off | Include each tool call with its input and output instead of the one-line summary |
 
 `--turns` and `--grep` together keep the turns that satisfy both: a turn in the range that has a
@@ -688,7 +688,9 @@ hit or is within `--context` of a turn with a hit (that turn may be outside the 
 `--outline` with either lists only the turns they keep. A `--turns` number beyond the last turn
 is an error (exit 1, `turn 30 is beyond the last turn (21)`); `0`, `3-2` or anything but `N`,
 `N-M`, `N-` is an invalid argument (exit 2). A regular expression TERM that is not valid is
-matched as literal text and stderr says so, as in `search`.
+matched as literal text and stderr says so, as in `search`. With `--grep` but not `--tools`, turns
+in range left out because their only hits are in tool calls are noted on stderr:
+`note: 2 turns have hits only in tool calls; add --tools to read them` (exit 0).
 
 Full export (no reading option):
 
@@ -710,15 +712,18 @@ Called Bash 3 times, Read 2 times.
 ```
 
 Reading options (`--turns`, `--grep`, `--thinking`, `--tools`) change the export so that every
-hit `asm search` reports can be found in its turn: each turn shows the items `asm search`
-searches (see Items) with the text it searches. So, unlike the full export:
+hit `asm search` reports can be found in its turn (a `tool-input` or `tool-output` hit with
+`--tools`): each turn shows the items `asm search` searches (see Items) with the text it
+searches. So, unlike the full export:
 
-- The opening tag carries the session's number of turns, and `matched="N"` (turns kept) with
-  `--grep`: `<transcript session_id="…" turns="21" matched="2">`.
+- The opening tag carries the session's number of turns. With `--grep` it adds `matched="N"`,
+  the turns kept for a hit of their own, and with `--context` also `context="N"`, the turns kept
+  only for being near one: `<transcript session_id="…" turns="21" matched="1" context="2">`.
 - Each `<user>` carries its turn number and local time (`ts` is left out when the record has
   none): `<user turn="5" ts="2026-11-13 08:01">`. Its text is the prompt as recorded, with the
   tags Claude Code wraps around it (`<command-name>`, `<system-reminder>`, …), which the full
-  export and `--outline` clean away; an image or document is a `[Image omitted]` line.
+  export and `--outline` clean away; an image is an `[Image omitted]` line, a document a
+  `[Document omitted]` line.
 - Every reply the agent wrote is an `<agent>` element in file order, one per JSONL record,
   commentary between tool calls included. When the agent answered but its last words were not a
   final reply (a tool call came after them, or there were none), the turn ends with
@@ -747,6 +752,14 @@ searches (see Items) with the text it searches. So, unlike the full export:
   TERM. Characters are counted as Unicode characters, not bytes. `<user>`, `<agent>` and
   `<thinking>` are never cut. So a hit `asm search` found deep in a long tool output is read
   with `asm transcript ID --turns N --tools --grep` and the same TERMs.
+- With `--grep`, a turn kept shows its prompt, each item with a hit, and the one item before and
+  after each of those; the prompt counts as the item before the first. Each run of other items
+  is one line `…[skipped 14 items, 9120 chars; --turns 6 without --grep shows them]`: the items
+  left out and the characters their text shows without `--grep` (bodies cut to 2,000). An item is
+  one `<agent>`, `<thinking>`, `<other>` or `<tool>` element; tool calls are items only with
+  `--tools`, and thinking without a hit only with `--thinking`. The `<turn-summary>` and
+  `<agent status="missing">` are always shown. A turn kept as context has no hit, so it shows its
+  prompt and one skipped line. `--turns` without `--grep` shows whole turns.
 - A blank line follows `</user>` and the last element of each turn; the elements inside a turn
   follow each other without one.
 - Turns not kept are left out without a trace; text before the first prompt is never shown.
@@ -781,6 +794,38 @@ $ tail -n 50 logs/health.log
 </transcript>
 ```
 
+The same turn with `--turns 6 --tools --grep healthz`, which hits the tool output only:
+
+```
+<transcript session_id="1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26" turns="21" matched="1">
+
+<user turn="6" ts="2026-11-13 08:06">
+那现场为什么连不上？
+</user>
+
+<agent>
+先看一下健康检查的日志。
+</agent>
+<tool name="Bash">
+<input>
+# Show the last health checks
+$ tail -n 50 logs/health.log
+</input>
+<output>
+2026-11-13 08:05:58 healthz_error: URLError(timed out)
+…[cut 5210 chars]
+</output>
+</tool>
+<agent>
+第 12 轮开始前健康检查连不上现场……
+</agent>
+
+</transcript>
+```
+
+Its thinking (no hit, no `--thinking`) is no item. In a turn with 40 tool calls and a hit in the
+20th, the output is that call, the item before and after it, and a skipped line on each side.
+
 `--outline`:
 
 ```
@@ -791,10 +836,11 @@ $ tail -n 50 logs/health.log
 ```
 
 The first line names the session, its number of turns (`, 2 matched` added with `--grep`: the
-turns kept), and its first prompt's and last record's local times. Then one line per turn kept:
+turns with a hit; `, 3 as context` too with `--context`), and its first prompt's and last
+record's local times. Then one line per turn kept:
 the turn number (right-aligned in 4 columns), the local time (`?` when unknown), and the first
 non-empty line of the prompt cleaned of injected tags (`/model default` rather than the
-`<command-name>` tags; `[Image omitted]` for an image alone), at most 120 characters, `…` when
+`<command-name>` tags; `[Image omitted]` or `[Document omitted]` for an image or document alone), at most 120 characters, `…` when
 cut.
 
 `transcript` reads the record file directly and never touches the index. A transcript with

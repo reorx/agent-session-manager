@@ -395,6 +395,9 @@ pub struct TranscriptExport {
     pub text: String,
     /// Malformed JSON records, including a partially written final line.
     pub skipped_lines: usize,
+    /// With `grep` but not `tools`: turns in range whose only hits are in tool calls, which are
+    /// not shown (see `transcript::TranscriptOptions`).
+    pub tool_hits_hidden: u32,
 }
 
 /// A prompt recovered from history.jsonl, with its Unix millisecond timestamp.

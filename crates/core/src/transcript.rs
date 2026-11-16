@@ -369,7 +369,7 @@ fn human_text(record: &Record, content: &Content) -> Option<String> {
 pub fn read_transcript(path: &Path) -> Result<TranscriptExport> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let id = path.file_stem().unwrap_or_default().to_string_lossy();
-    let mut export = TranscriptExport { text: format!("<transcript session_id=\"{}\">\n\n", xml_attribute(&id)), skipped_lines: 0 };
+    let mut export = TranscriptExport { text: format!("<transcript session_id=\"{}\">\n\n", xml_attribute(&id)), skipped_lines: 0, tool_hits_hidden: 0 };
     let mut turn = Turn::default();
     let mut filter = RecordFilter::for_file(path);
     let mut reader = BufReader::new(file);

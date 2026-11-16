@@ -70,8 +70,9 @@ pub(super) fn read(path: &Path, opts: &TranscriptOptions) -> Result<TranscriptEx
         }
     }
     let id = path.file_stem().unwrap_or_default().to_string_lossy();
+    let tool_hits_hidden = reader.tool_hits_hidden;
     let text = if opts.outline { reader.outline(&id) } else { reader.xml(&id) };
-    Ok(TranscriptExport { text, skipped_lines })
+    Ok(TranscriptExport { text, skipped_lines, tool_hits_hidden })
 }
 
 /// A tool call's result.
@@ -90,6 +91,58 @@ enum Part {
     Tool { name: String, input: Option<String>, output: Option<Output> },
 }
 
+impl Part {
+    /// The texts `--grep` judges: the item's text, or a call's input and result.
+    fn has_hit(&self, query: &Query) -> bool {
+        let hit = |text: &str| query.mask(text) != 0;
+        match self {
+            Part::Thinking(text) | Part::Agent(text) | Part::Other(text) => hit(text),
+            Part::Tool { input, output, .. } => input.as_deref().is_some_and(hit) || output.as_ref().is_some_and(|o| hit(&o.text)),
+        }
+    }
+
+    /// About the characters of text it shows without `--grep` (bodies cut to `CUT_CHARS`).
+    fn shown_chars(&self) -> usize {
+        let cut = |text: &str| text.trim().chars().count().min(CUT_CHARS);
+        match self {
+            Part::Thinking(text) | Part::Agent(text) => text.trim().chars().count(),
+            Part::Other(text) => cut(text),
+            Part::Tool { input, output, .. } => input.as_deref().map_or(0, cut) + output.as_ref().map_or(0, |o| cut(&o.text)),
+        }
+    }
+
+    fn render(&self, out: &mut String, matcher: Option<&Matcher>) {
+        match self {
+            Part::Thinking(text) => element(out, "thinking", "thinking", text.trim()),
+            Part::Agent(text) => element(out, "agent", "agent", text.trim()),
+            Part::Other(text) => element(out, "other", "other", &cut(text.trim(), matcher)),
+            Part::Tool { name, input, output } => {
+                out.push_str(&format!("<tool name=\"{}\">\n", xml_attribute(name)));
+                if let Some(input) = input {
+                    element(out, "input", "input", &cut(input.trim(), matcher));
+                }
+                if let Some(output) = output {
+                    let open = if output.error { "output status=\"error\"" } else { "output" };
+                    element(out, open, "output", &cut(output.text.trim(), matcher));
+                }
+                out.push_str("</tool>\n");
+            }
+        }
+    }
+}
+
+/// Where a turn has hits: its prompt, and each part.
+struct Hits {
+    prompt: bool,
+    parts: Vec<bool>,
+}
+
+impl Hits {
+    fn any(&self) -> bool {
+        self.prompt || self.parts.iter().any(|h| *h)
+    }
+}
+
 struct Turn {
     number: u32,
     ts: Option<i64>,
@@ -104,17 +157,15 @@ struct Turn {
     answered: bool,
     /// The full export's rule: the last thing the agent wrote is text without a tool call.
     final_reply: bool,
+    /// With `--grep` but not `--tools`: a call or result that is not shown has a hit.
+    tool_hit_hidden: bool,
 }
 
 impl Turn {
-    /// Any TERM in the prompt or a part shown (thinking and tools are parts only when asked for).
-    fn has_hit(&self, query: &Query) -> bool {
-        let hit = |text: &str| query.mask(text) != 0;
-        hit(&self.prompt)
-            || self.parts.iter().any(|part| match part {
-                Part::Thinking(text) | Part::Agent(text) | Part::Other(text) => hit(text),
-                Part::Tool { input, output, .. } => input.as_deref().is_some_and(hit) || output.as_ref().is_some_and(|o| hit(&o.text)),
-            })
+    /// The TERMs in the prompt and in each part (thinking is a part with `--grep`, tool calls
+    /// only with `--tools`).
+    fn hits(&self, query: &Query) -> Hits {
+        Hits { prompt: query.mask(&self.prompt) != 0, parts: self.parts.iter().map(|p| p.has_hit(query)).collect() }
     }
 
     /// The prompt as recorded, with a placeholder per image or document.
@@ -129,7 +180,10 @@ impl Turn {
         text
     }
 
-    fn xml(&self, opts: &TranscriptOptions) -> String {
+    /// The turn as XML-style text. With `hits` (`--grep`), only the parts with a hit and the one
+    /// before and after each are shown, the prompt counting as the part before the first; each
+    /// run of the others is a line `…[skipped N items, M chars; …]`.
+    fn xml(&self, opts: &TranscriptOptions, hits: Option<&Hits>) -> String {
         let matcher = opts.grep.as_ref().map(Query::matcher);
         let ts = self.ts.map(|ms| format!(" ts=\"{}\"", xml_attribute(&fmt_datetime(Some(ms))))).unwrap_or_default();
         let mut out = format!("<user turn=\"{}\"{ts}>\n{}\n</user>\n\n", self.number, sanitize_text(&self.prompt_body()));
@@ -141,24 +195,33 @@ impl Turn {
             });
             parts.push_str(&format!("<turn-summary>\nCalled {}.\n</turn-summary>\n", sanitize_text(&calls.collect::<Vec<_>>().join(", "))));
         }
-        for part in &self.parts {
-            match part {
-                Part::Thinking(text) => element(&mut parts, "thinking", "thinking", text.trim()),
-                Part::Agent(text) => element(&mut parts, "agent", "agent", text.trim()),
-                Part::Other(text) => element(&mut parts, "other", "other", &cut(text.trim(), matcher)),
-                Part::Tool { name, input, output } => {
-                    parts.push_str(&format!("<tool name=\"{}\">\n", xml_attribute(name)));
-                    if let Some(input) = input {
-                        element(&mut parts, "input", "input", &cut(input.trim(), matcher));
-                    }
-                    if let Some(output) = output {
-                        let open = if output.error { "output status=\"error\"" } else { "output" };
-                        element(&mut parts, open, "output", &cut(output.text.trim(), matcher));
-                    }
-                    parts.push_str("</tool>\n");
+        let hit = |i: usize| hits.is_some_and(|h| h.parts[i]);
+        // thinking is collected for `--grep`; without `--thinking` only a hit is an item
+        let items: Vec<usize> =
+            (0..self.parts.len()).filter(|i| opts.thinking || hit(*i) || !matches!(self.parts[*i], Part::Thinking(_))).collect();
+        let mut shown = vec![hits.is_none(); items.len()];
+        if hits.is_some_and(|h| h.prompt) && !items.is_empty() {
+            shown[0] = true;
+        }
+        for (k, i) in items.iter().enumerate() {
+            if hit(*i) {
+                for near in k.saturating_sub(1)..(k + 2).min(items.len()) {
+                    shown[near] = true;
                 }
             }
         }
+        let (mut skipped, mut chars) = (0, 0);
+        for (i, show) in items.iter().zip(shown) {
+            if !show {
+                skipped += 1;
+                chars += self.parts[*i].shown_chars();
+                continue;
+            }
+            self.skip_line(&mut parts, skipped, chars);
+            (skipped, chars) = (0, 0);
+            self.parts[*i].render(&mut parts, matcher);
+        }
+        self.skip_line(&mut parts, skipped, chars);
         if self.answered && !self.final_reply {
             parts.push_str(MISSING);
         }
@@ -167,6 +230,13 @@ impl Turn {
             out.push('\n');
         }
         out
+    }
+
+    fn skip_line(&self, out: &mut String, items: usize, chars: usize) {
+        if items > 0 {
+            let s = if items == 1 { "" } else { "s" };
+            out.push_str(&format!("…[skipped {items} item{s}, {chars} chars; --turns {} without --grep shows them]\n", self.number));
+        }
     }
 
     /// `   5  2026-11-13 08:01  the first line of the prompt`, cleaned of injected tags.
@@ -189,7 +259,9 @@ fn element(out: &mut String, open: &str, close: &str, body: &str) {
 #[derive(Default)]
 struct Kept {
     text: String,
-    count: u32,
+    /// Turns kept for a hit of their own / as context of one.
+    hits: u32,
+    context: u32,
     /// The last turns not kept (up to the context), rendered when in range.
     pending: VecDeque<Option<String>>,
     /// Turns still to keep after the last turn with a hit.
@@ -197,9 +269,9 @@ struct Kept {
 }
 
 impl Kept {
-    fn push(&mut self, text: String) {
+    fn push(&mut self, text: String, hit: bool) {
         self.text.push_str(&text);
-        self.count += 1;
+        if hit { self.hits += 1 } else { self.context += 1 }
     }
 }
 
@@ -212,11 +284,12 @@ struct Reader<'o> {
     first_ts: Option<i64>,
     last_ts: Option<i64>,
     kept: Kept,
+    tool_hits_hidden: u32,
 }
 
 impl<'o> Reader<'o> {
     fn new(opts: &'o TranscriptOptions) -> Self {
-        Reader { opts, total: 0, turn: None, names: HashMap::new(), first_ts: None, last_ts: None, kept: Kept::default() }
+        Reader { opts, total: 0, turn: None, names: HashMap::new(), first_ts: None, last_ts: None, kept: Kept::default(), tool_hits_hidden: 0 }
     }
 
     fn record(&mut self, r: &Record, filter: &mut RecordFilter) {
@@ -253,12 +326,17 @@ impl<'o> Reader<'o> {
                 turn.parts.push(Part::Other(text));
             }
         }
-        if !self.opts.tools {
+        let opts = self.opts;
+        if !opts.tools && opts.grep.is_none() {
             return;
         }
         let (Some(turn), Content::Blocks(blocks)) = (&mut self.turn, content) else { return };
         for block in blocks.iter().filter(|b| b.kind.as_deref() == Some("tool_result")) {
             let output = Output { text: tool_result_text(block.content), error: block.is_error.unwrap_or(false) };
+            if !opts.tools {
+                turn.tool_hit_hidden |= opts.grep.as_ref().is_some_and(|q| q.mask(&output.text) != 0);
+                continue;
+            }
             let id = block.tool_use_id.as_deref();
             match id.and_then(|id| turn.calls.get(id)).map(|i| &mut turn.parts[*i]) {
                 Some(Part::Tool { output: slot @ None, .. }) => *slot = Some(output),
@@ -278,7 +356,8 @@ impl<'o> Reader<'o> {
             Content::Blocks(blocks) => blocks.as_slice(),
             _ => &[],
         };
-        if opts.thinking {
+        // a thought with a hit is shown without --thinking
+        if opts.thinking || opts.grep.is_some() {
             let thoughts: Vec<&str> = blocks
                 .iter()
                 .filter(|b| b.kind.as_deref() == Some("thinking"))
@@ -312,6 +391,8 @@ impl<'o> Reader<'o> {
                     self.names.insert(id.to_string(), name.clone());
                 }
                 turn.parts.push(Part::Tool { name, input: Some(input), output: None });
+            } else if let Some(query) = &opts.grep {
+                turn.tool_hit_hidden |= query.mask(&tool_input_text(&tool_input_map(block.input))) != 0;
             }
         }
         if r.is_aborted || has_tools {
@@ -337,6 +418,7 @@ impl<'o> Reader<'o> {
             tool_counts: BTreeMap::new(),
             answered: false,
             final_reply: false,
+            tool_hit_hidden: false,
         });
     }
 
@@ -346,21 +428,26 @@ impl<'o> Reader<'o> {
         let opts = self.opts;
         let in_range = opts.turns.is_none_or(|r| r.contains(turn.number));
         let context = if opts.grep.is_some() { opts.context } else { 0 };
-        let render = |turn: &Turn| if opts.outline { turn.outline() } else { turn.xml(opts) };
-        if opts.grep.as_ref().is_none_or(|q| turn.has_hit(q)) {
+        let hits = opts.grep.as_ref().map(|q| turn.hits(q));
+        let hit = hits.as_ref().is_none_or(Hits::any);
+        if in_range && !hit && turn.tool_hit_hidden {
+            self.tool_hits_hidden += 1;
+        }
+        let render = |turn: &Turn| if opts.outline { turn.outline() } else { turn.xml(opts, hits.as_ref()) };
+        if hit {
             while let Some(before) = self.kept.pending.pop_front() {
                 if let Some(text) = before {
-                    self.kept.push(text);
+                    self.kept.push(text, false);
                 }
             }
             self.kept.after = context;
             if in_range {
-                self.kept.push(render(&turn));
+                self.kept.push(render(&turn), true);
             }
         } else if self.kept.after > 0 {
             self.kept.after -= 1;
             if in_range {
-                self.kept.push(render(&turn));
+                self.kept.push(render(&turn), false);
             }
         } else if context > 0 {
             self.kept.pending.push_back(in_range.then(|| render(&turn)));
@@ -370,16 +457,28 @@ impl<'o> Reader<'o> {
         }
     }
 
+    /// `matched` counts the turns kept for a hit of their own, `context` (with `--context`) the
+    /// turns kept around them.
     fn xml(self, id: &str) -> String {
-        let matched = if self.opts.grep.is_some() { format!(" matched=\"{}\"", self.kept.count) } else { String::new() };
-        format!("<transcript session_id=\"{}\" turns=\"{}\"{matched}>\n\n{}</transcript>\n", xml_attribute(id), self.total, self.kept.text)
+        let mut counts = String::new();
+        if self.opts.grep.is_some() {
+            counts.push_str(&format!(" matched=\"{}\"", self.kept.hits));
+            if self.opts.context > 0 {
+                counts.push_str(&format!(" context=\"{}\"", self.kept.context));
+            }
+        }
+        format!("<transcript session_id=\"{}\" turns=\"{}\"{counts}>\n\n{}</transcript>\n", xml_attribute(id), self.total, self.kept.text)
     }
 
-    /// `ID · 21 turns, 2 matched · 2026-11-13 07:40 to 2026-11-14 17:09`, then a line per turn.
+    /// `ID · 21 turns, 2 matched, 3 as context · 2026-11-13 07:40 to 2026-11-14 17:09`, then a
+    /// line per turn.
     fn outline(self, id: &str) -> String {
         let mut head = format!("{id} · {} turn{}", self.total, if self.total == 1 { "" } else { "s" });
         if self.opts.grep.is_some() {
-            head.push_str(&format!(", {} matched", self.kept.count));
+            head.push_str(&format!(", {} matched", self.kept.hits));
+            if self.opts.context > 0 {
+                head.push_str(&format!(", {} as context", self.kept.context));
+            }
         }
         if let Some(first) = self.first_ts {
             head.push_str(&format!(" · {} to {}", fmt_datetime(Some(first)), fmt_datetime(self.last_ts.or(Some(first)))));
