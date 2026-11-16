@@ -343,27 +343,27 @@ Text output:
 ```
 2 sessions · terms [连不上|无法连接|offline] [健康检查|healthz] · in prompt,reply,thinking · all time · 0.03s
 
-1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26
-  updated 2026-11-14 17:09 · started 2026-11-13 07:40 · cw-edge (main) · 21 turns · $4.10
-  title: 现场抓帧任务停止排查
+3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875
+  updated 2026-11-14 17:09 · started 2026-11-13 07:40 · fieldcam (master) · 21 turns · $4.10
+  title: 录制任务停止排查
   hits: prompt 1 · reply 4 · thinking 0
-  [reply · turn 6 · 11-13 08:06] …第 12 轮开始前健康检查«连不上»现场（`«healthz»_error:URLError`）…
-  [prompt · turn 5 · 11-13 08:01] …为什么抓帧停了，«healthz» 报错…
-  resume: cd '/Users/reorx/Code/cw-edge' && claude --resume 1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26
+  [reply · turn 6 · 11-13 08:06] …第 12 轮开始前健康检查«连不上»摄像头网关（`«healthz»_error:URLError`）…
+  [prompt · turn 5 · 11-13 08:01] …为什么录制停了，«healthz» 报错…
+  resume: cd '/Users/me/Code/fieldcam' && claude --resume 3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875
 
 9a0c33e1-7f52-4f0e-9d0b-2a1e5c6f8b10
-  updated 2026-11-02 21:40 · started 2026-11-02 20:55 · vibench · 7 turns · $1.32
-  title: Maiev can't reach the server
-  prompt: maiev 一直连不上，帮我看看是不是 healthz 的问题
+  updated 2026-11-02 21:40 · started 2026-11-02 20:55 · homehub · 7 turns · $1.32
+  title: Kestrel can't reach the relay
+  prompt: kestrel 一直连不上，帮我看看是不是 healthz 的问题
   hits: prompt 2 · reply 3 · thinking 1
-  [prompt · turn 1 · 11-02 20:55] maiev 一直«连不上»，帮我看看是不是 «healthz» 的问题
+  [prompt · turn 1 · 11-02 20:55] kestrel 一直«连不上»，帮我看看是不是 «healthz» 的问题
   [thinking · turn 2 · 11-02 21:03] …the «healthz» endpoint returns 503 while the app is «offline»…
-  resume: cd '/Users/reorx/Code/vibench' && claude --resume 9a0c33e1-7f52-4f0e-9d0b-2a1e5c6f8b10
+  resume: cd '/Users/me/Code/homehub' && claude --resume 9a0c33e1-7f52-4f0e-9d0b-2a1e5c6f8b10
 ```
 
 - First line: `N sessions`, then `(showing M)` when the limit cut the list, the terms (one `[...]`
   each), ` · regex` and ` · same message` when given, `in` with the kinds (and ` · tools Bash,Read`
-  with `--tool`), the filters given (` · project cw-edge`, several joined with `,`;
+  with `--tool`), the filters given (` · project fieldcam`, several joined with `,`;
   ` · model opus-5-5`; ` · favorites`), the range label, and the elapsed time.
 - Per session, separated by a blank line: the full session ID; a line with last update, start
   (left out when unknown), project name (last path component) with the git branch in
@@ -413,13 +413,13 @@ JSON output (`--json`):
   },
   "results": [
     {
-      "session_id": "1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26",
-      "title": "现场抓帧任务停止排查",
-      "first_prompt": "为什么抓帧停了，healthz 报错",
-      "project": "cw-edge",
-      "project_path": "/Users/reorx/Code/cw-edge",
-      "cwd": "/Users/reorx/Code/cw-edge",
-      "branch": "main",
+      "session_id": "3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875",
+      "title": "录制任务停止排查",
+      "first_prompt": "为什么录制停了，healthz 报错",
+      "project": "fieldcam",
+      "project_path": "/Users/me/Code/fieldcam",
+      "cwd": "/Users/me/Code/fieldcam",
+      "branch": "master",
       "started_at": "2026-11-13T07:40:12+08:00",
       "updated_at": "2026-11-14T17:09:55+08:00",
       "turns": 21,
@@ -427,8 +427,8 @@ JSON output (`--json`):
       "main_model": "claude-opus-5-5",
       "kind": "cli",
       "favorite": false,
-      "transcript": "/Users/reorx/.claude/projects/-Users-reorx-Code-cw-edge/1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26.jsonl",
-      "resume": "cd '/Users/reorx/Code/cw-edge' && claude --resume 1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26",
+      "transcript": "/Users/me/.claude/projects/-Users-me-Code-fieldcam/3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875.jsonl",
+      "resume": "cd '/Users/me/Code/fieldcam' && claude --resume 3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875",
       "hits": { "total": 5, "prompt": 1, "reply": 4, "thinking": 0, "tool_input": null, "tool_output": null, "other": null },
       "term_hits": [4, 2],
       "snippets": [
@@ -439,7 +439,7 @@ JSON output (`--json`):
           "time": "2026-11-13T08:06:31+08:00",
           "offset": 183402,
           "terms": [0, 1],
-          "text": "…第 12 轮开始前健康检查«连不上»现场（`«healthz»_error:URLError`）…"
+          "text": "…第 12 轮开始前健康检查«连不上»摄像头网关（`«healthz»_error:URLError`）…"
         }
       ]
     }
@@ -500,27 +500,27 @@ asm session ID [--json] [--no-scan]
 Text output:
 
 ```
-1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26
-  title:        现场抓帧任务停止排查
-  first prompt: 为什么抓帧停了，healthz 报错
+3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875
+  title:        录制任务停止排查
+  first prompt: 为什么录制停了，healthz 报错
   last prompt:  好的，提交吧
-  project:      /Users/reorx/Code/cw-edge
-  cwd:          /Users/reorx/Code/cw-edge
-  branch:       main
+  project:      /Users/me/Code/fieldcam
+  cwd:          /Users/me/Code/fieldcam
+  branch:       master
   kind:         cli
   favorite:     no
   started:      2026-11-13 07:40
   updated:      2026-11-14 17:09
   turns:        21 (23 prompts)
   tools:        Bash 120 · Read 45 · Edit 30 · Grep 12 · Write 3 · Glob 2 · Task 1 · TodoWrite 1 (+2 more)
-  files:        5 changed: src/edge/health.py, src/edge/capture.py, tests/test_health.py, README.md, Makefile
+  files:        5 changed: src/fieldcam/health.py, src/fieldcam/recorder.py, tests/test_health.py, README.md, Makefile
   cost:         $4.10 (Claude Code recorded $4.02)
   tokens:       in 1.2M · out 50k · cache read 10M · cache write 500k · hit 87.3%
   context:      412k / 1M (41%) at the end · peak 655k
   models:       claude-opus-5-5 (main), claude-haiku-4-5
   subagents:    3
-  transcript:   /Users/reorx/.claude/projects/-Users-reorx-Code-cw-edge/1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26.jsonl (2.1 MB)
-  resume:       cd '/Users/reorx/Code/cw-edge' && claude --resume 1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26
+  transcript:   /Users/me/.claude/projects/-Users-me-Code-fieldcam/3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875.jsonl (2.1 MB)
+  resume:       cd '/Users/me/Code/fieldcam' && claude --resume 3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875
 ```
 
 - Prompts are one line of at most 300 characters. A missing value is `—`.
@@ -553,28 +553,28 @@ update, title as in `asm search`), most recently updated first, at most 20 and t
 `  … N more`, and the exit code is 1:
 
 ```
-prefix '1b2b' matches 3 sessions:
-  1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26  2026-11-14 17:09  现场抓帧任务停止排查
-  1b2b0f17-2a9e-4c1d-8f3e-7d6b5a4c3b2a  2026-10-30 11:02  Fix the release script
-  1b2b9c44-0d1e-4f2a-b3c4-d5e6f7a8b9c0  2026-09-12 08:45  (no prompt)
+prefix '3c7e' matches 3 sessions:
+  3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875  2026-11-14 17:09  录制任务停止排查
+  3c7e0f17-2a9e-4c1d-8f3e-7d6b5a4c3b2a  2026-10-30 11:02  Fix the release script
+  3c7e9c44-0d1e-4f2a-b3c4-d5e6f7a8b9c0  2026-09-12 08:45  (no prompt)
 ```
 
-With no match: `no session matches '1b2b'` on stderr, exit 1.
+With no match: `no session matches '3c7e'` on stderr, exit 1.
 
 JSON output:
 
 ```json
 {
-  "meta": { "command": "session", "query": "1b2b", "index_refresh": "done", "elapsed_ms": 4 },
+  "meta": { "command": "session", "query": "3c7e", "index_refresh": "done", "elapsed_ms": 4 },
   "session": {
-    "session_id": "1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26",
-    "title": "现场抓帧任务停止排查",
-    "first_prompt": "为什么抓帧停了，healthz 报错",
+    "session_id": "3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875",
+    "title": "录制任务停止排查",
+    "first_prompt": "为什么录制停了，healthz 报错",
     "last_prompt": "好的，提交吧",
-    "project": "cw-edge",
-    "project_path": "/Users/reorx/Code/cw-edge",
-    "cwd": "/Users/reorx/Code/cw-edge",
-    "branch": "main",
+    "project": "fieldcam",
+    "project_path": "/Users/me/Code/fieldcam",
+    "cwd": "/Users/me/Code/fieldcam",
+    "branch": "master",
     "kind": "cli",
     "favorite": false,
     "started_at": "2026-11-13T07:40:12+08:00",
@@ -582,7 +582,7 @@ JSON output:
     "turns": 21,
     "prompts": 23,
     "tools": { "Bash": 120, "Read": 45 },
-    "files": ["src/edge/health.py", "src/edge/capture.py"],
+    "files": ["src/fieldcam/health.py", "src/fieldcam/recorder.py"],
     "cost_usd": 4.1,
     "recorded_cost_usd": 4.02,
     "tokens": { "input": 1200000, "output": 50000, "cache_read": 10000000, "cache_write": 500000, "hit_rate": 0.873 },
@@ -590,10 +590,10 @@ JSON output:
     "main_model": "claude-opus-5-5",
     "models": ["claude-haiku-4-5", "claude-opus-5-5"],
     "subagents": 3,
-    "transcript": "/Users/reorx/.claude/projects/-Users-reorx-Code-cw-edge/1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26.jsonl",
+    "transcript": "/Users/me/.claude/projects/-Users-me-Code-fieldcam/3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875.jsonl",
     "transcript_bytes": 2202009,
     "favorite_copy": false,
-    "resume": "cd '/Users/reorx/Code/cw-edge' && claude --resume 1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26"
+    "resume": "cd '/Users/me/Code/fieldcam' && claude --resume 3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875"
   }
 }
 ```
@@ -612,7 +612,7 @@ JSON output:
 | `resume` | `null` when the session cannot be resumed |
 
 The other fields are as in `asm search`. With an ambiguous prefix, stderr has only the first line
-(`prefix '1b2b' matches 3 sessions:`), and stdout carries
+(`prefix '3c7e' matches 3 sessions:`), and stdout carries
 `{ "error": { "code": "ambiguous", "message": "...", "candidates": [{ "session_id": "...", "updated_at": "...", "title": "..." }] } }`
 (all candidates, not only 20); with no match, `code` is `not_found`.
 
@@ -640,9 +640,9 @@ Text output:
 
 ```
 3 projects · last 30 days · 0.01s
-2026-11-14 17:09   21 sessions  /Users/reorx/Code/cw-edge
-2026-11-13 10:02    3 sessions  /Users/reorx/Code/vibench
-2026-11-02 09:15    1 session   /Users/reorx/Code/scripts
+2026-11-14 17:09   21 sessions  /Users/me/Code/fieldcam
+2026-11-13 10:02    3 sessions  /Users/me/Code/homehub
+2026-11-02 09:15    1 session   /Users/me/Code/scripts
 ```
 
 - First line: `N projects`, `(showing M)` when cut, the range label, the elapsed time.
@@ -662,7 +662,7 @@ JSON output:
   "meta": { "command": "projects", "range": { "label": "last 30 days", "since": "2026-10-16T17:10:00+08:00", "until": null, "default": false },
             "excluded_session": null, "index_refresh": "done", "elapsed_ms": 9, "total": 3, "shown": 3, "truncated": false },
   "results": [
-    { "project_path": "/Users/reorx/Code/cw-edge", "project": "cw-edge", "project_key": "-Users-reorx-Code-cw-edge", "sessions": 21, "updated_at": "2026-11-14T17:09:55+08:00" }
+    { "project_path": "/Users/me/Code/fieldcam", "project": "fieldcam", "project_key": "-Users-me-Code-fieldcam", "sessions": 21, "updated_at": "2026-11-14T17:09:55+08:00" }
   ]
 }
 ```
@@ -713,10 +713,10 @@ in range left out because their only hits are in tool calls are noted on stderr:
 Full export (no reading option):
 
 ```
-<transcript session_id="1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26">
+<transcript session_id="3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875">
 
 <user>
-为什么抓帧停了，healthz 报错
+为什么录制停了，healthz 报错
 </user>
 
 <turn-summary>
@@ -783,10 +783,10 @@ searches. So, unlike the full export:
 - Turns not kept are left out without a trace; text before the first prompt is never shown.
 
 ```
-<transcript session_id="1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26" turns="21">
+<transcript session_id="3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875" turns="21">
 
 <user turn="6" ts="2026-11-13 08:06">
-那现场为什么连不上？
+那网关为什么连不上？
 </user>
 
 <thinking>
@@ -806,7 +806,7 @@ $ tail -n 50 logs/health.log
 </output>
 </tool>
 <agent>
-第 12 轮开始前健康检查连不上现场……
+第 12 轮开始前健康检查连不上摄像头网关……
 </agent>
 
 </transcript>
@@ -815,10 +815,10 @@ $ tail -n 50 logs/health.log
 The same turn with `--turns 6 --tools --grep healthz`, which hits the tool output only:
 
 ```
-<transcript session_id="1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26" turns="21" matched="1">
+<transcript session_id="3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875" turns="21" matched="1">
 
 <user turn="6" ts="2026-11-13 08:06">
-那现场为什么连不上？
+那网关为什么连不上？
 </user>
 
 <agent>
@@ -835,7 +835,7 @@ $ tail -n 50 logs/health.log
 </output>
 </tool>
 <agent>
-第 12 轮开始前健康检查连不上现场……
+第 12 轮开始前健康检查连不上摄像头网关……
 </agent>
 
 </transcript>
@@ -847,10 +847,10 @@ Its thinking (no hit, no `--thinking`) is no item. In a turn with 40 tool calls 
 `--outline`:
 
 ```
-1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26 · 21 turns · 2026-11-13 07:40 to 2026-11-14 17:09
-   1  2026-11-13 07:40  帮我看看抓帧服务的日志
+3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875 · 21 turns · 2026-11-13 07:40 to 2026-11-14 17:09
+   1  2026-11-13 07:40  帮我看看录制服务的日志
    2  2026-11-13 07:52  继续
-   5  2026-11-13 08:01  为什么抓帧停了，healthz 报错
+   5  2026-11-13 08:01  为什么录制停了，healthz 报错
 ```
 
 The first line names the session, its number of turns (`, 2 matched` added with `--grep`: the

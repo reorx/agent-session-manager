@@ -80,7 +80,7 @@ asm search TERM... [--in KINDS] [--tool NAME]... [--regex] [--same-message]
 
 - `--outline`：只列每个回合的编号、时间和用户输入的第一行，先看这个会话聊了什么。
 - `--turns 5-7`：只输出这几个回合（也可以是单个回合 `5`）。
-- `--grep TERM...`：只输出有命中的回合，TERM 的写法同 `asm search`；`--context 1` 带上前后各 1 个回合。
+- `--grep TERM...`：只输出有命中的回合，TERM 的写法同 `asm search`；`--context 1` 带上前后各 1 个回合。保留的回合里只显示 prompt、命中的 item（一条回复、一段 thinking、带 `--tools` 时的一次工具调用等）和它前后各 1 个 item，其余折叠成一行占位，写明折叠了几个 item、多少字符；不带 `--grep` 的 `--turns` 照旧整回合。原因：agent 跑任务的会话常只有一个回合，只按回合过滤几乎不缩小输出（brief 决定 23）。
 - `--thinking`：带上 thinking；`--tools`：工具调用给出输入和输出（每段输出最多 2,000 字符，超出的写明截掉了多少），而不只是次数。
 - 用了这些选项时，每个回合标出编号和时间。
 
