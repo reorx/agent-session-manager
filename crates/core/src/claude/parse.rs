@@ -448,21 +448,52 @@ fn usage_row(rec: &RawRecord) -> Option<UsageRow> {
     Some(row)
 }
 
-/// The token counts of one API response's `usage`.
+/// Billable tokens include every iteration, including server-side compaction.
 pub(crate) fn tokens_of(u: &RawUsage) -> Tokens {
-    let cache_write = u.cache_creation_input_tokens.unwrap_or(0);
-    // records written before the 5m / 1h split are all 5-minute writes
-    let (cache_write_5m, cache_write_1h) = match &u.cache_creation {
+    let mut tokens = match u.iterations.as_deref().filter(|items| !items.is_empty()) {
+        Some(items) => {
+            let mut total = Tokens::default();
+            for item in items {
+                total.add(&item.tokens());
+            }
+            total
+        }
+        None => outer_tokens(u),
+    };
+    tokens.web_search = u.server_tool_use.as_ref().and_then(|s| s.web_search_requests).unwrap_or(0);
+    tokens
+}
+
+/// Cache comparisons use the final message's prompt, not the total billed sampling work.
+// The cache tracker consumes this in the next implementation step.
+#[allow(dead_code)]
+pub(crate) fn prompt_of(u: &RawUsage) -> (u64, u64) {
+    let tokens = u.iterations.as_deref()
+        .and_then(|items| items.iter().rev().find(|item| item.kind.as_deref() == Some("message")))
+        .map(RawIteration::tokens)
+        .unwrap_or_else(|| outer_tokens(u));
+    (tokens.input_total(), tokens.cache_read)
+}
+
+fn outer_tokens(u: &RawUsage) -> Tokens {
+    sampling_tokens(u.input_tokens, u.output_tokens, u.cache_creation_input_tokens,
+        u.cache_read_input_tokens, u.cache_creation.as_ref())
+}
+
+fn sampling_tokens(input: Option<i64>, output: Option<i64>, write: Option<u64>,
+    read: Option<u64>, creation: Option<&RawCacheCreation>) -> Tokens {
+    // Records written before the 5m / 1h split are all 5-minute writes.
+    let (cache_write_5m, cache_write_1h) = match creation {
         Some(c) => (c.ephemeral_5m_input_tokens.unwrap_or(0), c.ephemeral_1h_input_tokens.unwrap_or(0)),
-        None => (cache_write, 0),
+        None => (write.unwrap_or(0), 0),
     };
     Tokens {
-        input: u.input_tokens.unwrap_or(0).max(0) as u64,
+        input: input.unwrap_or(0).max(0) as u64,
         cache_write_5m,
         cache_write_1h,
-        cache_read: u.cache_read_input_tokens.unwrap_or(0),
-        output: u.output_tokens.unwrap_or(0).max(0) as u64,
-        web_search: u.server_tool_use.as_ref().and_then(|s| s.web_search_requests).unwrap_or(0),
+        cache_read: read.unwrap_or(0),
+        output: output.unwrap_or(0).max(0) as u64,
+        web_search: 0,
     }
 }
 
@@ -715,6 +746,8 @@ pub(crate) struct RawMessage<'a> {
 
 #[derive(Deserialize)]
 pub(crate) struct RawUsage<'a> {
+    #[serde(borrow)]
+    pub iterations: Option<Vec<RawIteration<'a>>>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub cache_creation_input_tokens: Option<u64>,
@@ -723,6 +756,24 @@ pub(crate) struct RawUsage<'a> {
     pub server_tool_use: Option<RawServerToolUse>,
     #[serde(borrow)]
     pub speed: Option<Cow<'a, str>>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RawIteration<'a> {
+    #[serde(rename = "type", borrow)]
+    pub kind: Option<Cow<'a, str>>,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub cache_creation_input_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_creation: Option<RawCacheCreation>,
+}
+
+impl RawIteration<'_> {
+    fn tokens(&self) -> Tokens {
+        sampling_tokens(self.input_tokens, self.output_tokens, self.cache_creation_input_tokens,
+            self.cache_read_input_tokens, self.cache_creation.as_ref())
+    }
 }
 
 #[derive(Deserialize)]
@@ -811,4 +862,46 @@ pub(crate) fn user_text(content: &Content) -> Option<String> {
 /// `human_prompt_text` rule: not a subagent line, not harness-injected, not an image carrier.
 pub(crate) fn is_human_prompt(rec: &RawRecord, text: &str) -> bool {
     !rec.is_sidechain && !rec.is_meta && !text.starts_with("[Image: source:")
+}
+
+#[cfg(test)]
+mod iteration_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn cache_prompt_uses_the_last_message_iteration_not_the_billable_sum() {
+        let u = json!({"input_tokens": 999, "cache_read_input_tokens": 1, "iterations": [
+            {"type":"message", "input_tokens": 100, "cache_read_input_tokens": 200},
+            {"type":"compaction", "input_tokens": 180000},
+            {"type":"message", "input_tokens": 2, "cache_creation_input_tokens": 30, "cache_read_input_tokens": 400},
+            {"type":"compaction", "input_tokens": 900000}
+        ]});
+        let text = u.to_string();
+        let usage: RawUsage = serde_json::from_str(&text).unwrap();
+        assert_eq!(prompt_of(&usage), (432, 400));
+    }
+
+    #[test]
+    fn absent_empty_or_compaction_only_iterations_fall_back_to_the_outer_prompt() {
+        for iterations in [serde_json::Value::Null, json!([]), json!([{"type":"compaction", "input_tokens": 500}])] {
+            let text = json!({"input_tokens": 2, "cache_creation_input_tokens": 30,
+                "cache_read_input_tokens": 400, "iterations": iterations}).to_string();
+            let usage: RawUsage = serde_json::from_str(&text).unwrap();
+            assert_eq!(prompt_of(&usage), (432, 400));
+        }
+    }
+
+    #[test]
+    fn empty_iterations_keep_outer_tokens_and_negative_counts_are_clamped_per_item() {
+        for iterations in [serde_json::Value::Null, json!([])] {
+            let text = json!({"input_tokens": 2, "output_tokens": 3, "cache_creation_input_tokens": 30,
+                "cache_read_input_tokens": 400, "server_tool_use":{"web_search_requests":2},
+                "iterations": iterations}).to_string();
+            let usage: RawUsage = serde_json::from_str(&text).unwrap();
+            assert_eq!(tokens_of(&usage), Tokens {input:2, output:3, cache_write_5m:30, cache_read:400, web_search:2, ..Tokens::default()});
+        }
+        let usage: RawUsage = serde_json::from_str(r#"{"iterations":[{"type":"message","input_tokens":-5,"output_tokens":-7},{"type":"message","input_tokens":2,"output_tokens":3}]}"#).unwrap();
+        assert_eq!(tokens_of(&usage), Tokens {input:2, output:3, ..Tokens::default()});
+    }
 }

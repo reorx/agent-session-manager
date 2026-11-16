@@ -603,3 +603,42 @@ fn unknown_record_types_and_broken_lines_are_ignored() {
     assert_eq!(s.first_prompt, "hi");
     assert_eq!(s.user_msg_count, 1);
 }
+
+#[test]
+fn iterations_restore_zero_outer_usage_and_include_compaction_in_billing() {
+    let path = fixture_root().parent().unwrap().join("iterations.jsonl");
+    let parsed = parse_transcript(&path).unwrap();
+    let zero = &parsed.usage[0];
+    assert_eq!((zero.input, zero.output, zero.cache_read), (2, 223, 364422));
+    assert_eq!((zero.cache_write_5m, zero.cache_write_1h), (20, 80));
+    assert!((zero.cost_usd.unwrap() - (2.0*2.0 + 223.0*10.0 + 364422.0*0.2 + 20.0*2.5 + 80.0*4.0)/1e6).abs() < 1e-12);
+    let compact = &parsed.usage[1];
+    assert_eq!((compact.input, compact.output, compact.cache_read), (203000, 4500, 12000));
+    assert_eq!((compact.cache_write_5m, compact.cache_write_1h, compact.web_search), (1200, 300, 2));
+    let expected = (203000.0*2.0 + 4500.0*10.0 + 12000.0*0.2 + 1200.0*2.5 + 300.0*4.0)/1e6 + 0.02;
+    assert!((compact.cost_usd.unwrap() - expected).abs() < 1e-12);
+    let s = &parsed.summary;
+    assert_eq!((s.tokens_in, s.tokens_out, s.tokens_cache_read, s.tokens_cache_write), (203002, 4723, 376422, 1600));
+    assert_eq!((s.context_tokens, s.context_peak), (Some(216500), Some(364524)));
+    assert!((s.cost_usd.unwrap() - zero.cost_usd.unwrap() - expected).abs() < 1e-12);
+}
+
+#[test]
+fn iterations_preserve_incremental_usage_and_context() {
+    let bytes = std::fs::read(fixture_root().parent().unwrap().join("iterations.jsonl")).unwrap();
+    let whole = parse_transcript(&fixture_root().parent().unwrap().join("iterations.jsonl")).unwrap();
+    let mut summary = agent_session_core::model::SessionSummary::transcript("iterations", "fixtures", std::path::Path::new("/dev/null"));
+    let mut usage = Vec::new();
+    let mut offset = 0;
+    for line in bytes.split_inclusive(|b| *b == b'\n') {
+        let mut parser = TranscriptParser::new("iterations");
+        let feed = parser.feed(line, offset);
+        offset += feed.consumed;
+        parser.delta().apply(&mut summary);
+        usage.extend(feed.usage);
+    }
+    summary.set_usage(&usage);
+    assert_eq!(usage, whole.usage);
+    assert_eq!((summary.context_tokens, summary.context_peak, summary.cost_usd),
+               (whole.summary.context_tokens, whole.summary.context_peak, whole.summary.cost_usd));
+}

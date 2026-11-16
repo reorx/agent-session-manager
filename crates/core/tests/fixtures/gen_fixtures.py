@@ -842,6 +842,26 @@ def turn_rule_rows():
     ]
 
 
+# Kept outside discovery fixtures so existing session/count assertions stay independent.
+def iteration_rows():
+    message = {'type': 'message', 'input_tokens': 2, 'output_tokens': 223,
+               'cache_creation_input_tokens': 100, 'cache_read_input_tokens': 364422,
+               'cache_creation': {'ephemeral_5m_input_tokens': 20, 'ephemeral_1h_input_tokens': 80}}
+    zero = {key: 0 for key in ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')}
+    # Real broken responses still have nonzero outer cache_creation detail.
+    zero.update(cache_creation=message['cache_creation'], iterations=[message])
+    compaction = {'type': 'compaction', 'input_tokens': 180000, 'output_tokens': 3500,
+                  'cache_creation_input_tokens': 1000, 'cache_read_input_tokens': 10000}
+    last = {'type': 'message', 'input_tokens': 23000, 'output_tokens': 1000,
+            'cache_creation_input_tokens': 500, 'cache_read_input_tokens': 2000,
+            'cache_creation': {'ephemeral_5m_input_tokens': 200, 'ephemeral_1h_input_tokens': 300}}
+    compact_usage = dict(last, iterations=[compaction, last], server_tool_use={'web_search_requests': 2})
+    for i, usage in enumerate([zero, compact_usage]):
+        yield {'type': 'assistant', 'uuid': f'iteration-{i}', 'timestamp': '2026-11-16T10:00:00Z',
+               'message': {'id': f'iteration-{i}', 'model': 'claude-sonnet-5', 'role': 'assistant',
+                           'content': [{'type': 'text', 'text': 'done'}], 'usage': usage}}
+
+
 if __name__ == '__main__':
     main()
     write_jsonl(OUT.parent / 'turn_rules.jsonl', turn_rule_rows())
@@ -849,3 +869,4 @@ if __name__ == '__main__':
     write_jsonl(OUT.parent / 'conversation.jsonl', conversation_rows())
     with (OUT.parent / 'conversation.jsonl').open('a') as fp:
         fp.write('{"type":')
+    write_jsonl(OUT.parent / 'iterations.jsonl', iteration_rows())

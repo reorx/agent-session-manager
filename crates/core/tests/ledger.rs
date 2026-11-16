@@ -474,3 +474,39 @@ fn import_usage_from_an_index_backup() {
             totals.responses, totals.cost.total(), totals.unpriced_responses);
     }
 }
+
+#[test]
+fn a_version_rebuild_corrects_iterations_in_the_ledger_but_keeps_deleted_sessions() {
+    let sb = sandbox();
+    let fixture = std::fs::read_to_string(fixture_root().parent().unwrap().join("iterations.jsonl")).unwrap();
+    std::fs::write(sb.transcript(ALPHA, "iterations"), &fixture).unwrap();
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    scan(&sb, &mut db);
+    let deleted = db.ledger_usage(Some(&[S1.into()])).unwrap().unwrap();
+    // Seed the exact v6 result: outer zeros, but the 5m/1h detail was already counted.
+    let old = UsageRow { msg_id: "iteration-0".into(), model: "claude-sonnet-5".into(),
+        ts: 1794823200000, input: 0, output: 0, cache_read: 0,
+        cache_write_5m: 20, cache_write_1h: 80, web_search: 0, fast: false,
+        cost_usd: Some(0.000370) };
+    db.transaction(|db| {
+        db.insert_usage("iterations", "", &[old])?;
+        db.refresh_session_usage("iterations")
+    }).unwrap();
+    assert_eq!(ledger(&sb).query_row("SELECT cache_read FROM responses WHERE session_id='iterations' AND msg_id='iteration-0'", [], |r| r.get::<_,i64>(0)).unwrap(), 0);
+    db.set_user_version_for_test(6);
+    drop(db);
+    remove_s1(&sb);
+    let mut db = Db::open(&sb.db_path()).unwrap();
+    assert_eq!(count(db.conn(), "sessions"), 0, "v6 must trigger a schema rebuild");
+    assert_eq!(db.ledger_usage(Some(&[S1.into()])).unwrap().unwrap(), deleted);
+    scan(&sb, &mut db);
+    let corrected = ledger(&sb).query_row("SELECT input,output,cache_read,cache_write_5m,cache_write_1h FROM responses WHERE session_id='iterations' AND msg_id='iteration-0'", [],
+        |r| Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?))).unwrap();
+    assert_eq!(corrected, (2,223,364422,20,80));
+    let usage = db.ledger_usage(Some(&["iterations".into()])).unwrap().unwrap();
+    let mut tokens = agent_session_core::model::Tokens::default();
+    for h in &usage[0].hours { tokens.add(&h.tokens); }
+    assert_eq!((tokens.input,tokens.output,tokens.cache_read,tokens.cache_write_5m,tokens.cache_write_1h,tokens.web_search), (203002,4723,376422,1220,380,2));
+    assert_eq!(usage[0].hours.iter().map(|h| h.responses).sum::<u64>(), 2);
+    assert_eq!(db.ledger_usage(Some(&[S1.into()])).unwrap().unwrap(), deleted);
+}
