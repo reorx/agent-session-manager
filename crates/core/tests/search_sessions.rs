@@ -515,15 +515,19 @@ fn both_ways_number_turns_alike_on_the_turn_rule_fixtures() {
     let hits = run_on(&w, std::slice::from_ref(rules), &query(&["提问"]), &k, 100);
     let turns: Vec<(Kind, Option<u32>, String)> = hits[0].snippets.iter().map(|s| (s.kind, s.turn, s.text.text.clone())).collect();
     // a record whose uuid a sidechain record, an earlier copy or an isMeta image took is other text
+    // turn 1 is the plan hand-off
     assert_eq!(turns, vec![
-        (Kind::Prompt, Some(2), "工具结果之后的同 uuid 提问".into()),
-        (Kind::Prompt, Some(3), "重复写入的提问".into()),
-        (Kind::Other, Some(2), "旁支之后的同 uuid 提问".into()),
-        (Kind::Other, Some(3), "重复写入的提问".into()),
-        (Kind::Other, Some(3), "图片之后的同 uuid 提问".into()),
+        (Kind::Prompt, Some(3), "工具结果之后的同 uuid 提问".into()),
+        (Kind::Prompt, Some(4), "重复写入的提问".into()),
+        (Kind::Other, Some(3), "旁支之后的同 uuid 提问".into()),
+        (Kind::Other, Some(4), "重复写入的提问".into()),
+        (Kind::Other, Some(4), "图片之后的同 uuid 提问".into()),
     ]);
-    assert_eq!(turn_count(&w.db, &rules.id).unwrap(), 8, "a local command and its output are two turns");
-    assert_eq!(hits[0].turns, 8, "both ways count the session's turns too");
+    assert_eq!(turn_count(&w.db, &rules.id).unwrap(), 7, "a local command's output opens no turn of its own");
+    assert_eq!(hits[0].turns, 7, "both ways count the session's turns too");
+    let out = run_on(&w, std::slice::from_ref(rules), &query(&["Set model"]), &k, 100);
+    let out: Vec<(Kind, Option<u32>)> = out[0].snippets.iter().map(|s| (s.kind, s.turn)).collect();
+    assert_eq!(out, vec![(Kind::Other, Some(5))], "the output is other text of the command's turn");
 }
 
 /// When the transcript has grown since it was indexed, the scan numbers turns by the file it read

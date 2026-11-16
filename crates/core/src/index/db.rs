@@ -10,7 +10,9 @@ use rusqlite::{Connection, ErrorCode, OptionalExtension, Row, TransactionBehavio
 use crate::model::{MessageRow, ModelUsage, Role, SessionSummary, Source, TextKind, Tokens, UsageRow};
 
 /// Also bump this when a price in `pricing.rs` changes: stored costs are computed at index time.
-pub const SCHEMA_VERSION: i32 = 5;
+/// Likewise when the parser derives something else from the same records (6: which user records
+/// are prompts, brief decisions 24 and 25).
+pub const SCHEMA_VERSION: i32 = 6;
 /// rusqlite's own default, kept for `Db::open`.
 const DEFAULT_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const SCHEMA: &str = include_str!("schema.sql");

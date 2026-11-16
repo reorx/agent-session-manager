@@ -14,7 +14,7 @@ use crate::model::*;
 use crate::pricing::{LONG_PROMPT, price, price_tokens};
 use crate::transcript::Message;
 use crate::search::{Highlighted, Matcher, regex::{ToolLine, ToolLineKind, stringify}};
-use crate::transcript::{Record, RecordFilter, is_interruption, opens_turn};
+use crate::transcript::{Record, RecordFilter, is_interruption, is_local_command_output, opens_turn};
 
 pub const ENTRY_CHARS: usize = 20_000;
 pub const RESULT_CHARS: usize = 3_000;
@@ -236,6 +236,9 @@ impl Reader<'_> {
             if !text.trim().is_empty() {
                 self.start(None, Some(origin.to_owned()), ts, Marked::new(&text, ENTRY_CHARS, self.matcher), attachments(content));
             }
+        } else if is_local_command_output(&text) {
+            // part of the command's turn, but still shown (and searched) on a card of its own
+            self.start(None, Some("command output".to_owned()), ts, Marked::new(&text, ENTRY_CHARS, self.matcher), Vec::new());
         }
     }
 

@@ -139,6 +139,13 @@ fn a_user_record_is_a_prompt_only_when_it_opens_a_turn() {
         user_rec("u8", json!("<system-reminder>only a reminder</system-reminder>"), json!({})),
         user_rec("u9", json!([{"type": "tool_result", "tool_use_id": "t1", "content": "out"}, {"type": "text", "text": "beside a result"}]), json!({})),
         user_rec("u10", json!("from a subagent"), json!({"isSidechain": true})),
+        user_rec("u11", json!("Implement the following plan:\n\n# p"), json!({"origin": {"kind": "auto-continuation"}, "planContent": "# p"})),
+        user_rec("u12", json!("Implement the following plan:\n\n# p"), json!({"origin": {"kind": "auto-continuation"}})),
+        user_rec("u13", json!("<local-command-stdout>Set model</local-command-stdout>"), json!({})),
+        user_rec("u14", json!("<bash-input>ls</bash-input>"), json!({})),
+        user_rec("u15", json!("<bash-stdout>a.txt</bash-stdout><bash-stderr></bash-stderr>"), json!({})),
+        user_rec("u16", json!(" <local-command-stderr>failed</local-command-stderr>"), json!({})),
+        user_rec("u17", json!("<bash-stderr>boom</bash-stderr>"), json!({})),
         user_rec("u1", json!("typed by the user"), json!({})),
     ]);
     let want: Vec<(TextKind, String)> = [
@@ -152,6 +159,13 @@ fn a_user_record_is_a_prompt_only_when_it_opens_a_turn() {
         (TextKind::Other, "<system-reminder>only a reminder</system-reminder>"),
         (TextKind::Other, "beside a result"),
         (TextKind::Other, "from a subagent"),
+        (TextKind::Prompt, "Implement the following plan:\n\n# p"),
+        (TextKind::Other, "Implement the following plan:\n\n# p"),
+        (TextKind::Other, "<local-command-stdout>Set model</local-command-stdout>"),
+        (TextKind::Prompt, "<bash-input>ls</bash-input>"),
+        (TextKind::Other, "<bash-stdout>a.txt</bash-stdout><bash-stderr></bash-stderr>"),
+        (TextKind::Other, " <local-command-stderr>failed</local-command-stderr>"),
+        (TextKind::Other, "<bash-stderr>boom</bash-stderr>"),
         (TextKind::Other, "typed by the user"),
     ]
     .into_iter()
@@ -252,6 +266,9 @@ fn the_panel_the_export_and_the_index_agree_on_which_records_open_a_turn() {
     }
 }
 
+const PLAN: &str = "Implement the following plan:\n\n# 整理索引的计划\n\n## 步骤\n\n1. 先写行为测试\n2. 再改解析器";
+const LIMIT: &str = "Your claude.ai usage limit has reset. Continue the task you were working on when the limit was reached; do not repeat work that is already complete.";
+
 #[test]
 fn turns_follow_the_record_rules_of_the_turn_rules_fixture() {
     use agent_session_core::claude::conversation::read_conversation;
@@ -269,16 +286,34 @@ fn turns_follow_the_record_rules_of_the_turn_rules_fixture() {
     assert_eq!(
         turns,
         vec![
+            PLAN,
             "第一个问题",
             "工具结果之后的同 uuid 提问",
             "重复写入的提问",
             "/model default",
-            "<local-command-stdout>Set model to Opus 4.7</local-command-stdout>",
             "<bash-input>node generate_pdf.mjs</bash-input>",
-            "<bash-stdout></bash-stdout><bash-stderr>Error: Cannot find module\n</bash-stderr>",
             "最后一个问题",
         ],
-        "a local command and its output are two turns for now"
+        "the plan hand-off opens turn 1, a local command's output opens no turn"
+    );
+    let auto: Vec<(String, String)> = read_conversation(&path, None)
+        .unwrap()
+        .items
+        .into_iter()
+        .filter_map(|item| match item {
+            ConvItem::Turn(t) if t.number.is_none() => Some((t.origin.unwrap_or_default(), t.prompt.text)),
+            _ => None,
+        })
+        .collect();
+    let auto: Vec<(&str, &str)> = auto.iter().map(|(o, t)| (o.as_str(), t.as_str())).collect();
+    assert_eq!(
+        auto,
+        vec![
+            ("command output", "<local-command-stdout>Set model to Opus 4.7</local-command-stdout>"),
+            ("command output", "<bash-stdout></bash-stdout><bash-stderr>Error: Cannot find module\n</bash-stderr>"),
+            ("auto-continuation", LIMIT),
+        ],
+        "the panel still shows a command's output, as an unnumbered card"
     );
     let rows: Vec<(String, TextKind, String)> = TranscriptParser::new("s")
         .feed(&std::fs::read(&path).unwrap(), 0)
@@ -288,6 +323,7 @@ fn turns_follow_the_record_rules_of_the_turn_rules_fixture() {
         .map(|m| (m.uuid, m.kind, m.text))
         .collect();
     let want: Vec<(String, TextKind, String)> = [
+        ("u-plan", TextKind::Prompt, PLAN),
         ("u-first", TextKind::Prompt, "第一个问题"),
         ("u-shared", TextKind::Prompt, "工具结果之后的同 uuid 提问"),
         ("u-side", TextKind::Other, "旁支里的文字"),
@@ -301,9 +337,10 @@ fn turns_follow_the_record_rules_of_the_turn_rules_fixture() {
             TextKind::Prompt,
             "<command-name>/model</command-name>\n            <command-message>model</command-message>\n            <command-args>default</command-args>",
         ),
-        ("u-command-out", TextKind::Prompt, "<local-command-stdout>Set model to Opus 4.7</local-command-stdout>"),
+        ("u-command-out", TextKind::Other, "<local-command-stdout>Set model to Opus 4.7</local-command-stdout>"),
         ("u-bash", TextKind::Prompt, "<bash-input>node generate_pdf.mjs</bash-input>"),
-        ("u-bash-out", TextKind::Prompt, "<bash-stdout></bash-stdout><bash-stderr>Error: Cannot find module\n</bash-stderr>"),
+        ("u-bash-out", TextKind::Other, "<bash-stdout></bash-stdout><bash-stderr>Error: Cannot find module\n</bash-stderr>"),
+        ("u-limit", TextKind::Other, LIMIT),
         ("u-last", TextKind::Prompt, "最后一个问题"),
         ("u-stop", TextKind::Other, "[Request interrupted by user]"),
     ]

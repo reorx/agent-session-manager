@@ -466,6 +466,20 @@ fn the_outline_lists_one_line_per_turn() {
     assert_eq!(matched(&text), Some(1));
 }
 
+/// A local command's output is other text in the command's turn (brief decision 25), and the
+/// plan Claude Code hands over after the context is cleared is turn 1 (decision 24).
+#[test]
+fn a_local_command_output_is_read_inside_the_command_turn() {
+    let path = fixture("turn_rules.jsonl");
+    let text = read_with(&path, TranscriptOptions { turns: range("5-6"), ..TranscriptOptions::default() });
+    assert!(text.starts_with("<transcript session_id=\"turn_rules\" turns=\"7\">"), "{text}");
+    assert_eq!(shown_turns(&text), [5, 6]);
+    assert!(text.contains("<other>\n<local-command-stdout>Set model to Opus 4.7</local-command-stdout>\n</other>"), "{text}");
+    assert!(text.contains("<other>\n<bash-stdout></bash-stdout><bash-stderr>Error: Cannot find module\n</bash-stderr>\n</other>"), "{text}");
+    let first = read_with(&path, TranscriptOptions { turns: range("1"), ..TranscriptOptions::default() });
+    assert!(first.contains("Implement the following plan:"), "{first}");
+}
+
 /// Turn numbers are the detail panel's on every tricky record of the fixtures.
 #[test]
 fn turns_are_numbered_like_the_detail_panel() {

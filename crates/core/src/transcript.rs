@@ -128,6 +128,9 @@ pub(crate) struct Record<'a> {
     pub(crate) is_api_error: bool,
     #[serde(rename = "interruptedMessageId")]
     pub(crate) interrupted_message_id: Option<String>,
+    /// Present on the record that hands over an accepted plan; only its presence is read.
+    #[serde(rename = "planContent")]
+    pub(crate) plan_content: Option<serde::de::IgnoredAny>,
     #[serde(rename = "durationMs")]
     pub(crate) duration_ms: Option<i64>,
     pub(crate) origin: Option<Origin>,
@@ -240,6 +243,9 @@ pub(crate) struct UserFlags<'a> {
     pub(crate) origin: Option<&'a str>,
     /// The record has an `interruptedMessageId`.
     pub(crate) interrupted: bool,
+    /// The record has a `planContent`: Claude Code wrote it after a plan was accepted and the
+    /// context cleared (`Implement the following plan:…`).
+    pub(crate) plan: bool,
 }
 
 impl Record<'_> {
@@ -249,6 +255,7 @@ impl Record<'_> {
             is_compact_summary: self.is_compact_summary,
             origin: self.origin.as_ref().and_then(|o| o.kind.as_deref()),
             interrupted: self.interrupted_message_id.is_some(),
+            plan: self.plan_content.is_some(),
         }
     }
 }
@@ -314,8 +321,29 @@ impl Record<'_> {
     }
 }
 
+/// Who wrote the record: the user, or Claude Code on its own (`origin.kind`). Of what Claude Code
+/// writes by itself, only the plan it hands over after the context is cleared starts a turn: the
+/// user asked for it by accepting the plan (brief decision 24). Usage-limit continuations, task
+/// notifications and messages from other sessions do not.
+fn typed_by_the_user(flags: &UserFlags) -> bool {
+    match flags.origin {
+        None | Some("human") => true,
+        Some("auto-continuation") => flags.plan,
+        Some(_) => false,
+    }
+}
+
+/// Output Claude Code records after a local command (`/model`, `!ls`): the command's record
+/// opens the turn, its output belongs to that turn (brief decision 25).
+const LOCAL_OUTPUT_TAGS: [&str; 4] = ["<local-command-stdout>", "<local-command-stderr>", "<bash-stdout>", "<bash-stderr>"];
+
+pub(crate) fn is_local_command_output(text: &str) -> bool {
+    let text = text.trim_start();
+    LOCAL_OUTPUT_TAGS.iter().any(|tag| text.starts_with(tag))
+}
+
 pub(crate) fn is_human_input(flags: &UserFlags, content: &Content) -> bool {
-    if flags.is_meta || flags.is_compact_summary || flags.origin.is_some_and(|kind| kind != "human") {
+    if flags.is_meta || flags.is_compact_summary || !typed_by_the_user(flags) {
         return false;
     }
     if let Content::Blocks(blocks) = content {
@@ -324,7 +352,7 @@ pub(crate) fn is_human_input(flags: &UserFlags, content: &Content) -> bool {
         }
     }
     let text = user_text(content).unwrap_or_default();
-    if text.starts_with("[Image: source:") {
+    if text.starts_with("[Image: source:") || is_local_command_output(&text) {
         return false;
     }
     !clean_prompt(&text).is_empty() || matches!(content, Content::Blocks(blocks)

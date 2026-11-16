@@ -140,12 +140,12 @@ snippet labels use these names.
 
 | Kind | What it is |
 |---|---|
-| `prompt` | A user-side record that opens a numbered turn (see Turns): a message the user typed, or a local command or its output (`<command-name>`, `<local-command-stdout>`, `<bash-input>`, `<bash-stdout>`). Not an interruption marker, not a repeat (same uuid) of an earlier user-side record with text or media of its own, not a subagent's (sidechain) record. A pasted image without text is a prompt with empty text |
+| `prompt` | A user-side record that opens a numbered turn (see Turns): a message the user typed, a local command (`<command-name>`, `<bash-input>`), or the plan Claude Code hands over after a plan is accepted and the context cleared (`Implement the following plan:…`). Not a local command's output, not an interruption marker, not a repeat (same uuid) of an earlier user-side record with text or media of its own, not a subagent's (sidechain) record. A pasted image without text is a prompt with empty text |
 | `reply` | Text the agent wrote to the user, including commentary between tool calls, not only the final answer |
 | `thinking` | The agent's thinking. Only about one block in ten still has its text; the rest kept only a signature |
 | `tool-input` | The input of a tool call, as text: a `description` field comes first as `# description` and a `command` field next as `$ command`, whatever the tool (Bash, Agent, Monitor, Write, …); then `key: value` per other field, nested values as JSON with `: ` and `, ` (`file_path: /x/a.rs`, `edits: [{"old_string": "a"}]`). So search an Agent call's description as `# fix the login` or `fix the login`, not `description: …` |
 | `tool-output` | The output of a tool call |
-| `other` | Text that showed up on the user side without being typed: compact summaries, background task notifications, interruption markers (`[Request interrupted by user]`), and the like. The output of a local command (`<local-command-stdout>`, `<bash-stdout>`) is a `prompt`, since it starts a turn (see Turns) |
+| `other` | Text that showed up on the user side without being typed: the output of a local command (`<local-command-stdout>`, `<bash-stdout>`), compact summaries, background task notifications, interruption markers (`[Request interrupted by user]`), and the like |
 
 `tool` stands for `tool-input,tool-output`, and `all` for every kind. Text Claude Code injects
 on the user side for the model (skill bodies, command caveats, image size notes; `isMeta` records)
@@ -205,11 +205,15 @@ included. Turn numbers are the same in `asm search` snippets, `asm session`, `as
 and the Turn numbers of the app's detail panel. Text that comes before the first prompt belongs to
 no turn.
 
-A local command takes two turns for now. Claude Code writes a slash command that runs without
-the model (`/model`, `/clear`) as a `<command-name>` record followed by a
-`<local-command-stdout>` record, and a `!` shell command as `<bash-input>` followed by
-`<bash-stdout>` / `<bash-stderr>`. Each of the two records is a prompt and opens a turn, and the
-output's turn has no reply.
+A local command is one turn. Claude Code writes a slash command that runs without the model
+(`/model`, `/clear`) as a `<command-name>` record followed by a `<local-command-stdout>` record,
+and a `!` shell command as `<bash-input>` followed by `<bash-stdout>` / `<bash-stderr>`. The
+command opens a turn; its output is `other` text in that turn. The app's detail panel shows the
+output on an unnumbered card of its own.
+
+A session that starts from an accepted plan begins with the plan Claude Code wrote after clearing
+the context (`Implement the following plan:…`); that record is turn 1. Other text Claude Code
+writes on its own, such as the note that a usage limit has reset, opens no turn.
 
 ### Hit marks and snippets
 

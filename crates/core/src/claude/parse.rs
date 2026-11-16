@@ -652,6 +652,9 @@ pub(crate) struct RawRecord<'a> {
     pub origin: Option<RawOrigin<'a>>,
     #[serde(rename = "interruptedMessageId", borrow)]
     pub interrupted_message_id: Option<Cow<'a, str>>,
+    /// Only its presence is read (`transcript::UserFlags::plan`).
+    #[serde(rename = "planContent")]
+    pub plan_content: Option<serde::de::IgnoredAny>,
     #[serde(rename = "sessionKind", borrow)]
     pub session_kind: Option<Cow<'a, str>>,
     #[serde(rename = "permissionMode", borrow)]
@@ -687,6 +690,7 @@ impl RawRecord<'_> {
             is_compact_summary: self.is_compact_summary,
             origin: self.origin.as_ref().and_then(|o| o.kind.as_deref()),
             interrupted: self.interrupted_message_id.is_some(),
+            plan: self.plan_content.is_some(),
         }
     }
 }

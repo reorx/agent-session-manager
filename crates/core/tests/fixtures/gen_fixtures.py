@@ -752,8 +752,8 @@ def conversation_rows():
 # Which user records open a turn, kept outside the discovery tree like the two files above. The
 # detail panel, the TXT export and the indexer's prompt rows must agree on every case here.
 def turn_rule_rows():
-    def rec(kind, uuid, minute, content, **kw):
-        d = {'type': kind, 'uuid': uuid, 'timestamp': f'2026-11-15T10:{minute:02d}:00.000Z', 'isSidechain': False}
+    def rec(kind, uuid, minute, content, sec=0, **kw):
+        d = {'type': kind, 'uuid': uuid, 'timestamp': f'2026-11-15T10:{minute:02d}:{sec:02d}.000Z', 'isSidechain': False}
         d.update(kw)
         d['message'] = {'role': kind, 'content': content}
         if kind == 'assistant':
@@ -761,13 +761,26 @@ def turn_rule_rows():
             d['message'].update(id=f'msg_{uuid}', stop_reason='tool_use' if calls else 'end_turn')
         return d
 
-    def reply(uuid, minute, text):
-        return rec('assistant', uuid, minute, [{'type': 'text', 'text': text}])
+    def reply(uuid, minute, text, sec=0):
+        return rec('assistant', uuid, minute, [{'type': 'text', 'text': text}], sec=sec)
 
     def text(t):
         return {'type': 'text', 'text': t}
 
+    plan = '# 整理索引的计划\n\n## 步骤\n\n1. 先写行为测试\n2. 再改解析器'
     return [
+        # what Claude Code writes after a plan is accepted and the context cleared: turn 1
+        # (brief decision 24); it is the only automatic record that opens a turn
+        rec(
+            'user',
+            'u-plan',
+            0,
+            f'Implement the following plan:\n\n{plan}',
+            origin={'kind': 'auto-continuation'},
+            planContent=plan,
+            queueSkipAttachments=True,
+        ),
+        reply('a-plan', 0, '按计划开始', sec=30),
         rec('user', 'u-first', 1, '第一个问题'),
         reply('a-first', 2, '第一个回答'),
         rec('assistant', 'a-call', 3, [{'type': 'tool_use', 'id': 'toolu_rule1', 'name': 'Bash', 'input': {}}]),
@@ -785,7 +798,7 @@ def turn_rule_rows():
         # an image injected by the harness takes its uuid too, though it has no text
         rec('user', 'u-meta-image', 12, [{'type': 'image', 'source': {'data': 'YWJj'}}], isMeta=True),
         rec('user', 'u-meta-image', 13, '图片之后的同 uuid 提问'),
-        # a slash command and its output: two turns for now (brief decision 15)
+        # a slash command opens a turn, its output does not (brief decision 25)
         rec(
             'user',
             'u-command',
@@ -801,7 +814,7 @@ def turn_rule_rows():
             '<local-command-stdout>Set model to Opus 4.7</local-command-stdout>',
             promptId='p-command',
         ),
-        # a `!` shell command and its output: two turns as well
+        # neither does the output of a `!` shell command
         rec('user', 'u-bash', 16, '<bash-input>node generate_pdf.mjs</bash-input>', promptId='p-bash'),
         rec(
             'user',
@@ -809,6 +822,19 @@ def turn_rule_rows():
             17,
             '<bash-stdout></bash-stdout><bash-stderr>Error: Cannot find module\n</bash-stderr>',
             promptId='p-bash',
+        ),
+        # the other automatic continuation, written when a usage limit resets, opens none
+        rec(
+            'user',
+            'u-limit',
+            17,
+            'Your claude.ai usage limit has reset. Continue the task you were working on when the limit was '
+            'reached; do not repeat work that is already complete.',
+            sec=30,
+            isMeta=True,
+            origin={'kind': 'auto-continuation'},
+            promptSource='system',
+            turnOrigin='auto_continuation',
         ),
         rec('user', 'u-last', 18, [text('最后一个问题'), {'type': 'image', 'source': {'data': 'YWJj'}}]),
         reply('a-last', 19, '正在处理'),
