@@ -34,7 +34,7 @@ asm skill 与 CLI（`kb/plans/2026-11-15-asm-skill-and-cli/`）的 P1 找会话�
 - 费用由 core 按 `message.usage` × `pricing.rs` 价格表自算，按 `message.id` 去重，subagent 计入父 session；Claude Code 记录的 `cost-state` 只作对照
 - 成本分析：主模型是花费最高的模型。Cost tab 和 `asm cost --model … --as …` 把主模型的 token 按另一个模型重新计价，其他模型原价。计价在 core `pricing.rs::price_tokens` / `cost.rs::compare`，app 用 `SessionRow.model_usage` 现算，不走后台请求
 - Context 窗口优先读 Claude 数据目录的 `cache/model-catalog/`，缺失时回退内置表；启动与扫描后重读，窗口变了刷新整表，不用重建索引
-- 缓存失效：读 Conversation 时 core `conversation.rs::cache_check` 逐次比较主线调用，比上一次少读缓存 ≥ 10k token 记为一次失效
+- 缓存失效：读 Conversation 时由 core `claude/cache.rs::CacheTracker` 按接续的祖先调用比较，少读缓存 ≥ 10k token 记重建；请求记录提供原因和开始时间，缓存时长按丢失段计算，缺请求记录且其他原因不成立时退回不明
 - 收藏的快照存到索引旁的 `favorites/claude/`；取消收藏是移到废纸篓
 - 导出 TXT：CLI（`transcript-reader` / `asm transcript`）和界面共用 `transcript::read_transcript`，输出是 XML 风格标签分隔的精简文本，不要求是标准 XML。CLI 的阅读选项（`--outline` / `--turns` / `--grep`）在 `transcript/reading.rs`，显示 `asm search` 搜的全部 item，不带选项时输出与完整导出逐字相同
 - 发布：打 `v*` tag 触发 GitHub Actions（构建、签名、公证、本仓库 Release、`reorx/homebrew-tap` 的 cask）。应用内更新用 Sparkle 2，`updater.rs` 运行时加载 bundle 里的 framework，debug 二进制没有更新器
@@ -70,13 +70,13 @@ asm skill 与 CLI（`kb/plans/2026-11-15-asm-skill-and-cli/`）的 P1 找会话�
 - 对外类型在 `model.rs`（`SessionSummary` = `sessions` 表一行，`MessageRow` = `messages` 表一行）；UI 层只消费这些类型，不自己解析 JSONL
 - 解析器先写行为测试：fixture 在 `crates/core/tests/fixtures/`，由该目录的 `gen_fixtures.py` 生成（`uv run` 重跑并提交结果）；新记录类型先加进生成脚本再改 `parse.rs`
 - 改 `parse.rs::classify`（字节预过滤）前，按 M1 笔记的方法在真实数据上全量验证
-- `&RawValue` 不能放在 `#[serde(tag)]` / `untagged` / `flatten` 之下；记录和 block 都用「大结构体 + Option 字段 + match type」
+- `&RawValue` 不能放在 `#[serde(tag)]` / `untagged` / `flatten` 之下；记录和 block 都用「大结构体 + Option 字段 + match type」。新增未公开格式的缓存辅助字段用 `transcript.rs::cache_field` 做字段级降级：类型不符视为未知，不能让整条合法 JSON 记录失败、丢掉正文和工具
 - 哪些记录被跳过、哪些 user 记录开回合，只由 `transcript.rs` 的 `RecordFilter` + `opens_turn` 决定，详情面板、导出、索引的解析器和扫描搜索共用，所以 `messages` 里 `kind = 'prompt'` 的行数就是回合数。回合规则的例外只写在 `transcript::is_human_input`（计划交接看 `planContent`，本地命令输出看开头标签），改它要提升 `SCHEMA_VERSION`。索引给每条有自己输入（`has_own_input`）的 user 记录写一行，追加扫描靠这些行的 uuid 接上过滤器；一条 assistant 记录可能写成 thinking 和 reply 两行
 - 改 `schema.sql` 必须同步 `db.rs` 的 `SESSION_COLUMNS` 和 `row_to_session` 的列序。索引没有迁移：打开时版本号不符，或磁盘上的 schema 与本版本建出的不一致，都会整库重建。schema 的变化会被自动发现；schema 看不出的变化要提升 `SCHEMA_VERSION`，包括改 `pricing.rs` 的价格和改解析结果（费用在索引时算好存进 `api_usage`，不重建就不会变）
 - 用量按 API 响应一行存在 `api_usage`（主键 `session_id, agent, msg_id`，subagent 文件的 `agent` 为文件名 stem）。`sessions` 上的费用 / token 列只由 `refresh_session_usage` 从这张表汇总写入，`upsert_session` 不写它们。同一次响应会被增量扫描切成两半，所以去重只能靠这张表，不能在 `SessionDelta` 里累加
 - `session_model_usage`（用量按模型 × fast × prompt 是否超过 `LONG_PROMPT` 分组）也只由 `refresh_session_usage` 重写，`SessionSummary::set_usage` 在内存里按同样规则分组（有测试断言两者一致）。启动时直接读这张表，不要改回读 session 时对 `api_usage` 现做 GROUP BY（冷缓存多 350ms）
 - 一个 `Db` 只在一个线程用；rayon 只用于解析，写库在调用线程的单个事务里
-- 用量账本（`ledger.rs`、`ledger.sql`）只增不删，有自己的版本号和迁移，不能套用索引「版本不符就删库重建」的做法。`Db` 另开一个连接写账本：`Db::transaction` 先提交账本再提交索引，事务外的用量写入也先开内部事务；索引重建前 `build_schema` 先 `salvage_into_ledger`。账本的错误保留 SQLite 错误链（`is_busy` 认得出锁）但带 `LedgerFailure` 来源标记，不能被 `open_with` 当成索引损坏去删索引。账本存 token 不存费用，改价格不用动账本
+- 用量账本（`ledger.rs`、`ledger.sql`）只增不删，有自己的版本号和迁移，不能套用索引「版本不符就删库重建」的做法。`Db` 另开一个连接写账本：`Db::transaction` 先提交账本再提交索引，事务外的用量写入也先开内部事务；索引重建前 `build_schema` 先 `salvage_into_ledger`。账本的错误保留 SQLite 错误链（`is_busy` 认得出锁）但带 `LedgerFailure` 来源标记，不能被 `open_with` 当成索引损坏去删索引。账本存 token 不存费用，改价格不用动账本。改用量解析要提升 `SCHEMA_VERSION`，重建后按响应主键覆盖账本 token 并重算小时汇总；记录文件已删的响应保留旧值
 - `SessionDelta::apply` 必须保持「全量解析 == 多次增量解析」（有测试断言）；新字段要归类为 first（只设一次）、last（覆盖）、count（累加）或 max（取较大值，如 `context_peak`）
 
 ## GPUI / gpui-kit 编码规则
@@ -130,9 +130,9 @@ plans / notes / sessions（当时的方案、实测与取舍），改到对应�
 - `kb/plans/2026-10-23-cost-context-columns.md` — 费用口径的实测依据、价格表、自定义时间范围；改费用口径、价格表或时间过滤前读
 - `kb/plans/2026-11-10-cost-analysis.md` — 主模型定义、换模型计价口径、分组用量存表的原因；改 Cost tab、Model 过滤或 `asm cost --as` 前读
 - `kb/plans/2026-11-03-context-window-from-catalog.md` — 模型目录格式、合并优先级、刷新；改模型目录读取或窗口来源前读
-- `kb/plans/2026-11-12-columns-and-cache-breaks.md` — 列开关、命中率、缓存失效的判定与原因；改表格列、`conversation.rs::cache_check` 或回合卡说明行前读
+- `kb/plans/2026-11-12-columns-and-cache-breaks.md` — 列开关、命中率、缓存失效的判定与原因；改表格列、`claude/cache.rs` 或回合卡说明行前读
 - `kb/plans/2026-11-16-usage-stats/` — 用量统计四期（账本、常驻菜单栏、Usage 视图、下钻）：各期共用的口径（4:00 分日、按调用时间归日、In 的定义、账本只增不删）在 `index.md`，各期一份 spec；改账本、`usage.rs`、自动扫描、状态栏 Today、会话表的时间预设、常驻菜单栏（`resident.rs`）或 Usage 视图前读。各期的实现与验收在 `kb/sessions/2026-11-16-usage-p*-*.md`
-- `kb/plans/2026-11-16-cache-break-accuracy.md` — 失效判定的新规则：用量明细（`iterations`）、按 rewind 的祖先调用比较、请求记录（`api-request`）给出的原因、分段的缓存时长；改用量解析、失效判定（实现后在 `claude/cache.rs`）或回合卡失效文案前读
+- `kb/plans/2026-11-16-cache-break-accuracy.md` — 缓存重建判定：用量明细（`iterations`）、按祖先调用比较、请求记录（`api-request`）给出的原因、分段时长与冻结数据审计；改用量解析、`claude/cache.rs::CacheTracker` 或回合卡失效文案前读
 - `kb/plans/2026-11-15-asm-skill-and-cli/` — asm skill 与 CLI 四期（找会话、缓存检查、可插拔文本索引、分发）：文本类别、会话级匹配等共用概念在 `index.md`，P1 的方案在 `session-search.md`；改 `asm` 的 search / session / projects、`transcript` 的阅读选项、`messages.kind` 或 skill 前读。P1 各任务的实现与验收在 `kb/sessions/2026-11-1*-asm-p1-*.md`
 - `kb/plans/2026-10-26-favorites.md` — 收藏快照、目录迁移、去重优先级、索引根目录守卫；改收藏流程前读
 - `kb/notes/2026-10-10-transcript-reader-xml.md`（导出格式）、`kb/notes/2026-10-10-transcript-reader.md`（压缩规则）；改导出内容前读

@@ -128,6 +128,8 @@ assistant 特有：`requestId`、`requestRef`（关联 `api-request.id`）、`ef
 
 `api-request` 只保留计数、指纹、设置和时间，不保存消息正文。`keep` 是相对同一 `querySource` 的上一次请求，包含中断或出错而没有回复的请求；上一请求长度为它的 `keep + tail.len()`。system / 工具指纹和 beta 集合在内存里存哈希，beta 排序、去重后比较。字段缺失保留为未知，不把缺失与空列表混为一谈。
 
+新增缓存辅助字段（parentUuid、requestRef、effort、请求 id / querySource / shapeHash / keep / tail / params 及 params.betas）经 `transcript.rs::cache_field` 先借用 RawValue，再独立转换类型；类型不符、越界或 null 与缺失同样处理，其他合法字段仍可用于判定。合法 JSON 不会因此计为坏行，正文、工具与完整／按范围导出均保留；JSON 语法错误仍按坏行处理。
+
 原因按以下顺序取第一项：compact、模型变化、effort 变化、fast 切换、登录标记变化、其他 beta 设置变化、空闲超时、system / 工具变化、更早消息改写、请求未变却未命中、不明。effort / fast 要求两边都有字段；登录变化是 beta 集合中 `oauth-` 标记的有无变化，不推断实际登录动作；更早消息改写是本次 `keep` 小于同来源上一请求的长度。两次调用都有请求记录而没有更具体的原因时写「cache missed, request unchanged」，不推断服务端故障；缺请求记录时退回不明或其他不依赖请求记录的原因。
 
 compact 标记保留到之后第一次真正重建才消耗。compact 后已经有调用时，新的用户回合会清除标记；首次调用前的新用户回合保留标记，覆盖手动 compact 后继续提问的情况。summary 和 tool_result 不开启新回合，已接受计划的交接沿用 `opens_turn` 的回合定义。

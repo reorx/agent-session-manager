@@ -1,5 +1,6 @@
 ---
 created: 2026-11-16
+updated: 2026-11-17
 tags:
   - cache
   - cost
@@ -115,7 +116,7 @@ tags:
 
 ## Tech Design
 
-### 现状
+### 实施前基线（截至步骤 1）
 
 - **判定**只在 `crates/core/src/claude/conversation.rs`：
   - `Reader::assistant` 对每条 assistant 记录调用 `cache_check`。
@@ -129,7 +130,7 @@ tags:
   - `Message.usage` 是 `parse.rs::RawUsage`，没有 `iterations`。
 - **用量**：`parse.rs::tokens_of` 只读外层，5m / 1h 细分缺失时全算 5 分钟。
   - `usage_row` 产出 `UsageRow`，`pricing::cost` 用 `UsageRow::prompt_tokens()` 判断长 prompt，`on_usage` 用它更新 `context_tokens` / `context_peak`。
-  - 改解析结果要提升 `index/db.rs::SCHEMA_VERSION`（现在是 6）。
+  - 改解析结果要提升 `index/db.rs::SCHEMA_VERSION`（实施前为 6，步骤 2 已升为 7）。
   - 索引的 `classify` 会跳过 `attachment` 和 `api-request*` 行，本 plan 不改它。
 - **类型**：`model.rs::CacheBreak { ts, dropped, written, cost_usd, cause }`，`CacheBreakCause::{Compaction, ModelSwitch { from }, Idle { gap_ms, ttl_ms }, Unknown}`。
 - **界面**：app `crates/app/src/conversation.rs::cache_note` 把 `CacheBreak` 渲染成说明行，测试是 `a_turn_that_lost_the_cache_says_how_much_was_written_again_and_why`。
@@ -210,7 +211,7 @@ tags:
 - `CACHE_BREAK_MIN` 从 `conversation.rs` 移过来。
 - 新类型：
   - `pub struct CallInput { msg_id, parent: Option<String>（接续调用的 msg_id）, ts: Option<i64>（回复时间，说明行挂的位置）, start_ts: Option<i64>, model, effort: Option<String>, speed: Option<String>, tokens: Tokens（计费口径）, prompt: u64, read: u64（判定口径）, request: Option<RequestFacts> }`
-  - `pub struct RequestFacts { shape: u64, betas: u64, sign_in: bool, keep: u32, prev_len: Option<u32> }`：指纹和 beta 列表都存哈希，不存原文，调用多时内存小。
+  - `pub struct RequestFacts { shape: Option<u64>, betas: Option<u64>, sign_in: Option<bool>, keep: Option<u32>, prev_len: Option<u32> }`：指纹和 beta 列表都存哈希，不存原文，调用多时内存小。beta 排序、去重后按集合比较；各字段缺失或无效时保留为未知，只有对应两值都存在才判变化，缺失列表不等于空列表。
 - `pub struct CacheTracker`，内部是 `HashMap<String, CallState>` 加上一次调用的 msg_id，以及 `compacted`。`CallState` 存 prompt、model、effort、speed、start_ts、ts、request 和分段。
 - `pub fn compacted(&mut self)`。
 - `pub fn call(&mut self, c: &CallInput) -> Option<CacheBreak>`，步骤：
@@ -220,10 +221,10 @@ tags:
   4. 按 PRD 的顺序定原因：
      - compact 用 `compacted`；
      - 换模型、effort、fast 比较各自的字段；
-     - 登录方式 / 请求设置要求两边都有 `request`，比较 `sign_in`、`betas`；
+     - 登录方式 / 请求设置要求两边都有 `request`，且各自的 `sign_in` / `betas` 均为已知，才比较对应值；
      - 空闲：`gap = c.start_ts − 基准.start_ts`，任一缺失就用 `ts` 之差；`ttl` 取分段里包含 `c.read` 位置的那一段的时长。`c.read` 超出所有分段时取最后一段，没有分段时按 5 分钟；
-     - system 或工具：比较 `shape`；
-     - 更早的消息被改写：`c.request.keep < c.request.prev_len`；
+     - system 或工具：两边 `shape` 均为已知才比较；
+     - 更早的消息被改写：`keep` 和 `prev_len` 均为已知且 `c.request.keep < c.request.prev_len`；
      - 请求没变：两边都有 `request`，其余都不成立；
      - 否则不明。
   5. 金额照旧：本次的缓存写入 × `price_tokens`，fast 取 `c.speed == "fast"`，长 prompt 取 `c.prompt > LONG_PROMPT`。
@@ -234,12 +235,12 @@ tags:
 - 删掉 `CacheTrack` 和 `cache_check`。`Reader` 改用 `cache: CacheTracker`，另加：
   - `parents: HashMap<String, Option<String>>`：uuid → parentUuid，每条有 uuid 的记录都记；
   - `call_of: HashMap<String, String>`：assistant 记录的 uuid → msg_id；
-  - `requests: HashMap<String, (i64, RequestFacts)>`：请求 id → 开始时间和事实；
-  - `last_len: HashMap<String, u32>`：querySource → 上一次请求的长度；
+  - `requests: HashMap<String, (Option<i64>, RequestFacts)>`：请求 id → 开始时间和事实；
+  - `last_len: HashMap<Option<String>, u32>`：querySource → 上一次请求的长度；
   - 当前回复的 msg_id。
 - `record`：
   - 开头先把 uuid → parent 记下；
-  - `kind == "api-request"` 时，算出 `prev_len = last_len[source]`，更新 `last_len[source] = keep + tail.len()`，存进 `requests`，返回；
+  - `kind == "api-request"` 时，算出 `prev_len = last_len[source]`，更新 `last_len[source] = keep.unwrap_or(0) + tail.len()`（tail 缺失按 0，长度饱和相加），存进 `requests`，返回；
   - 已有的 compact 分支改为调用 `self.cache.compacted()`。
 - `assistant`：对每次回复的第一条记录组装 `CallInput`：
   - `parent`：从 `r.parent_uuid` 往上走 `parents`，遇到 `call_of` 里属于其他 msg_id 的记录就停；走到 `None` 或超过 10,000 步就是 `None`；
@@ -281,22 +282,27 @@ tags:
 
 - [x] 1. **参考脚本**：在 `tmp/<date>-cache-break-accuracy/expected_breaks.py` 用 Python 独立实现本 plan 的规则，在 60 天数据上输出每次重建（会话、回复时间、原因、少读、写入、间隔、时长）的 TSV，同时按现行规则输出一份，生成前后对比表。可以复用 `tmp/2026-11-16-cache-accuracy-plan/` 里的脚本。
   - 2026-11-17 完成，已按更正后的 compact 规则更新（`tmp/2026-11-16-cache-break-accuracy/`：`expected_breaks.py` 与 19 个行为测试、冻结输入 `calls.jsonl` / `manifest.json`、`before.tsv` / `after.tsv`、`comparison.md`、`changes-explained.tsv`；报告 `cache-break-ref/report.md`，以「协调者摘要（cache-break-ref-r2）」为准）。60 天 133,186 次调用：现行 845 次重建，新规则 842 次（compact 276、空闲 490、换模型 35、不明 9、更早的消息 2、system 或工具 3、登录方式 11、请求设置 9、请求没变 7），差异 708 处，其中原因变化 46 处。
-- [ ] 2. **iterations**：
+- [x] 2. **iterations**：
+  - 2026-11-17 完成，提交 `e0d9f82`；非空 iterations 全项计费、prompt_of、SCHEMA_VERSION 7 与账本升级测试，见 [iter 总结](../sessions/2026-11-17-cache-break-iter.md)。
   - `gen_fixtures.py` 加一个外层全 0、明细有数的响应，和一个带 `compaction` 项的响应，`uv run` 重跑并提交；
   - `tests/parse_transcript.rs` 写失败的测试（会话费用、token、context）；
   - 实现 `tokens_of` / `prompt_of`，提升 `SCHEMA_VERSION`；
   - 账本的测试：旧版本索引里外层全 0 的响应已经抄进账本，提升版本后打开，账本里的这次响应变成按 `iterations` 算的 token，`usage_hourly` 同步；记录文件已删的 session 保持旧值。
-- [ ] 3. **`CacheTracker` 单元测试**（`cache.rs` 内）：
+- [x] 3. **`CacheTracker` 单元测试**（`cache.rs` 内）：
+  - 2026-11-17 完成，提交 `b408f4a`；祖先比较、原因优先级、分段 TTL 与 compact 生命周期，见 [tracker 总结](../sessions/2026-11-17-cache-break-tracker.md)。
   - 先把现有行为写成测试：四种原因、1h / 5m、去重；
   - 再加：按祖先比较（rewind 不报、rewind 后空闲照报且基准正确）、分段时长（1h 前缀加 5m 小段）、开始时间口径、每种新原因、缺请求记录时退回不明；
   - 然后实现。
-- [ ] 4. **接入 `Reader`**：
+- [x] 4. **接入 `Reader`**：
+  - 2026-11-17 完成，提交 `b408f4a`；R1 字段级降级补于 `51ec13f`，见 [tracker 总结及 R1](../sessions/2026-11-17-cache-break-tracker.md)。
   - `Record` 新字段；`api-request` 的处理；`parents` / `call_of` 的维护与往上走；
   - `tests/conversation.rs` 新增带 uuid / `parentUuid` / `requestRef` / `api-request` 的内联记录测试；
   - 现有测试不改期望（没有 uuid 时退回文件顺序）。
-- [ ] 5. **app**：`cache_note` 的测试加上新原因 → 实现。
-- [ ] 6. **真实数据核对**：
-  - 新增 `#[ignore]` 测试 `real_transcripts_cache_breaks`（`crates/core/tests/conversation.rs`）：`ASM_CACHE_AUDIT_DAYS=60 ASM_CACHE_AUDIT_OUT=<tsv>` 对 `~/.claude/projects/*/*.jsonl` 跑 `read_conversation`，输出与步骤 1 同格式的 TSV；
+- [x] 5. **app**：`cache_note` 的测试加上新原因 → 实现。
+  - 2026-11-17 完成，提交 `b408f4a`；新原因文案及测试，见 [tracker 总结](../sessions/2026-11-17-cache-break-tracker.md)。
+- [x] 6. **真实数据核对**：
+  - 2026-11-17 完成，提交 `12ad8f0`；3398 个冻结前缀、842 条重建与参考 TSV 逐字节一致，账本与性能结果见 [audit 总结](../sessions/2026-11-17-cache-break-audit.md)。R1 `51ec13f` 后重跑仍为 0 diff。
+  - 新增 `#[ignore]` 测试 `real_transcripts_cache_breaks`（`crates/core/tests/conversation.rs`）：显式指定冻结 manifest / 调用事实 / scratch / 输出路径（见下节），对校验过的文件前缀跑 `read_conversation`，输出与步骤 1 同格式的 TSV；不支持 `ASM_CACHE_AUDIT_DAYS`，不按当前日期重选文件；
   - 与参考脚本逐条比对，差异逐条解释，存进任务的 tmp 目录。参考脚本先按 2026-11-17 定的 compact 规则更新（见步骤 1）。比对用步骤 1 冻结的 `calls.jsonl` / manifest 作输入，对齐毫秒单位、文件筛选和完整的调用键；要重扫实时数据，就用参考脚本重新生成一对新旧 TSV 再比；
   - 跑 `asm cost --compare`、`make test`、`make parity`；
   - 账本：在真实账本的副本上（`sqlite3 "file:…/usage-ledger.sqlite?mode=ro" ".backup <副本>"`，`ASM_DB` 指向副本旁的索引，不碰真实数据目录）重建一次，核对这 4 次响应的新值和 Usage 视图的变化；
@@ -309,21 +315,33 @@ tags:
 | 验收标准 | 怎么验 |
 |---|---|
 | 只在明细里有用量的 4 次响应 | 步骤 2 的 fixture 测试；真实数据：步骤 6 的 TSV 里这 4 个会话的误报消失、下一次出现；`asm cost --compare` 合计的变化与 4 次的金额对上 |
-| rewind | 步骤 3 和 4 的单元测试；真实数据：4 次「不明」消失，另 4 次按祖先重判的结果列表 |
+| rewind | 步骤 3 和 4 的单元测试；真实数据：原 4 次「不明」变成 3 次不报、1 次换模型；原 4 次空闲变成 3 次空闲、1 次换模型 |
 | 60 天前后对比、带请求记录的会话里没有不明 | 步骤 1 与步骤 6 的 TSV 逐条一致；对比表存档 |
-| 332 次空闲仍是空闲 | 对比表里带请求记录的空闲重建计数 |
+| 332 个历史样本仍超过原 TTL | 最终原因按优先级为 314 空闲、5 换模型、5 登录标记、8 请求设置；逐条见审计总结 |
 | 分段时长 | 单元测试；真实数据里那 14 处之后的重建逐条看 |
 | 说明行文案 | app 单元测试；步骤 7 的截图（用 `Read` 打开看过） |
 | 不退化 | `make test`、`make parity`；读取耗时对比 |
 
+### 已实现的审计入口与读取耗时
+
+`crates/core/tests/conversation.rs` 的两个 ignored 测试由 `tests/support/cache_audit.rs` 支持，复跑命令见 [audit 总结](../sessions/2026-11-17-cache-break-audit.md)：
+
+- `real_transcripts_cache_breaks` 要求 `ASM_CACHE_AUDIT_MANIFEST`、`ASM_CACHE_AUDIT_FACTS`、`ASM_CACHE_AUDIT_OUT`、`ASM_CACHE_AUDIT_SCRATCH`。manifest 指定原文件路径、冻结字节数和 SHA256，facts 为步骤 1 的 `calls.jsonl`。只读并校验这些前缀，文件变短或摘要不符即失败；文件内全部调用参与，不按回复时间再裁剪。真实 Reader 与调用事实重放的完整 CacheBreak 向量须相同，再将输出 TSV 与参考 `after.tsv` 逐字节比较。非 idle 的 gap / TTL 是按冻结事实推导的诊断列，并非 Reader 输出字段；idle 两列还与实际原因附带值核对。
+- 原清单及 facts 在 `tmp/2026-11-16-cache-break-accuracy/cache-break-ref/`。R1 重跑时有一个原文件已删，从既有快照恢复了 SHA256 完全相同的前缀；可用 `cbreak-tracker/r1/manifest.json` 的替代路径复跑，facts 不变，恢复来源见 [R1 总结](../sessions/2026-11-17-cache-break-tracker.md)。不能删除缺失样本或换成实时输入冒充同一批数据。
+- `real_usage_ledger_correction` 要求 `ASM_CACHE_LEDGER_BEFORE`、`ASM_CACHE_LEDGER_AFTER`、`ASM_CACHE_LEDGER_OUT`，只打开明确指定的账本副本，通过生产用量聚合检查四个会话的用量日增量。副本需先用只读 SQLite backup 取得，再让隔离索引重建写入，不能指向真实库。
+
+步骤 6 的 `make test` 为 670 passed / 11 ignored；R1 后为 673 passed / 11 ignored。parity 两轮原始退出码均为 1，差异仅为正在写入会话的大小、更新时间或结果块顺序，按 brief 决定 8 签收；没有宣称严格逐字全绿，完整 diff 分析见 audit 总结。
+
+读取耗时采用同一份冻结文本、release 构建、交替运行各三次、每次预热后取 `read_ms` 中位数：三个最大会话分别为 23.325→24.073ms、21.856→22.385ms、19.530→20.079ms。背景有审计负载；增量均小于 1ms，当前无需优化祖先回溯。这不是冷缓存、UI 首帧或峰值内存测试。
+
 ### 风险与待定
 
-- **记录格式**：`requestRef`、`api-request`、`effort` 都是 Claude Code 未公开的内部格式，可能改名或消失。缺字段时退回不需要请求记录的判断；解析失败的只是这些字段，不能影响回合卡的其他部分（字段一律 `Option`）。
+- **记录格式**：`requestRef`、`api-request`、`effort` 都是 Claude Code 未公开的内部格式，可能改名或消失。缺字段时只使用仍可确认的事实，缺请求记录且其他原因不成立时退回不明；解析失败的只是这些字段，不能影响回合卡的其他部分（字段为 `Option`，并用 `transcript.rs::cache_field` 先借用完整 RawValue 再独立尝试类型转换；类型不符、越界和 null 均视为缺失。R1 `51ec13f` 已覆盖新增的 Record 缓存字段及 params.betas，保留其他合法字段、正文、工具和两种导出；真正语法错误的 JSON 仍计坏行）。
 - **`keep` 的语义**是从数据里推断的（96,184 / 96,741），不是文档写的。rewind 时 `keep` 相对的是被放弃那一支的最后一次请求，所以要先用祖先关系判断有没有重建，`keep` 只用来区分原因。实现时在步骤 1 的数据上确认，没有出现 rewind 被归为「更早的消息被改写」的情况。
 - **「请求没变却没命中」**：
   - 它包括服务端的原因，也可能包括 Claude Code 改了记录之外的东西（比如请求头）。文案只陈述看得到的事实。
   - 「刚写入就没读到」的那 6 次推测是服务端的现象；推测依据是：同一小时、同一种测试会话。
-- **祖先往上走的开销**：正常每次调用走几步。连着很多条没有调用的记录（大量 attachment）时会多走一些，有 10,000 步上限。`Reader` 多出两张按 uuid 建的表，大会话会多占几 MB，步骤 6 量过再定是否要优化。
+- **祖先往上走的开销**：正常每次调用走几步。连着很多条没有调用的记录（大量 attachment）时会多走一些，有 10,000 步上限。`Reader` 多出两张按 uuid 建的表。步骤 6 在三个最大会话上量得 release 热缓存读取中位数增加 0.529–0.748ms（2.4–3.2%），当前无需优化；未量峰值内存、冷缓存或 UI 首帧。
 - **iterations 里的 compaction 项**本机没有样本，只按文档实现、由 fixture 覆盖。真出现时要核对外层与各项的关系，看是否符合「外层不含 compaction 项」。
-- **用量账本**（`kb/plans/2026-11-16-usage-stats/usage-ledger.md`，正在实现）：如果账本先上线，提升 `SCHEMA_VERSION` 时会先把旧索引的用量（包括那 4 次错的数字）抄进账本，重建后再由 `ON CONFLICT … DO UPDATE` 用新解析的数字覆盖。记录文件还在的会话会被改对；文件已删的会话本来也不在这 4 次里。步骤 6 要查一下账本里这 4 个 msg_id 的 token 是不是新的数字。
+- **用量账本**（`kb/plans/2026-11-16-usage-stats/usage-ledger.md`，已实现）：提升 `SCHEMA_VERSION` 时会先把旧索引的用量（包括那 4 次错的数字）抄进账本，重建后再由 `ON CONFLICT … DO UPDATE` 用新解析的数字覆盖。记录文件还在的会话会被改对；文件已删的会话本来也不在这 4 次里。步骤 6 已在真实账本副本验证四个响应及小时汇总修正，用量日 Cost 合计补计 $0.3735984，原 146246 个响应主键全部保留。
 - **与 P2 的衔接**：P2 存表时要把 `CallInput` 的每个字段存下来，包括祖先调用的 msg_id、开始时间和请求事实，并让索引的 `classify` 放行 `api-request` 行（不放行 `api-request-blob`），按 AGENTS.md 的要求全量验证。这些写在 P2 的 spec 里，本 plan 不做。
