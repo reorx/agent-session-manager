@@ -173,3 +173,593 @@ fn replaces_unreadable_controls_but_keeps_tabs_and_newlines() {
     let export = read_transcript(&path).unwrap();
     assert!(export.text.contains("before���\t\nafter"));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Reading options (`asm transcript --outline / --turns / --grep / --thinking / --tools`)
+
+use std::path::{Path, PathBuf};
+
+use agent_session_core::claude::conversation::read_conversation;
+use agent_session_core::claude::paths::ClaudeDir;
+use agent_session_core::format::fmt_datetime;
+use agent_session_core::index::{Db, Indexer};
+use agent_session_core::model::ConvItem;
+use agent_session_core::search::query::Query;
+use agent_session_core::search::sessions::{Engine, KindSet, SearchOptions, SessionFilter, search, select_sessions};
+use agent_session_core::transcript::{TranscriptOptions, TurnRange, read_transcript_with};
+use serde_json::{Value, json};
+
+const BASE_MS: i64 = 1_793_527_200_000; // 2026-11-01T10:00:00Z
+const SA: &str = "aaaaaaaa-0000-4000-8000-00000000000a";
+const SB: &str = "bbbbbbbb-0000-4000-8000-00000000000b";
+
+/// Record `n` of a built transcript is `n` minutes after `BASE_MS`.
+fn at(n: i64) -> String {
+    fmt_datetime(Some(BASE_MS + n * 60_000))
+}
+
+/// One transcript, written record by record.
+struct T {
+    sid: String,
+    lines: Vec<String>,
+    n: i64,
+}
+
+impl T {
+    fn new(sid: &str) -> T {
+        T { sid: sid.into(), lines: Vec::new(), n: 0 }
+    }
+
+    fn rec(&mut self, mut rec: Value) -> &mut T {
+        self.n += 1;
+        let ts = chrono::DateTime::from_timestamp_millis(BASE_MS + self.n * 60_000).unwrap().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        rec["uuid"] = json!(format!("{}-{:04}", &self.sid[..8], self.n));
+        rec["timestamp"] = json!(ts);
+        rec["sessionId"] = json!(self.sid);
+        rec["cwd"] = json!("/Users/me/Code/edge");
+        rec["isSidechain"] = json!(false);
+        self.lines.push(rec.to_string());
+        self
+    }
+
+    fn user(&mut self, content: Value, origin: &str) -> &mut T {
+        self.rec(json!({"type": "user", "origin": {"kind": origin}, "message": {"role": "user", "content": content}}))
+    }
+
+    fn prompt(&mut self, text: &str) -> &mut T {
+        self.user(json!(text), "human")
+    }
+
+    fn notification(&mut self, text: &str) -> &mut T {
+        self.user(json!(text), "task-notification")
+    }
+
+    fn interrupt(&mut self) -> &mut T {
+        self.user(json!("[Request interrupted by user]"), "human")
+    }
+
+    fn assistant(&mut self, blocks: Value, stop: Option<&str>) -> &mut T {
+        let id = format!("msg_{}", self.n + 1);
+        self.rec(json!({"type": "assistant", "message": {
+            "model": "claude-opus-5-5", "id": id, "role": "assistant", "content": blocks, "stop_reason": stop,
+            "usage": {"input_tokens": 10, "output_tokens": 5}}}))
+    }
+
+    fn reply(&mut self, text: &str) -> &mut T {
+        self.assistant(json!([{"type": "text", "text": text}]), Some("end_turn"))
+    }
+
+    fn thinking(&mut self, thinking: &str, text: &str) -> &mut T {
+        self.assistant(json!([{"type": "thinking", "thinking": thinking, "signature": "s"}, {"type": "text", "text": text}]), None)
+    }
+
+    fn call(&mut self, id: &str, name: &str, input: Value, output: &str, is_error: bool) -> &mut T {
+        self.assistant(json!([{"type": "tool_use", "id": id, "name": name, "input": input}]), Some("tool_use"));
+        self.user(json!([{"tool_use_id": id, "type": "tool_result", "content": output, "is_error": is_error}]), "human")
+    }
+
+    fn tool(&mut self, id: &str, name: &str, input: Value, output: &str) -> &mut T {
+        self.call(id, name, input, output, false)
+    }
+
+    fn write(&self, dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(format!("{}.jsonl", self.sid));
+        std::fs::write(&path, self.lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        path
+    }
+}
+
+/// Three turns: thinking, a tool call, a final reply and a notification; a failed call and an
+/// interruption without a final reply; a prompt nothing answered yet.
+fn wombat() -> T {
+    let mut t = T::new(SA);
+    t.notification("before any prompt")
+        .prompt("first question about wombats")
+        .thinking("pondering wombats", "Let me look.")
+        .tool("t1", "Bash", json!({"command": "ls", "description": "List files"}), "a.txt\nb.txt")
+        .reply("Two files.")
+        .notification("<task-notification>done</task-notification>")
+        .prompt("second")
+        .call("t2", "Read", json!({"file_path": "/x/a.rs"}), "boom", true)
+        .interrupt()
+        .prompt("third");
+    t
+}
+
+fn terms(t: &[&str]) -> Vec<String> {
+    t.iter().map(|s| s.to_string()).collect()
+}
+
+fn grep(t: &[&str]) -> Option<Query> {
+    Some(Query::parse(&terms(t), false, false).unwrap())
+}
+
+fn range(s: &str) -> Option<TurnRange> {
+    Some(TurnRange::parse(s).unwrap())
+}
+
+fn read_with(path: &Path, opts: TranscriptOptions) -> String {
+    read_transcript_with(path, &opts).unwrap().text
+}
+
+/// The turn numbers of the `<user turn="N" …>` elements.
+fn shown_turns(text: &str) -> Vec<u32> {
+    let re = regex::Regex::new(r#"<user turn="(\d+)""#).unwrap();
+    re.captures_iter(text).map(|c| c[1].parse().unwrap()).collect()
+}
+
+/// The `matched="N"` of the opening tag.
+fn matched(text: &str) -> Option<u32> {
+    let first = text.lines().next().unwrap();
+    regex::Regex::new(r#"matched="(\d+)""#).unwrap().captures(first).map(|c| c[1].parse().unwrap())
+}
+
+fn fixture(name: &str) -> PathBuf {
+    fixture_root().parent().unwrap().join(name)
+}
+
+#[test]
+fn without_reading_options_the_export_is_unchanged() {
+    let sb = sandbox();
+    let tmp = tempfile::tempdir().unwrap();
+    let mut paths = vec![fixture("reader.jsonl"), fixture("turn_rules.jsonl"), fixture("conversation.jsonl"), wombat().write(tmp.path())];
+    for (project, sid) in [(ALPHA, S1), (ALPHA, S2), (ALPHA, S5), (BETA, S3)] {
+        paths.push(sb.transcript(project, sid));
+    }
+    paths.push(sb.transcript(ALPHA, S1).with_extension("").join("subagents/agent-a1b2c3.jsonl"));
+    for path in paths {
+        let full = read_transcript(&path).unwrap();
+        for opts in [TranscriptOptions::default(), TranscriptOptions { context: 2, ..TranscriptOptions::default() }] {
+            let export = read_transcript_with(&path, &opts).unwrap();
+            assert_eq!(export.text, full.text, "{}", path.display());
+            assert_eq!(export.skipped_lines, full.skipped_lines);
+        }
+    }
+}
+
+#[test]
+fn reading_options_show_every_part_of_a_turn_in_file_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = wombat().write(tmp.path());
+    let text = read_with(&path, TranscriptOptions { thinking: true, tools: true, ..TranscriptOptions::default() });
+    assert_eq!(text, format!(r#"<transcript session_id="{SA}" turns="3">
+
+<user turn="1" ts="{}">
+first question about wombats
+</user>
+
+<thinking>
+pondering wombats
+</thinking>
+<agent>
+Let me look.
+</agent>
+<tool name="Bash">
+<input>
+# List files
+$ ls
+</input>
+<output>
+a.txt
+b.txt
+</output>
+</tool>
+<agent>
+Two files.
+</agent>
+<other>
+<task-notification>done</task-notification>
+</other>
+
+<user turn="2" ts="{}">
+second
+</user>
+
+<tool name="Read">
+<input>
+file_path: /x/a.rs
+</input>
+<output status="error">
+boom
+</output>
+</tool>
+<other>
+[Request interrupted by user]
+</other>
+<agent status="missing">
+[No final response recorded]
+</agent>
+
+<user turn="3" ts="{}">
+third
+</user>
+
+</transcript>
+"#, at(2), at(8), at(12)));
+
+    // without --tools the calls are counted right after the prompt; without --thinking no thinking
+    let text = read_with(&path, TranscriptOptions { turns: range("1-2"), ..TranscriptOptions::default() });
+    assert_eq!(text, format!(r#"<transcript session_id="{SA}" turns="3">
+
+<user turn="1" ts="{}">
+first question about wombats
+</user>
+
+<turn-summary>
+Called Bash 1 time.
+</turn-summary>
+<agent>
+Let me look.
+</agent>
+<agent>
+Two files.
+</agent>
+<other>
+<task-notification>done</task-notification>
+</other>
+
+<user turn="2" ts="{}">
+second
+</user>
+
+<turn-summary>
+Called Read 1 time.
+</turn-summary>
+<other>
+[Request interrupted by user]
+</other>
+<agent status="missing">
+[No final response recorded]
+</agent>
+
+</transcript>
+"#, at(2), at(8)));
+}
+
+#[test]
+fn the_outline_lists_one_line_per_turn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut t = wombat();
+    t.prompt("<command-message>herdr</command-message>\n<command-name>/herdr</command-name>\n<command-args>go</command-args>")
+        .prompt(&format!("\n\n  multi {}\nsecond line", "x".repeat(130)));
+    let path = t.write(tmp.path());
+    let outline = read_with(&path, TranscriptOptions { outline: true, ..TranscriptOptions::default() });
+    let long = format!("multi {}…", "x".repeat(114));
+    assert_eq!(outline, format!(
+        "{SA} · 5 turns · {} to {}\n   1  {}  first question about wombats\n   2  {}  second\n   3  {}  third\n   4  {}  /herdr go\n   5  {}  {long}\n",
+        at(2), at(14), at(2), at(8), at(12), at(13), at(14)
+    ));
+    let kept = read_with(&path, TranscriptOptions { outline: true, grep: grep(&["wombat", "herdr"]), ..TranscriptOptions::default() });
+    assert_eq!(kept, format!("{SA} · 5 turns, 2 matched · {} to {}\n   1  {}  first question about wombats\n   4  {}  /herdr go\n", at(2), at(14), at(2), at(13)));
+    let some = read_with(&path, TranscriptOptions { outline: true, turns: range("2-3"), ..TranscriptOptions::default() });
+    assert_eq!(some.lines().skip(1).collect::<Vec<_>>(), [format!("   2  {}  second", at(8)), format!("   3  {}  third", at(12))]);
+    // the text itself shows a prompt as recorded, so that a hit inside the wrappers is visible
+    let text = read_with(&path, TranscriptOptions { turns: range("4"), grep: grep(&["command-message"]), ..TranscriptOptions::default() });
+    assert!(text.contains("<command-message>herdr</command-message>\n<command-name>/herdr</command-name>"), "{text}");
+    assert_eq!(matched(&text), Some(1));
+}
+
+/// Turn numbers are the detail panel's on every tricky record of the fixtures.
+#[test]
+fn turns_are_numbered_like_the_detail_panel() {
+    for name in ["turn_rules.jsonl", "reader.jsonl", "conversation.jsonl"] {
+        let path = fixture(name);
+        let prompts: Vec<String> = read_conversation(&path, None)
+            .unwrap()
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                ConvItem::Turn(t) if t.number.is_some() => Some(t.prompt.text),
+                _ => None,
+            })
+            .collect();
+        let outline = read_with(&path, TranscriptOptions { outline: true, ..TranscriptOptions::default() });
+        let lines: Vec<&str> = outline.lines().skip(1).collect();
+        assert_eq!(lines.len(), prompts.len(), "{name}: {outline}");
+        for (i, (line, prompt)) in lines.iter().zip(&prompts).enumerate() {
+            let first = prompt.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("[Image omitted]");
+            assert!(line.starts_with(&format!("{:>4}  ", i + 1)), "{name}: {line}");
+            assert!(line.ends_with(first), "{name}: {line} vs {first}");
+        }
+        let text = read_with(&path, TranscriptOptions { tools: true, ..TranscriptOptions::default() });
+        assert!(text.starts_with(&format!("<transcript session_id=\"{}\" turns=\"{}\">", path.file_stem().unwrap().to_str().unwrap(), prompts.len())));
+        assert_eq!(shown_turns(&text), (1..=prompts.len() as u32).collect::<Vec<_>>(), "{name}");
+    }
+}
+
+#[test]
+fn turns_selects_a_range_and_refuses_numbers_past_the_last_turn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = wombat().write(tmp.path());
+    let only = |s: &str| shown_turns(&read_with(&path, TranscriptOptions { turns: range(s), ..TranscriptOptions::default() }));
+    assert_eq!(only("2"), [2]);
+    assert_eq!(only("1-2"), [1, 2]);
+    assert_eq!(only("2-"), [2, 3]);
+    assert_eq!(only("3-3"), [3]);
+    for past in ["4", "2-4", "4-"] {
+        let err = read_transcript_with(&path, &TranscriptOptions { turns: range(past), ..TranscriptOptions::default() }).unwrap_err();
+        assert!(err.to_string().contains("beyond the last turn (3)"), "{past}: {err}");
+    }
+    assert_eq!(TurnRange::parse("2-").unwrap(), TurnRange { first: 2, last: None });
+    assert_eq!(TurnRange::parse(" 5 ").unwrap(), TurnRange { first: 5, last: Some(5) });
+    for bad in ["0", "0-2", "3-2", "x", "", "-2", "1-2-3", "1-x"] {
+        assert!(TurnRange::parse(bad).is_err(), "{bad:?} parsed");
+    }
+}
+
+/// Five turns; one word in each kind of text, in different turns.
+fn zoo() -> T {
+    zoo_as(SB)
+}
+
+fn zoo_as(sid: &str) -> T {
+    let mut t = T::new(sid);
+    t.prompt("turn one").thinking("a zebra thought", "reply one")
+        .prompt("turn two").reply("reply two")
+        .prompt("turn three").reply("the needle is here")
+        .prompt("turn four").tool("g1", "Bash", json!({"command": "make all"}), "gnu output").reply("reply four")
+        .prompt("turn five").reply("reply five");
+    t
+}
+
+#[test]
+fn grep_keeps_the_turns_with_a_hit_and_their_context() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = zoo().write(tmp.path());
+    let kept = |opts: TranscriptOptions| {
+        let text = read_with(&path, opts);
+        let turns = shown_turns(&text);
+        assert_eq!(matched(&text), Some(turns.len() as u32), "matched counts the turns kept: {text}");
+        turns
+    };
+    let g = |t: &[&str]| TranscriptOptions { grep: grep(t), ..TranscriptOptions::default() };
+    assert_eq!(kept(g(&["NEEDLE"])), [3]);
+    assert_eq!(kept(g(&["needle", "turn five"])), [3, 5], "any TERM keeps a turn");
+    assert_eq!(kept(g(&["needle|five"])), [3, 5]);
+    assert_eq!(kept(TranscriptOptions { context: 1, ..g(&["needle"]) }), [2, 3, 4]);
+    assert_eq!(kept(TranscriptOptions { context: 9, ..g(&["needle"]) }), [1, 2, 3, 4, 5]);
+    assert_eq!(kept(TranscriptOptions { context: 1, turns: range("1-2"), ..g(&["needle"]) }), [2], "context outside the range is left out");
+    assert_eq!(kept(TranscriptOptions { turns: range("4-"), ..g(&["needle"]) }), Vec::<u32>::new());
+    assert_eq!(kept(g(&["nothing like this"])), Vec::<u32>::new());
+    // thinking and tool calls count only when they are shown
+    assert_eq!(kept(g(&["zebra"])), Vec::<u32>::new());
+    assert_eq!(kept(TranscriptOptions { thinking: true, ..g(&["zebra"]) }), [1]);
+    assert_eq!(kept(g(&["gnu"])), Vec::<u32>::new());
+    assert_eq!(kept(TranscriptOptions { tools: true, ..g(&["gnu"]) }), [4]);
+    assert_eq!(kept(TranscriptOptions { tools: true, ..g(&["$ make"]) }), [4], "input as in the tool-input kind");
+    assert_eq!(kept(g(&["Bash"])), Vec::<u32>::new(), "the turn summary is not text that is searched");
+    let regex = Query::parse(&terms(&["ne+dle"]), true, false).unwrap();
+    assert_eq!(kept(TranscriptOptions { grep: Some(regex), ..TranscriptOptions::default() }), [3]);
+}
+
+/// A tool call whose output is `output`.
+fn one_call(dir: &Path, output: &str) -> PathBuf {
+    let mut t = T::new(SA);
+    t.prompt("look").tool("c1", "Bash", json!({"command": "cat log"}), output).reply("done");
+    t.write(dir)
+}
+
+/// The body of the first `<output>` element.
+fn output_body(text: &str) -> String {
+    let start = text.find("<output>\n").expect("an output") + "<output>\n".len();
+    let end = text[start..].find("\n</output>").unwrap() + start;
+    text[start..end].to_string()
+}
+
+#[test]
+fn long_tool_output_is_cut_around_the_hits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let tools = |g: Option<Query>| TranscriptOptions { tools: true, grep: g, ..TranscriptOptions::default() };
+    let a = |n: usize| "a".repeat(n);
+    let b = |n: usize| "b".repeat(n);
+
+    // up to 2,000 characters nothing is cut
+    let path = one_call(&tmp.path().join("short"), &a(2000));
+    assert_eq!(output_body(&read_with(&path, tools(None))), a(2000));
+
+    // no hit inside: the first 2,000 characters
+    let text = format!("{}NEEDLE{}", a(7000), b(2994));
+    let path = one_call(&tmp.path().join("one"), &text);
+    assert_eq!(output_body(&read_with(&path, tools(None))), format!("{}\n…[cut 8000 chars]", a(2000)));
+    // a hit inside: the first 500, then 300 before the hit and 700 from its start
+    assert_eq!(
+        output_body(&read_with(&path, tools(grep(&["needle"])))),
+        format!("{}\n…[cut 6200 chars]\n{}NEEDLE{}\n…[cut 2300 chars]", a(500), a(300), b(694))
+    );
+
+    // windows that touch the first 500 characters or each other merge
+    let text = format!("{}NEEDLE{}NEEDLE{}", a(600), a(294), a(9100));
+    let path = one_call(&tmp.path().join("merge"), &text);
+    let body = output_body(&read_with(&path, tools(grep(&["needle"]))));
+    let first: String = text.chars().take(1600).collect();
+    assert_eq!(body, format!("{first}\n…[cut 8406 chars]"));
+
+    // at most 4,000 characters in all; the hits past that are counted on the last cut
+    let mut text = String::new();
+    for _ in 0..6 {
+        text.push_str(&a(2000));
+        text.push_str("NEEDLE");
+    }
+    text.push_str(&a(20_000 - text.chars().count()));
+    let path = one_call(&tmp.path().join("many"), &text);
+    let body = output_body(&read_with(&path, tools(grep(&["needle"]))));
+    assert_eq!(body.matches("NEEDLE").count(), 3, "{body}");
+    assert!(body.ends_with("\n…[cut 13288 chars, 3 more hits]"), "{}", &body[body.len() - 80..]);
+    let kept: usize = body.split('\n').filter(|l| !l.starts_with("…[cut")).map(|l| l.chars().count()).sum();
+    assert!(kept <= 4000, "kept {kept}");
+
+    // characters, not bytes
+    let path = one_call(&tmp.path().join("wide"), &"中".repeat(2500));
+    assert_eq!(output_body(&read_with(&path, tools(None))), format!("{}\n…[cut 500 chars]", "中".repeat(2000)));
+}
+
+#[test]
+fn long_other_text_and_tool_input_are_cut_too_but_prompts_and_replies_are_not() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut t = T::new(SA);
+    let big = "z".repeat(3000);
+    t.prompt(&big).notification(&big).tool("c1", "Write", json!({"file_path": "/x", "content": big}), "ok").reply(&big);
+    let path = t.write(tmp.path());
+    let text = read_with(&path, TranscriptOptions { tools: true, ..TranscriptOptions::default() });
+    assert!(text.contains(&format!("<user turn=\"1\" ts=\"{}\">\n{big}\n</user>", at(1))));
+    assert!(text.contains(&format!("<agent>\n{big}\n</agent>")));
+    assert!(text.contains(&format!("<other>\n{}\n…[cut 1000 chars]\n</other>", "z".repeat(2000))));
+    let input = format!("file_path: /x\ncontent: {big}");
+    let cut = input.chars().count() - 2000;
+    assert!(text.contains(&format!("<input>\n{}\n…[cut {cut} chars]\n</input>", &input[..2000])), "{text}");
+}
+
+/// Every hit `asm search` reports, by index or by scan, in every kind, is in the export of its
+/// turn read with the same TERM: the turn is kept and the snippet's text is shown.
+#[test]
+fn every_hit_the_search_reports_is_shown_in_its_turn() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("claude");
+    let dir = root.join("projects").join("-Users-me-Code-edge");
+    for (i, name) in ["turn_rules.jsonl", "reader.jsonl", "conversation.jsonl"].iter().enumerate() {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::copy(fixture(name), dir.join(format!("0000000{i}-0000-4000-8000-000000000000.jsonl"))).unwrap();
+    }
+    wombat().write(&dir);
+    let mut deep = zoo_as("cccccccc-0000-4000-8000-00000000000c");
+    let long = format!("{}needle deep down{}needle again{}", "x ".repeat(3000), "y ".repeat(2000), "w ".repeat(500));
+    deep.tool("d1", "Bash", json!({"command": "cat huge.log", "description": "x ".repeat(1500)}), &long).reply("ok");
+    deep.write(&dir);
+    let mut db = Db::open(&tmp.path().join("index.sqlite")).unwrap();
+    Indexer::new(ClaudeDir::new(&root), None).scan(&mut db, &mut |_| {}).unwrap();
+    let sessions = select_sessions(&db, &SessionFilter::default()).unwrap();
+    assert_eq!(sessions.len(), 5);
+    let mut checked = 0;
+    for term in ["的", "e", "问", "o", "a", "t", "needle", "wombat", "x x", "deep", "again", "duplicate", "noise"] {
+        let q = Query::parse(&terms(&[term]), false, false).unwrap();
+        for (kinds, engine) in [(KindSet::parse(Some("all"), &[]).unwrap(), Engine::Scan), (KindSet::default(), Engine::Index)] {
+            let opts = SearchOptions { snippets: 10_000, engine: Some(engine), ..SearchOptions::default() };
+            for found in search(&db, &sessions, &q, &kinds, &opts).unwrap().sessions {
+                let path = sessions.iter().find(|s| s.id == found.session_id).unwrap().file_path.clone().unwrap();
+                for hit in found.snippets {
+                    let Some(turn) = hit.turn else { continue };
+                    let export = read_with(&path, TranscriptOptions {
+                        turns: range(&turn.to_string()),
+                        grep: Some(q.clone()),
+                        thinking: true,
+                        tools: true,
+                        ..TranscriptOptions::default()
+                    });
+                    assert_eq!(matched(&export), Some(1), "{term:?} turn {turn} of {}: {export}", found.session_id);
+                    let snippet = hit.text.text.trim_start_matches('…').trim_end_matches('…').replace('⏎', "\n");
+                    assert!(
+                        export.contains(snippet.trim()),
+                        "{term:?}, {} hit in turn {turn} of {}:\n{snippet}\n---\n{export}",
+                        hit.kind.as_str(),
+                        found.session_id
+                    );
+                    checked += 1;
+                }
+            }
+        }
+    }
+    assert!(checked > 150, "checked {checked} hits");
+}
+
+// --- the command line
+
+fn reader_cmd(bin: &str, tmp: &Path) -> Command {
+    let mut cmd = Command::cargo_bin(bin).unwrap();
+    cmd.env("ASM_CLAUDE_DIR", tmp.join("claude")).env("ASM_DB", tmp.join("index.sqlite")).env("TZ", "UTC").env_remove("CLAUDE_CONFIG_DIR");
+    if bin == "asm" {
+        cmd.arg("transcript");
+    }
+    cmd
+}
+
+#[test]
+fn both_entrypoints_take_the_reading_options() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = wombat().write(tmp.path());
+    for args in [&["--outline"][..], &["--turns", "2", "--tools"], &["--grep", "wombat", "boom", "--context", "1", "--thinking", "--tools"]] {
+        let a = reader_cmd("asm", tmp.path()).arg(&path).args(args).output().unwrap();
+        let b = reader_cmd("transcript-reader", tmp.path()).arg(&path).args(args).output().unwrap();
+        assert!(a.status.success(), "{args:?}: {}", String::from_utf8_lossy(&a.stderr));
+        assert_eq!(a.stdout, b.stdout, "{args:?}");
+        assert_eq!(a.status.code(), b.status.code());
+    }
+    let out = reader_cmd("asm", tmp.path()).arg(&path).args(["--grep", "wombat", "--tools"]).output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.starts_with(&format!("<transcript session_id=\"{SA}\" turns=\"3\" matched=\"1\">\n\n<user turn=\"1\" ts=\"2026-11-01 10:02\">")), "{text}");
+}
+
+#[test]
+fn a_grep_term_that_starts_with_a_dash_is_attached_with_an_equals_sign() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut t = T::new(SA);
+    t.prompt("delete it").tool("r1", "Bash", json!({"command": "rm -rf build"}), "").reply("removed")
+        .prompt("and foo too").reply("ok");
+    let path = t.write(tmp.path());
+    for bin in ["asm", "transcript-reader"] {
+        let out = reader_cmd(bin, tmp.path()).arg(&path).args(["--tools", "--grep=-rf"]).output().unwrap();
+        assert!(out.status.success(), "{bin}: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(shown_turns(&String::from_utf8_lossy(&out.stdout)), [1]);
+        // the other TERMs go to their own --grep, before or after it
+        for args in [&["--grep", "foo", "--grep=-rf"][..], &["--grep=-rf", "--grep", "foo"]] {
+            let out = reader_cmd(bin, tmp.path()).arg(&path).arg("--tools").args(args).output().unwrap();
+            assert!(out.status.success(), "{bin} {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            assert_eq!(shown_turns(&String::from_utf8_lossy(&out.stdout)), [1, 2], "{bin} {args:?}");
+        }
+        // a word after `--grep=TERM` is not another TERM
+        let out = reader_cmd(bin, tmp.path()).arg(&path).args(["--grep=-rf", "foo"]).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{bin}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("unexpected argument 'foo'"), "{bin}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
+#[test]
+fn invalid_reading_options_exit_2_and_a_turn_past_the_end_exits_1() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = wombat().write(tmp.path());
+    for bin in ["asm", "transcript-reader"] {
+        for (args, says) in [
+            (&["--regex"][..], "--grep"),
+            (&["--context", "1"], "--grep"),
+            (&["--turns", "0"], "turns start at 1"),
+            (&["--turns", "3-2"], "3-2"),
+            (&["--turns", "two"], "two"),
+            (&["--grep", ""], "term 1 has nothing to match"),
+            (&["--grep", "a", "|"], "term 2 has nothing to match"),
+            (&["--regex", "--grep", "x*"], "term 1 can match empty text"),
+        ] {
+            let out = reader_cmd(bin, tmp.path()).arg(&path).args(args).output().unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert_eq!(out.status.code(), Some(2), "{bin} {args:?}: {stderr}");
+            assert!(stderr.contains(says), "{bin} {args:?}: {stderr}");
+            assert!(out.stdout.is_empty());
+        }
+        let out = reader_cmd(bin, tmp.path()).arg(&path).args(["--turns", "4"]).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{bin}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("turn 4 is beyond the last turn (3)"), "{bin}: {}", String::from_utf8_lossy(&out.stderr));
+        // a regex that does not compile is literal text, and stderr says so
+        let out = reader_cmd(bin, tmp.path()).arg(&path).args(["--regex", "--grep", "wombats ("]).output().unwrap();
+        assert!(out.status.success(), "{bin}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("term 1 is not a valid regular expression, matched as literal text"));
+    }
+}

@@ -371,11 +371,7 @@ pub(crate) fn iter_texts<'a>(rec: &RawRecord<'a>, want_tool: bool) -> Vec<Piece<
                         pieces.push(Piece { role, text: block.thinking.unwrap_or_default(), detail: "thinking".into(), tool_input: None, block: Block::Thinking });
                     }
                     Some("tool_use") if want_tool => {
-                        let input = match block.input.and_then(|raw| serde_json::from_str::<Value>(raw.get()).ok()) {
-                            Some(Value::Object(map)) => map,
-                            Some(other) => Map::from_iter([("input".to_string(), other)]),
-                            None => Map::new(),
-                        };
+                        let input = tool_input_map(block.input);
                         let text = input.iter().map(|(k, v)| format!("{k}: {}", stringify(v))).collect::<Vec<_>>().join("\n");
                         let name = block.name.as_deref().unwrap_or("?");
                         pieces.push(Piece {
@@ -398,6 +394,16 @@ pub(crate) fn iter_texts<'a>(rec: &RawRecord<'a>, want_tool: bool) -> Vec<Piece<
         Content::Other => {}
     }
     pieces
+}
+
+/// A tool call's input as fields: an object as is, any other value under `input`, nothing when
+/// it is missing or unreadable.
+pub(crate) fn tool_input_map(input: Option<&serde_json::value::RawValue>) -> Map<String, Value> {
+    match input.and_then(|raw| serde_json::from_str::<Value>(raw.get()).ok()) {
+        Some(Value::Object(map)) => map,
+        Some(other) => Map::from_iter([("input".to_string(), other)]),
+        None => Map::new(),
+    }
 }
 
 /// A tool result's text: its string content, or its text blocks joined by line breaks.

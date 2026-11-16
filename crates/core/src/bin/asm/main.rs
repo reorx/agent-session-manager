@@ -174,7 +174,7 @@ fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         // invalid arguments found after parsing: exit 2, worded like clap's own
-        Err(e) if e.is::<agent::UsageError>() => {
+        Err(e) if e.is::<agent::UsageError>() || e.is::<transcript::UsageError>() => {
             eprintln!("error: {e}");
             ExitCode::from(2)
         }

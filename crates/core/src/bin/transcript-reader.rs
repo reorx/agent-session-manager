@@ -22,6 +22,10 @@ fn main() -> ExitCode {
     let claude = cli.claude_dir.map(ClaudeDir::new).unwrap_or_else(ClaudeDir::from_env);
     match transcript::run(cli.args, &claude, &agent_session_core::claude::paths::default_db_path(), &mut std::io::stdout().lock()) {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if error.is::<transcript::UsageError>() => {
+            eprintln!("error: {error}");
+            ExitCode::from(2)
+        }
         Err(error) => {
             eprintln!("{error:#}");
             ExitCode::FAILURE

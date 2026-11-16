@@ -14,6 +14,73 @@ use crate::claude::discover::discover_all;
 use crate::claude::parse::{Content, parse_content, user_text};
 use crate::claude::paths::{ClaudeDir, expand_user};
 use crate::model::TranscriptExport;
+use crate::search::query::Query;
+
+mod reading;
+
+/// What part of a transcript to export, and how (`asm transcript`'s reading options). The
+/// default is the full export of `read_transcript`.
+#[derive(Clone, Debug, Default)]
+pub struct TranscriptOptions {
+    /// One line per turn instead of the text.
+    pub outline: bool,
+    /// Only these turns.
+    pub turns: Option<TurnRange>,
+    /// Only the turns where any TERM occurs in the parts shown.
+    pub grep: Option<Query>,
+    /// With `grep`, also this many turns before and after each turn with a hit.
+    pub context: u32,
+    /// Show the agent's thinking.
+    pub thinking: bool,
+    /// Show each tool call with its input and output.
+    pub tools: bool,
+}
+
+impl TranscriptOptions {
+    /// No reading option: the full export, unchanged.
+    pub fn is_full(&self) -> bool {
+        !self.outline && self.turns.is_none() && self.grep.is_none() && !self.thinking && !self.tools
+    }
+}
+
+/// `--turns`: `N`, `N-M` or `N-` (to the last turn); turns start at 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TurnRange {
+    pub first: u32,
+    pub last: Option<u32>,
+}
+
+impl TurnRange {
+    pub fn parse(s: &str) -> Result<TurnRange, String> {
+        let s = s.trim();
+        let number = |t: &str| match t.parse::<u32>() {
+            Ok(0) => Err("turns start at 1".to_string()),
+            Ok(n) => Ok(n),
+            Err(_) => Err(format!("'{s}' is not a turn range (N, N-M or N-)")),
+        };
+        match s.split_once('-') {
+            None => number(s).map(|n| TurnRange { first: n, last: Some(n) }),
+            Some((first, "")) => Ok(TurnRange { first: number(first)?, last: None }),
+            Some((first, last)) => {
+                let (first, last) = (number(first)?, number(last)?);
+                if first > last {
+                    return Err(format!("'{s}' ends before it starts"));
+                }
+                Ok(TurnRange { first, last: Some(last) })
+            }
+        }
+    }
+
+    pub fn contains(&self, turn: u32) -> bool {
+        turn >= self.first && self.last.is_none_or(|last| turn <= last)
+    }
+}
+
+/// The export `opts` asks for: `read_transcript` without reading options, else the turns asked
+/// for with every item `asm search` searches in them (see `reading`).
+pub fn read_transcript_with(path: &Path, opts: &TranscriptOptions) -> Result<TranscriptExport> {
+    if opts.is_full() { read_transcript(path) } else { reading::read(path, opts) }
+}
 
 /// Resolve a local file, exact session ID, or unambiguous ID prefix.
 /// Discovery is read-only; history-only sessions have no transcript to export.
