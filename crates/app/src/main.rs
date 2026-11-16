@@ -104,6 +104,10 @@ const TABLE_CHROME_W: f32 = 16.;
 const AUTO_SCAN_MIN_GAP: Duration = Duration::from_secs(30);
 /// While the app is open and nothing else scanned, it scans this often.
 const AUTO_SCAN_IDLE: Duration = Duration::from_secs(600);
+/// The status bar when a scan cannot start because the store thread is gone (and no earlier
+/// error is on it).
+const STORE_GONE: &str = "cannot scan: the index is not open, restart the app";
+
 /// The first close of the window says what closing does now (`close_requested`).
 const RESIDENT_NOTICE: &str = "Agent Session Manager 会留在菜单栏继续记录用量。";
 const RESIDENT_NOTICE_DETAIL: &str = "要完全退出请按 ⌘Q。";
@@ -732,26 +736,40 @@ impl AppRoot {
 
     /// Scan for Changes / Rebuild Index from the menu.
     fn rescan(&mut self, rebuild: bool, cx: &mut Context<Self>) {
-        self.index_status = IndexStatus::Loading;
-        self.scan_in_flight = true;
-        self.store.request(if rebuild { StoreRequest::Rebuild } else { StoreRequest::Scan { quiet: false } });
-        self.sync_resident(cx);
+        if self.request_scan(if rebuild { StoreRequest::Rebuild } else { StoreRequest::Scan { quiet: false } }, cx) {
+            self.index_status = IndexStatus::Loading;
+        }
         cx.notify();
+    }
+
+    /// Hands a scan to the store thread. That thread stops when the index cannot be opened;
+    /// then the scan fails at once (the menu says `Scan failed`) instead of waiting for an end
+    /// that never comes, and the status bar keeps the error that stopped it. False then.
+    fn request_scan(&mut self, request: StoreRequest, cx: &mut Context<Self>) -> bool {
+        self.scan_in_flight = true;
+        let sent = self.store.request(request);
+        if !sent {
+            eprintln!("store: {STORE_GONE}");
+            if !matches!(self.index_status, IndexStatus::Failed(_)) {
+                self.index_status = IndexStatus::Failed(STORE_GONE.into());
+            }
+            self.scan_record.failed(Local::now().time());
+            self.scan_ended(cx);
+        }
+        self.sync_resident(cx);
+        sent
     }
 
     /// A quiet incremental scan (window activated, the idle timer), unless one runs or the last
     /// one ended less than `AUTO_SCAN_MIN_GAP` ago. Nothing on screen changes unless the scan
-    /// finds something. True when a scan was asked for.
+    /// finds something. True when the store thread took the scan.
     pub(crate) fn auto_scan(&mut self, trigger: &str, cx: &mut Context<Self>) -> bool {
         let now = cx.background_executor().now();
         if self.scan_in_flight || self.last_scan_done.is_some_and(|t| now.saturating_duration_since(t) < AUTO_SCAN_MIN_GAP) {
             return false;
         }
         println!("auto-scan: {trigger}");
-        self.scan_in_flight = true;
-        self.store.request(StoreRequest::Scan { quiet: true });
-        self.sync_resident(cx);
-        true
+        self.request_scan(StoreRequest::Scan { quiet: true }, cx)
     }
 
     /// A scan ended (done, skipped or failed): the next automatic one may go after the gap.
@@ -831,6 +849,7 @@ impl AppRoot {
             this.update_in(cx, |this, window, cx| {
                 this.notice_open = false;
                 let Some(answer) = answer else { return };
+                println!("window: first-close notice · {}", RESIDENT_NOTICE_ANSWERS.get(answer).unwrap_or(&"?"));
                 this.resident_notice_shown = true;
                 this.persist(cx);
                 match answer {
@@ -858,8 +877,10 @@ impl AppRoot {
         if let Some(resident) = cx.try_global::<Resident>() {
             resident.show();
         }
-        // GPUI's activate is activateIgnoringOtherApps: NSApp.activate() does not bring the app
-        // to the front when no click asked for it (the autoplay, Finder's reopen)
+        // GPUI's activate is activateIgnoringOtherApps: it works without a click while a
+        // terminal is in front (the autoplay). A click on Open Sessions and Finder's reopen have
+        // asked for the front already (`resident::bring_forward`), which is what works while a
+        // game is in front
         cx.activate(true);
         window.activate_window();
         if std::mem::take(&mut self.window_hidden) {
@@ -1010,6 +1031,8 @@ impl AppRoot {
     /// - `scan`: Scan Now through its menu item (the menu is closed first), until the scan ended;
     /// - `wait-scan`: until a scan started since the last step ended (the script clicked Scan Now);
     /// - `open`: Open Sessions through its menu item, until the window is back;
+    /// - `wait-open`: until the window is back (the script clicked Open Sessions, or opened the
+    ///   app again from outside like Finder does);
     /// - `quit`: Quit through its menu item.
     ///
     /// `<menu bar>` is the item's title and the menu's three lines, joined by `|`. With
@@ -1072,8 +1095,11 @@ impl AppRoot {
                         let Ok(line) = this.update(cx, |this, _| this.resident_line()) else { return };
                         if done { line } else { format!("no scan · {line}") }
                     }
-                    "open" => {
-                        autoplay_menu_item(&this, cx, ResidentCommand::OpenSessions);
+                    // wait-open: the script clicked Open Sessions or reopened the app from outside
+                    "open" | "wait-open" => {
+                        if command == "open" {
+                            autoplay_menu_item(&this, cx, ResidentCommand::OpenSessions);
+                        }
                         let shown = autoplay_wait(&this, cx, 100, |this, _| !this.window_hidden).await;
                         cx.background_executor().timer(Duration::from_millis(500)).await;
                         let Ok(state) = this.update_in(cx, |this, window, cx| {
@@ -1703,9 +1729,11 @@ fn main() {
     // closing the window hides it (`close_requested`); only Quit ends the app
     let app = gpui_kit::application().with_assets(AppAssets).with_quit_mode(QuitMode::Explicit);
     let (menu, menu_commands) = async_channel::unbounded();
-    // opened again from Finder or Spotlight: AppKit asks only while no window is visible
+    // opened again from Finder or Spotlight: AppKit asks only while no window is visible. The
+    // user asked for the app just now: to the front here, not later in the GPUI task
     let reopen = menu.clone();
     app.on_reopen(move |_| {
+        resident::bring_forward();
         let _ = reopen.try_send(ResidentCommand::OpenSessions);
     });
     app.run(move |cx| {

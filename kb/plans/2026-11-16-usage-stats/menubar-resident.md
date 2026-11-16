@@ -203,7 +203,7 @@ tags:
 - 第一次关窗的对话框：标题「Agent Session Manager 会留在菜单栏继续记录用量。」，说明「要完全退出请按 ⌘Q。」；选「好」或「立即退出」都把 `resident_notice_shown` 写进 `state.json`（说明已经看过）。对话框开着时再关窗不做任何事。
 - `show_window` 在 `auto_scan` 之前还调 `roll_day`（窗口隐藏期间跨过 4:00 时，重开先换日）。焦点照本 spec 一律给表格，不恢复关窗前的焦点。
 - 菜单栏项设了 `autosaveName`，让系统（和 Thaw 这类工具）记住用户拖到的位置。
-- autoplay 不是 `ASM_RESIDENT_AUTOPLAY=1` 的固定序列，而是 `ASM_RESIDENT_AUTOPLAY=<gate 目录>`：脚本按序号放命令文件（`close`、`menu`、`close-menu`、`scan`、`wait-scan`、`open`、`quit`），每步做完打 `autoplay-resident: <命令> · <标题> | <三行>`。菜单由 autoplay 在固定位置弹出（`popUpMenuPositioningItem`，经 run loop），不靠点菜单栏项：这台机器上菜单栏项在 Thaw 的隐藏区。菜单项由 `performActionForItemAtIndex:` 触发，走真实的 target → 通道 → GPUI 任务；`RESIDENT_CLICK=1` 时脚本改用 cliclick 真点 Scan Now；`RESIDENT_HOLD=<秒>` 让窗口多隐藏一段时间并打出每次定时扫描的时刻（下文 App Nap 一条）；`ASM_RESIDENT_QUERY=<词>` 先搜索再截图，用来对照验收 5 的搜索词。做法见 `kb/docs/gpui-kit-guide.md`「脚本化交互与截图」。
+- autoplay 不是 `ASM_RESIDENT_AUTOPLAY=1` 的固定序列，而是 `ASM_RESIDENT_AUTOPLAY=<gate 目录>`：脚本按序号放命令文件（`close`、`menu`、`close-menu`、`scan`、`wait-scan`、`open`、`quit`），每步做完打 `autoplay-resident: <命令> · <标题> | <三行>`。菜单由 autoplay 在固定位置弹出（`popUpMenuPositioningItem`，经 run loop），不靠点菜单栏项：这台机器上菜单栏项在 Thaw 的隐藏区。菜单项由 `performActionForItemAtIndex:` 触发，走真实的 target → 通道 → GPUI 任务；`RESIDENT_CLICK=1` 时脚本改用 cliclick 真点 Scan Now 和 Open Sessions（R1：点之前用 `winid --at` 确认点击处最上层是本进程的菜单）；`RESIDENT_FRONT_APP` 先把别的应用带到前台；`RESIDENT_REOPEN` 用 `open` 再次打开 bundle；每一步有判定，不过就退出 1（R1，审阅 R1）；`RESIDENT_HOLD=<秒>` 让窗口多隐藏一段时间并打出每次定时扫描的时刻（下文 App Nap 一条）；`ASM_RESIDENT_QUERY=<词>` 先搜索再截图，用来对照验收 5 的搜索词。做法见 `kb/docs/gpui-kit-guide.md`「脚本化交互与截图」。
 - `screenshot-resident.sh` 和 `screenshot-usage.sh` 共用 `scripts/shot-lib.sh`（拒绝真实数据目录、按窗口 / 区域截图并在失败时重试一次）。
 
 ### 实测
@@ -217,14 +217,18 @@ tags:
 步骤 1 的试验（usage-p2-probe，报告 `tmp/2026-11-12-usage-stats/usage-p2-probe/report.md`）之后：
 
 - **activation policy 来回切换：已实测，稳定。** 按「设 Regular → `cx.activate(true)` → `window.activate_window()`」的顺序 10/10 次恢复 Dock 图标、应用菜单栏、前台和 key window，不需要延后一帧，不用「Dock 图标一直在」的退路。切到 Accessory 时系统自动把前台交还给上一个应用。
-- **不要用 `NSApp.activate()`（新增）。** macOS 14 起的协作式激活由定时器之类的非点击路径触发时 0/4 次拉到前台，只有真实点击菜单项时成功。继续用 GPUI 的 `cx.activate(true)`（`activateIgnoringOtherApps:YES`，macOS 26 上照常生效）；它已被 Apple 标为弃用，将来失效时退回「点击菜单项时 `NSApp.activate()`」。
+- **重开时拿前台：两种激活都要（R1 修订）。** 试验：协作式的 `NSApp.activate()` 由定时器之类的非点击路径触发时 0/4 次拉到前台，真实点击菜单项后 1/1 成功；GPUI 的 `cx.activate(true)`（`activateIgnoringOtherApps:YES`）前台是终端时 10/10。验收（usage-p2-accept）发现后者也会被拒：前台是全屏游戏（Hearthstone / Battle.net）时 Open Sessions 和 Finder 重开 3 次都是 `active=false`，窗口在游戏后面。改法：用户自己发起的两条路径在 AppKit 回调里当场调 `resident::bring_forward`（切 Regular → `NSApp.activate()`），之后照旧走 `show_window`（Regular → `cx.activate(true)` → `activate_window`）。一是菜单项 target 的 `openSessions:`（真实点击的那一刻），二是 `main()` 的 `on_reopen`（Finder / Spotlight 再次打开）。理由：协作式激活认的是「紧跟用户操作的请求」，所以要在回调里当场请求，不能等通道另一头的 GPUI 任务；`activateIgnoringOtherApps:` 留着给没有点击的路径（autoplay、前台是终端或 Finder 时）。实测（usage-p2-resident-r1，Finder 在前台，`tmp/2026-11-12-usage-stats/usage-p2-resident/r1/`）：cliclick 真点 Open Sessions、程序化选 Open Sessions、`open` 再次打开 bundle，三种都是 `active=true`，菜单栏换回本应用的菜单，Dock 图标回来。**前台是游戏时点击能否拿到前台未验**（这次没有游戏可开），在用户手动检查清单里。推测：游戏可能用了让系统拒绝激活请求的全屏方式，那时只有用户的点击算数，而点击路径现在会请求协作式激活。
+- **Finder 再次打开时 policy 与激活的先后（R1）。** 实测 LaunchServices 先把应用激活了（还是 Accessory），`on_reopen` 回调里才切 Regular（日志 `window: bring forward (active before: true)`）；菜单栏和 Dock 图标照样回来，不需要「先失活再激活」的绕法。若将来出现「Dock 图标回来、菜单栏仍是别的应用」，就是这个顺序的问题，退路是在 `bring_forward` 里检测到已激活时延后一帧再 `NSApp.activate()`。
+- **`setActivationPolicy:` 设成已有的值返回 NO（R1）。** `bring_forward` 之后 `show_window` 再设一次 Regular，原来会打出误导的 `activation policy … refused`；现在先比较再设。
 - **在 GPUI 的 update 里同步调 `performClose:` 会让进程 abort（新增）。** `windowShouldClose:` 的回调借不到 `App`，GPUI 退回「允许关闭」，随后 `close_window` 里 `RefCell already borrowed`。所以 `⌘W` 走自己的 `CloseWindow` action 直接调 `close_requested`；同理不在 update 里同步打开菜单（嵌套 run loop）。用户点红色按钮不受影响。
 - **隐藏的窗口不重绘：已实测。** 隐藏期间 `render` 调用 0 次（GPUI 在窗口被遮挡时停掉 display link），重开时一次重绘；`on_store_events` 不需要为隐藏的窗口跳过计算。
 - **菜单开着时数字照样刷新：已实测。** GPUI 的任务走 GCD 主队列，菜单跟踪期间照常执行，`setTitle` / `setEnabled` 即时生效。
 - **菜单栏管理工具（新增）。** 用户装了 Thaw，新的菜单栏项被放进它的隐藏区（屏幕外），要用户在 Thaw 里把它拖到可见区才看得到；debug 二进制和正式包在 Thaw 里是两个不同的项。验收截图「菜单栏出现图标和今天的费用」要么先请用户移出来，要么以日志里的标题为准。
 - **`windowShouldClose:` 只管用户关窗。** `NSApp terminate:`（`⌘Q`、Sparkle 重启、关机）不经过它，所以这些路径不受影响；步骤 8 在正式包上确认。
-- **Finder 再次打开（`on_reopen`）未实测。** 裸二进制做不了，留给步骤 8 在 `make release-local` 的包上验（验收 6）。GPUI 只在没有可见窗口时回调，窗口 `orderOut:` 之后正是这种情况。
-- **App Nap（新增，推测，未实测）。** 窗口隐藏后应用是 Accessory、没有可见窗口，macOS 可能对它启用 App Nap，计时器被合并推迟，10 分钟一次的扫描可能晚到。验收时让窗口隐藏 25 分钟以上，看日志里两次 `auto-scan: timer` 的间隔；明显超过 10 分钟再考虑 `NSProcessInfo beginActivityWithOptions:`（会让活动监视器显示「阻止 App Nap」）。
+- **Finder 再次打开（`on_reopen`）：`open` 路径已实测，真双击未测。** 验收在签名的 release 包上用 `open` 测过（前台是游戏，没拿到前台）；R1 在 debug 二进制打成的临时 bundle 上用 `open` 测过（前台是 Finder，拿到前台，见上）。在 Finder 里真的双击图标没有自动化（cliclick 要点进 Finder 的窗口，违反「只点本应用的窗口」），在用户手动检查清单里。GPUI 只在没有可见窗口时回调，窗口 `orderOut:` 之后正是这种情况。
+- **App Nap：屏幕亮着时不推迟（验收实测），熄屏未测。** 验收让窗口隐藏 22 分钟，两次 `auto-scan: timer` 间隔正好 600 秒；但脚本给应用挂了 `caffeinate -d`，熄屏时是否推迟没测。`RESIDENT_HOLD` 现在把超过 660 秒的间隔判为不过。真推迟了再考虑 `NSProcessInfo beginActivityWithOptions:`（会让活动监视器显示「阻止 App Nap」）。
+- **程序化弹出的菜单会自己关（R1）。** 验收时前台是游戏，autoplay 弹出的菜单不到一秒就关了，`3-menu.png` / `5-menu.png` 截到的是菜单下面的窗口（坐标没错：都是 `open at 1884,30`，截取区域按同一个主屏坐标算）。R1 在 Finder 前台时菜单开了约 2 秒直到被关，截到了。脚本改成按窗口 ID 截菜单窗口本身（`winid --menu`），截之前和之后都确认菜单开着，不开就判不过并报出前台应用；日志 `menu bar: menu closed (open N s)` 给出开了多久。前台是游戏时程序化弹出的菜单没法截，只能由用户点菜单栏项看。
+- **store 线程退出后菜单停在 `Scanning…`（审阅范围外观察，R1 已修）。** 索引打不开时 store 线程结束，之后的扫描请求石沉大海，`scan_in_flight` 一直为真。现在 store 线程先关请求通道再报 `Failed`，`Store::request` 返回是否送达，`AppRoot::request_scan` 送不出去就当场按扫描失败处理（菜单 `Scan failed HH:MM`，状态栏保留打不开的原因）。测试：`requests_after_the_index_failed_to_open_are_refused`（store）、`scans_fail_at_once_when_the_index_never_opened`（无界面，Scan Now 与定时扫描）。
 - **Sparkle 在 Accessory 状态下弹窗**：窗口关着时它的更新提示可能出现在别的应用后面。不处理，登记为已知的表现。
 - **debug 二进制的 Dock 图标**是通用的 `exec` 图标，菜单栏左上的应用名是二进制名；正式包的效果以步骤 8 为准。
 - 第一次关窗的对话框用 `window.prompt`（窗口上的 sheet，GPUI 异步弹出，在 `windowShouldClose:` 的回调里调用也安全）；测试平台上由 `cx.simulate_prompt_answer(..)` 回答，已用于 `the_first_close_asks_once`。

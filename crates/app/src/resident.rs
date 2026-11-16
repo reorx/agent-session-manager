@@ -11,9 +11,12 @@
 //!
 //! Hiding is `orderOut:` on the one window plus the Accessory activation policy (no Dock icon, not
 //! in ⌘Tab); showing switches back to Regular, then GPUI activates the app and the window. Both
-//! orders were tried 10/10 in the usage-p2-probe experiment.
+//! orders were tried 10/10 in the usage-p2-probe experiment. A click on Open Sessions and
+//! opening the app again from Finder also ask for the front at once (`bring_forward`): GPUI's
+//! activation alone was refused while a game was in front (usage-p2-accept).
 
 use std::cell::Cell;
+use std::time::Instant;
 
 use agent_session_core::format::{fmt_tokens, fmt_usd};
 use agent_session_core::usage::Totals;
@@ -147,6 +150,9 @@ pub struct TargetIvars {
     commands: Sender<ResidentCommand>,
     /// Between `menuWillOpen:` and `menuDidClose:`.
     menu_open: Cell<bool>,
+    /// When it opened: the log says how long it stayed open (an autoplay menu closed at once
+    /// while a game was in front, usage-p2-accept).
+    opened_at: Cell<Option<Instant>>,
     /// Where `popUp:` puts the menu (AppKit screen coordinates, the menu's top-left corner).
     pop_up_at: Cell<NSPoint>,
 }
@@ -162,6 +168,8 @@ define_class!(
     impl MenuTarget {
         #[unsafe(method(openSessions:))]
         fn open_sessions(&self, _sender: Option<&AnyObject>) {
+            // now, while the click is the latest thing the user did (`bring_forward`)
+            bring_forward();
             self.send(ResidentCommand::OpenSessions);
         }
 
@@ -190,20 +198,22 @@ define_class!(
         #[unsafe(method(menuWillOpen:))]
         fn menu_will_open(&self, _menu: &NSMenu) {
             self.ivars().menu_open.set(true);
+            self.ivars().opened_at.set(Some(Instant::now()));
             println!("menu bar: menu open");
         }
 
         #[unsafe(method(menuDidClose:))]
         fn menu_did_close(&self, _menu: &NSMenu) {
             self.ivars().menu_open.set(false);
-            println!("menu bar: menu closed");
+            let open_for = self.ivars().opened_at.take().map_or(0.0, |at| at.elapsed().as_secs_f64());
+            println!("menu bar: menu closed (open {open_for:.2} s)");
         }
     }
 );
 
 impl MenuTarget {
     fn new(mtm: MainThreadMarker, commands: Sender<ResidentCommand>) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(TargetIvars { commands, menu_open: Cell::new(false), pop_up_at: Cell::new(NSPoint::new(0.0, 0.0)) });
+        let this = Self::alloc(mtm).set_ivars(TargetIvars { commands, menu_open: Cell::new(false), opened_at: Cell::new(None), pop_up_at: Cell::new(NSPoint::new(0.0, 0.0)) });
         // SAFETY: NSObject's designated initializer.
         unsafe { msg_send![super(this), init] }
     }
@@ -330,9 +340,7 @@ impl Resident {
     fn set_dock_icon(&self, visible: bool) {
         let mtm = MainThreadMarker::from(&*self.target);
         let policy = if visible { NSApplicationActivationPolicy::Regular } else { NSApplicationActivationPolicy::Accessory };
-        if !NSApplication::sharedApplication(mtm).setActivationPolicy(policy) {
-            eprintln!("menu bar: activation policy {policy:?} refused");
-        }
+        set_policy(&NSApplication::sharedApplication(mtm), policy);
     }
 
     pub fn menu_open(&self) -> bool {
@@ -370,6 +378,30 @@ impl Resident {
             ResidentCommand::ScanNow => SCAN_NOW_ITEM,
             ResidentCommand::Quit => QUIT_ITEM,
         });
+    }
+}
+
+/// The app to the front for something the user just asked for: a click on Open Sessions, or
+/// opening the app again from Finder (`main()`'s `on_reopen`). Runs right there in the AppKit
+/// callback, while the request is fresh: since macOS 14 activation is cooperative, and
+/// `NSApp.activate()` is honoured after the user's own input (usage-p2-probe: 1/1 after a real
+/// click, 0/4 from a timer). GPUI's `cx.activate(true)` (`activateIgnoringOtherApps:`), which
+/// `AppRoot::show_window` still calls next, works without a click while a terminal is in front
+/// but was refused while a game was (usage-p2-accept, 3 of 3). The Dock icon comes back first,
+/// as in `Resident::show`, so that the activation brings the app's menu bar along.
+pub fn bring_forward() {
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let app = NSApplication::sharedApplication(mtm);
+    let was_active = app.isActive();
+    set_policy(&app, NSApplicationActivationPolicy::Regular);
+    app.activate();
+    println!("window: bring forward (active before: {was_active})");
+}
+
+fn set_policy(app: &NSApplication, policy: NSApplicationActivationPolicy) {
+    // AppKit answers NO when asked for the policy it already has
+    if app.activationPolicy() != policy && !app.setActivationPolicy(policy) {
+        eprintln!("menu bar: activation policy {policy:?} refused");
     }
 }
 

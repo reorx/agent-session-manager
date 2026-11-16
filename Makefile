@@ -63,8 +63,11 @@ screenshot-detail: build ## Tour the Conversation tab (turn cards, steps, search
 screenshot-usage: build ## Usage acceptance on a copy (needs ASM_DB and ASM_CLAUDE_DIR): capture Today after start-up, Scan for Changes (USAGE_BEFORE_SCAN runs first) and Rebuild Index, then hold USAGE_HOLD seconds; types and clicks nothing
 	scripts/screenshot-usage.sh "$(BIN)" "$(SHOT_DIR)"
 
-screenshot-resident: build ## Menu bar acceptance on a copy (needs ASM_DB and ASM_CLAUDE_DIR): shown, closed into the menu bar, its menu, Scan Now while hidden (RESIDENT_BEFORE_SCAN runs first), the menu again, Open Sessions, Quit through the menu; RESIDENT_HOLD=<s> keeps it hidden to watch the timer, ASM_RESIDENT_QUERY=<q> searches first, RESIDENT_CLICK=1 clicks Scan Now for real, RESIDENT_NOTICE=1 shows the first-close notice
+screenshot-resident: build ## Menu bar acceptance on a copy (needs ASM_DB and ASM_CLAUDE_DIR): shown, closed into the menu bar, its menu, Scan Now while hidden (RESIDENT_BEFORE_SCAN runs first), the menu again, Open Sessions, Quit through the menu; exits 1 when a check failed. RESIDENT_HOLD=<s> keeps it hidden to watch the timer, ASM_RESIDENT_QUERY=<q> searches first, RESIDENT_FRONT_APP=<app> puts it in front first, RESIDENT_CLICK=1 clicks Scan Now and Open Sessions for real, RESIDENT_NOTICE=1 shows the first-close notice; options in the script
 	scripts/screenshot-resident.sh "$(BIN)" "$(SHOT_DIR)"
+
+test-screenshot-resident: ## Behaviour tests for screenshot-resident.sh's verdicts (a stand-in app; no GUI, screen capture or clicks)
+	scripts/test-screenshot-resident.sh
 
 screenshot-cost: build ## Tour the Cost tab (Opus 5.5 by context as Fable 5.2 and Sonnet 5.5, a session with other models as Haiku 5.5, sorted by In, then by Hit% from the lowest, a lost cache in ASM_AUTOPLAY_CACHE_SESSION, columns hidden) and capture up to 9 screenshots; types and clicks nothing
 	scripts/screenshot-cost.sh "$(BIN)" "$(SHOT_DIR)"

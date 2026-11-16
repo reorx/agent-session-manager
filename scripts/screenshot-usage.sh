@@ -37,7 +37,7 @@ trap 'kill $PID 2>/dev/null || true; wait $PID 2>/dev/null || true' EXIT
 caffeinate -d -w "$PID" &
 WID=
 for _ in $(seq 1 50); do
-  WID=$("$WINID" "$(basename "$BIN")" --pid "$PID" 2>/dev/null) && [ -n "$WID" ] && break
+  WID=$("$WINID" - --pid "$PID" 2>/dev/null) && [ -n "$WID" ] && break
   sleep 0.2
 done
 [ -n "$WID" ] || { echo "the app window never showed up; see $LOG" >&2; exit 1; }

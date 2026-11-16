@@ -1,8 +1,8 @@
 # Helpers shared by the screenshot scripts that run on a COPY of the data
 # (screenshot-usage.sh, screenshot-resident.sh). Source it after setting HERE (scripts/) and
-# ROOT (the repo); it sets WINID.
+# ROOT (the repo); it sets WINID (SHOT_WINID replaces it: test-screenshot-resident.sh's stand-in).
 
-WINID="$ROOT/tmp/winid"
+WINID="${SHOT_WINID:-$ROOT/tmp/winid}"
 
 # Refuses to go on unless ASM_DB and ASM_CLAUDE_DIR point at copies: a dev build must not open
 # the real index and usage ledger. $1 says why the script needs copies.
@@ -21,6 +21,7 @@ require_copies() {
 
 # Compiles scripts/winid.swift into tmp/winid when it is missing or older than the source.
 build_winid() {
+  [ -z "${SHOT_WINID:-}" ] || return 0
   mkdir -p "$ROOT/tmp"
   if [ ! -x "$WINID" ] || [ "$HERE/winid.swift" -nt "$WINID" ]; then
     swiftc -O -o "$WINID" "$HERE/winid.swift"

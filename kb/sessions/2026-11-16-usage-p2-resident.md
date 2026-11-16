@@ -49,20 +49,49 @@ tags:
 
 ## 给验收的做法
 
+（R1 改写：脚本有了判定和新选项，加了用户手动检查清单。）
+
 准备：`ASM_DB`、`ASM_STATE`、`ASM_CLAUDE_DIR` 指到 `tmp/2026-11-12-usage-stats/accept/` 下的副本（账本跟着 `ASM_DB` 在同一目录）。要用真实索引就把 `index-copy.sqlite` 复制一份过去，不要直接打开它。验收前看一眼 `pgrep -fl agent-session-manager`，结束后用菜单的 Quit 或 `pkill -f agent-session-manager`：关窗口已经不会退出了。
 
-主要工具是 `make screenshot-resident SHOT_DIR=…`（脚本开头有全部选项）。每一步打 `autoplay-resident: <步骤> · <标题> | <三行>`，`shown` 那行还带状态栏的 Today。脚本把应用带到前台两次（启动、Open Sessions），这期间敲的键会进应用窗口，跑之前告诉用户。
+主要工具是 `make screenshot-resident SHOT_DIR=…`（脚本开头有全部选项）。每一步打 `autoplay-resident: <步骤> · <标题> | <三行>`，`shown` 那行还带状态栏的 Today。**退出码现在可信**：每一步都有判定，不过的项打印 `FAILED: …`，最后列出全部并退出 1；全过才打 `all checks passed` 退出 0。判定本身的测试是 `make test-screenshot-resident`（不起 GUI）。脚本按进程 ID 找窗口，二进制可以是 .app 里的那个，不再需要 `WIN_OWNER`。脚本把应用带到前台两次（启动、Open Sessions），这期间敲的键会进应用窗口，跑之前告诉用户。
 
-1. **菜单栏项和今天的费用**：看日志 `autoplay-resident: shown · $N | Today  $X … · status bar Today $X`，`$N` 应是 `$X` 四舍五入。菜单栏条 `1-shown-menubar.png` 里**看不到**菜单栏项：用户的 Thaw 把新项收在屏幕外。要截到真图，先请用户在 Thaw 里把它拖到可见区（debug 二进制和正式包在 Thaw 里是两个不同的项），再跑脚本。
-2. **菜单的顺序和数字**：`3-menu.png`、`5-menu.png` 是同一个 NSMenu 在固定位置弹出的样子（三行信息、分隔线、Open Sessions、Scan Now、分隔线、Quit），数字对日志的 `shown` / `scan` 行。「点菜单栏项弹出」要菜单栏项可见（见 1），点它用 cliclick 鼠标点击（规则允许，弹出层），坐标从截图上读，点之前先确认图标就在那里。
-3. **关窗**：`2-hidden-dock.png` 没有图标（`1-shown-dock.png` / `6-open-dock.png` 有；debug 二进制的图标是通用的 `exec`）；`run.log` 里 `window on screen: no`、`process: <pid> …`。autoplay 的 `close` 直接调 `close_requested`（红色按钮回调里调的也是它）；真实按键的 `⌘W` 和真点红色按钮不能自动做（规则不许发按键），由无界面测试覆盖，实机请用户各试一次。
-4. **隐藏时数字变化**：`RESIDENT_BEFORE_SCAN` 往副本追加今天的调用（`tmp/2026-11-12-usage-stats/usage-p1-app/append-response.py <副本里的 transcript>`，一次 $0.09，追加 12 次约 $1），然后 Scan Now：`4-scanned-*` 和 `scan` 行的标题、Today 变了。「10 分钟内」那半：`RESIDENT_HOLD=1300`（约 22 分钟）让窗口一直隐藏，脚本打印每次 `auto-scan: timer` 的时刻和当时的菜单内容；定时器从启动起每 600 秒一次，间隔明显超过 10 分钟就是 App Nap（见 spec「风险与待定」），记进 known-issues。
-5. **重开**：`open` 行要 `shown=true active=true table-focused=true`；加 `ASM_RESIDENT_QUERY=<词>`，`1-shown-window.png` 与 `6-open-window.png` 的搜索词、过滤、排序、选中、详情位置应相同；`6-open-dock.png` 图标回来。「快捷键立即可用」只能看 `table-focused=true`（加上无界面测试里重开后按 `n` 能跳）；真按键请用户试。
-6. **Finder 重开**：只在 `make release-local` 的包上做（步骤 8）：用包跑起来、关窗、请用户在 Finder 里双击包；或在包上设 `ASM_RESIDENT_AUTOPLAY` 跑到 `close` 后让用户双击，日志应出现 `menu bar: OpenSessions` 和 `window: shown`。裸二进制做不了。
-7. **第一次关窗的说明**：`RESIDENT_NOTICE=1` 从没显示过说明的状态开始；`close` 步骤会停下等人回答（最多 10 分钟，日志有 `window: first-close notice`）。请用户点「好」，脚本继续；再跑一次（同一个 `ASM_STATE`）应不再弹。点「立即退出」时脚本打印 `the app quit from the first-close notice` 后结束。
-8. **退出**：菜单栏菜单的 Quit 由脚本最后一步做（`quit: exit status 0`）；`⌘Q` 和应用菜单的 Quit 请用户在窗口开着、关着（关着时只有菜单栏菜单的 Quit 可用，应用菜单不在）各试，`pgrep` 确认。
-9. **Scan Now**：日志里 `menu bar: … | Scanning…` 再到 `Scanned HH:MM`。fixture 的扫描只要几毫秒，截图赶不上 `Scanning…`；要看到置灰，用真实数据副本的冷索引（首次扫描要几秒），在 `shown` 之前弹菜单不现实，所以以日志和 `scan_now_from_the_menu_scans_while_hidden` 为准。`RESIDENT_CLICK=1` 让 cliclick 真点菜单里的 Scan Now（脚本先确认日志里菜单开着才点，坐标 = 菜单左上 + (90, 124)，来自 probe 的实测；没在这台机器上跑过这条路径，第一次跑时看 `3-menu.png` 核对）。
-10. **Sparkle**：只在正式包上做（步骤 8）：Check for Updates 弹出 Sparkle 的窗口；窗口关着（Accessory）时它可能出现在别的应用后面，记为已知的表现。
+推荐的一次跑法（R1 自查就是这样跑的，`tmp/2026-11-12-usage-stats/usage-p2-resident/r1/c1/`）：
+
+```bash
+A=$PWD/tmp/2026-11-12-usage-stats/accept/<run>   # 先 cp -R crates/core/tests/fixtures/claude $A/claude
+F=$A/claude/projects/-Users-me-Code-alpha/11111111-aaaa-4bbb-8ccc-000000000001.jsonl
+ASM_DB=$A/index.sqlite ASM_CLAUDE_DIR=$A/claude ASM_RESIDENT_QUERY=parser RESIDENT_FRONT_APP=Finder RESIDENT_CLICK=1 \
+  RESIDENT_BEFORE_SCAN="for i in \$(seq 12); do python3 $PWD/tmp/2026-11-12-usage-stats/usage-p1-app/append-response.py '$F' > /dev/null; done" \
+  make screenshot-resident SHOT_DIR=$A/screenshots
+```
+
+1. **菜单栏项和今天的费用**：脚本判定标题等于状态栏 Today 取整（`shown` 行）。菜单栏条截图里**看不到**菜单栏项：用户的 Thaw 把新项收在屏幕外，目视要用户先在 Thaw 里拖出来（手动清单 A）。
+2. **菜单的顺序和数字**：`3-menu.png`、`5-menu.png` 现在按窗口 ID 截的是菜单窗口本身（R1 截到了，顺序是三行信息、分隔线、Open Sessions、Scan Now、分隔线、Quit）。前台应用很忙（游戏）时程序化弹出的菜单会自己关，脚本判不过并报出前台应用；这时换个安静的前台应用重跑，或用手动清单 A。
+3. **关窗**：判定 `hidden=true`、窗口不在屏幕上、进程在；`2-hidden-dock.png` 没有图标。真实的 `⌘W` 和红色按钮见手动清单 D、E。
+4. **隐藏时数字变化**：`RESIDENT_BEFORE_SCAN` 追加今天的调用，判定 Scan Now 后 Today 变了。定时器那半用 `RESIDENT_HOLD=1300`：两次 `auto-scan: timer` 间隔超过 660 秒判不过。验收已测过屏幕亮着时间隔正好 600 秒；熄屏（不挂 `caffeinate`）没测。
+5. **重开**：`RESIDENT_CLICK=1` 时 cliclick 真点 Open Sessions（点之前用 `winid --at` 确认点击处最上层是本进程的菜单，否则不点、判不过）；`RESIDENT_FRONT_APP=Finder` 让 Finder 先在前台。判定 `shown=true active=true table-focused=true`。不加 `RESIDENT_CLICK` 是程序化选择，不算用户点击，前台是游戏时会 `active=false`。`ASM_RESIDENT_QUERY` 让 `1-shown-window.png` 和 `6-open-window.png` 可以对比搜索词、选中、命中位置。前台是游戏时的点击见手动清单 B。
+6. **Finder 重开**：`RESIDENT_REOPEN=<.app>`，二进制用那个 .app 里的（`<.app>/Contents/MacOS/agent-session-manager`，直接跑 `scripts/screenshot-resident.sh <二进制> <输出目录>`）。脚本先确认 LaunchServices 认得这个进程，`open` 之后若冒出第二个实例（它没有环境变量，会打开真实数据）立即杀掉并判不过。包可以是 `make build-release` 的产物，或者像 R1 那样把 debug 二进制打成临时 bundle：`SPARKLE_DIR=<假框架目录> scripts/release/bundle-app.sh "$(make -s bin)" <目录>/Agent\ Session\ Manager.app 0.0.0 0`，假框架是 `Sparkle.framework/Versions/B/Sparkle` 一个普通文件，加载失败后更新器关闭，不会弹 Sparkle 的窗口。在 Finder 里真双击见手动清单 C。
+7. **第一次关窗的说明**：`RESIDENT_NOTICE=1`，`close` 步骤停下等人回答（最多 10 分钟）。只有日志有 `window: first-close notice · 立即退出` 且退出码为 0，脚本才把进程退出判为通过。点按钮见手动清单 D。
+8. **退出**：脚本最后经菜单栏菜单的 Quit，判定进程 5 秒内退出且退出码为 0。`⌘Q` 和应用菜单的 Quit 见手动清单 F。
+9. **Scan Now**：日志 `Scanning…` 到 `Scanned HH:MM`。fixture 扫描几毫秒，截图赶不上置灰，以日志和 `scan_now_from_the_menu_scans_while_hidden` 为准。
+10. **Sparkle**：只在带 Sparkle 的包上，见手动清单 G。
+
+### 用户手动检查清单
+
+这些要真实的点击或按键，脚本不做（项目规则不许发按键，cliclick 只点本应用的菜单）。用哪个构建：
+
+- **debug 二进制**（`make bin` 打印路径）：没有 Sparkle，Dock 图标是通用的 `exec`。必须指向副本：`ASM_DB=<副本>/index.sqlite ASM_STATE=<副本>/state.json ASM_CLAUDE_DIR=<副本>/claude "$(make -s bin)"`。
+- **包**：`make build-release` 产出 `~/Library/Caches/cargo-target/release/Agent Session Manager.app`（已签名、未公证，本机可直接开）；`make release-local` 现在应该能公证（用户已签开发者协议），但出包不在本任务范围。包同样指向副本：`open -n "<包>" --env ASM_DB=… --env ASM_STATE=… --env ASM_CLAUDE_DIR=…`。
+
+| # | 检查什么 | 怎么做 | 看到什么算过 | 构建 |
+|---|---|---|---|---|
+| A | 菜单栏项 | 应用开着时打开 Thaw 的设置，把「agent-session-manager」（debug）或「Agent Session Manager」（包）从隐藏区拖到可见区；然后点它 | 菜单栏出现柱状图图标和 `$N`，等于窗口状态栏 `Today $X` 四舍五入；点开的菜单从上到下是 `Today  $X`、`In … · Out …`、`Scanned HH:MM`、分隔线、Open Sessions、Scan Now、分隔线、Quit Agent Session Manager | 任一 |
+| B | 别的应用在前台时点 Open Sessions | `⌘W` 关窗；把另一个应用带到前台：先 Finder，再一个全屏游戏（验收出问题的情形）；点菜单栏项 → Open Sessions | 窗口到最前，红黄绿按钮是彩色（是 key window）；左上角菜单栏是本应用的菜单；Dock 图标回来；不点窗口直接按 `↓`，表格选中行移动 | 任一，游戏那次最好用包 |
+| C | Finder 双击重开 | 窗口关着时，在 Finder 里双击包 | 同 B；不会多出第二个进程（`pgrep -fl "Agent Session Manager"` 只有一个） | 包 |
+| D | 第一次 `⌘W` 的对话框 | 用一个新的 `ASM_STATE` 路径启动；按 `⌘W`。先点「好」；再从菜单 Open Sessions 重开，再按 `⌘W`。另起一次新的 `ASM_STATE`，按 `⌘W` 后点「立即退出」 | 弹出窗口上的对话框「Agent Session Manager 会留在菜单栏继续记录用量。」/「要完全退出请按 ⌘Q。」；「好」后窗口消失、Dock 图标消失、进程还在；第二次 `⌘W` 不再弹；「立即退出」后进程没了 | 任一 |
+| E | 红色按钮 | 窗口开着时点红色按钮 | 同 `⌘W`：窗口消失、Dock 图标消失，`pgrep` 还有进程，菜单栏项还在 | 任一 |
+| F | 三处退出 | 窗口开着时按 `⌘Q`；重启后点应用菜单的 Quit Agent Session Manager；重启后关窗，再点菜单栏菜单的 Quit | 每次 `pgrep -fl agent-session-manager` 为空。窗口关着时应用菜单不在（菜单栏是别的应用的），只有菜单栏菜单的 Quit | 任一 |
+| G | Check for Updates | 包里打开应用菜单的 Check for Updates…；再关窗，等或触发 Sparkle 的提示 | 弹出 Sparkle 的窗口（本地包版本 0.0.0，会提示线上版本）；Install and Relaunch 会退出并重启（会把线上版本装到这个包的位置，测完删掉这个包）。窗口关着时提示可能在别的应用后面，记为已知表现 | 只能用包 |
 
 ## 交给协调者
 
@@ -84,3 +113,40 @@ tags:
 - **`window.window_handle()` 不是 raw-window-handle 的那个**：GPUI 的 `Window` 有同名固有方法（返回 `AnyWindowHandle`），要写 `HasWindowHandle::window_handle(window)`。测试平台的窗口没有句柄。
 - **测试平台的 `quit` 什么都不做**：「立即退出」只能断言应用自己记下的 `quitting`。
 - **菜单栏条截不到菜单栏项**：不是代码的问题，Thaw 把新项放进隐藏区。所以 autoplay 不靠点它，而是在固定位置弹出同一个菜单。
+
+## 协调者摘要（usage-p2-resident-r1）
+
+- 结果：返工任务 `tasks/usage-p2-resident-r1.md` 的 1–5 条都做了；Open Usage 仍不在本期。用户中途允许跑 GUI，第 1 条在 Finder 前台时实机自查过。
+- 提交：代码、测试、脚本、spec、文档与本节在同一个提交；hash 见交付回复，或 `git log -1 --format=%H -- kb/sessions/2026-11-16-usage-p2-resident.md`。
+- 测试：`cargo test -p agent-session-manager` 179 / 0 / 2（新增 2）；`make test` 552 / 0 / 8；`make test-screenshot-resident` 13 / 13，3 次变异（Quit 退出码不查、说明框退出不查标记、窗口还在屏幕上不判不过）各被一个用例抓到；四个 shell 脚本 `bash -n` 通过。
+- 第 1 条（前台）：Open Sessions 菜单项的回调和 `on_reopen` 在 AppKit 回调里当场切 Regular 并 `NSApp.activate()`（`resident::bring_forward`），之后照旧 `cx.activate(true)`。实机（`tmp/2026-11-12-usage-stats/usage-p2-resident/r1/`，Finder 在前台）：c1 cliclick 真点 Open Sessions、c2 程序化选择、c3 `open` 再次打开临时 bundle，都是 `active=true`，菜单栏换回本应用的菜单，Dock 图标回来；三次 `all checks passed`，结束后没有残留进程。
+- 第 2 条（判定）：每一步有成功条件，不过的项最后汇总并退出 1，没法继续的立即退出 1；Quit 和说明框退出都查退出码，说明框还要 `window: first-close notice · 立即退出` 标记。
+- 第 3 条：按进程 ID 找窗口（`winid - --pid N`），.app 不再需要 `WIN_OWNER`；`screenshot-usage.sh` 同样改了。
+- 第 4 条（菜单截图）：原因是前台是游戏时，程序化弹出的菜单不到一秒就自己关了，截图区域本身没错（坐标都是 1884,30，按主屏算）。现在按窗口 ID 截菜单窗口本身（`winid --menu`），截之前和之后都确认菜单开着；R1 在 Finder 前台时截到了完整的菜单。
+- 第 5 条：store 线程先关请求通道再报 `Failed`；`Store::request` 返回是否送达；送不出去时扫描当场算失败（`Scan failed HH:MM`，状态栏保留打不开的原因）。先写的两个测试先失败（app 用例停在 `scan_in_flight`），改完通过。
+- 未验证：前台是全屏游戏时真点 Open Sessions（这次没有游戏可开，验收出问题的正是这种情形）；Finder 里真双击；对话框按钮、红色按钮、`⌘W` / `⌘Q` / 应用菜单 Quit 的真实操作；Sparkle；熄屏时的定时器。都在「用户手动检查清单」。
+- 交给协调者：见下文「R1 交给协调者」。
+
+### R1 的改动
+
+- `store.rs`：`Store::request` 返回 `bool`；`run` 打不开索引时先 `drop(requests)` 再发 `Failed`。测试 `requests_after_the_index_failed_to_open_are_refused`。
+- `main.rs`：`request_scan`（`rescan`、`auto_scan` 共用，送不出去就按失败处理，`rescan` 只在送达时把状态栏设为 Loading）、常量 `STORE_GONE`；`on_reopen` 先 `resident::bring_forward()`；说明框的回答打日志 `window: first-close notice · <按钮>`；autoplay 加 `wait-open`。测试 `scans_fail_at_once_when_the_index_never_opened`（无界面；`keyboard_tests.rs` 拆出不等启动扫描的 `start`）。
+- `resident.rs`：`bring_forward`、`set_policy`（已是目标 policy 就不再设，原来会打出误导的 `activation policy … refused`）；`openSessions:` 先 `bring_forward` 再发命令；菜单 delegate 记打开的时刻，`menu bar: menu closed (open N s)`。
+- `scripts/winid.swift`：`-` 加 `--pid` 按进程匹配；普通窗口只认 layer 0（不会把同进程的菜单当成主窗口）；`--menu --pid N`；`--at X,Y`。
+- `scripts/screenshot-resident.sh`：判定与退出码、`RESIDENT_FRONT_APP`、`RESIDENT_CLICK=1` 也点 Open Sessions、`RESIDENT_REOPEN`、`RESIDENT_SETTLE`、`RESIDENT_HOLD` 的间隔判定、按窗口 ID 截菜单、点击前的 `winid --at` 确认。新 `scripts/test-screenshot-resident.sh` 与 `make test-screenshot-resident`。`shot-lib.sh` 认 `SHOT_WINID`。
+- 文档：`kb/docs/app-architecture.md`（重开的两种激活与实测、store 线程不在时的扫描）、`kb/docs/gpui-kit-guide.md`（菜单栏表格、脚本的判定 / 点击确认 / 菜单自己关、`winid` 的新用法）；spec「风险与待定」改写激活一条，加 Finder 重开的先后、程序化菜单自己关、store 线程退出、App Nap 的验收结果。
+
+### R1 交给协调者
+
+- AGENTS.md：命令加 `make test-screenshot-resident`；`screenshot-resident` 的退出码现在可信，可以写「验收以退出码和日志为准」。
+- known-issues 候选：前台是全屏游戏时，没有点击的激活会被拒（autoplay 用的路径）；用户点击的路径已改，待手动清单 B 确认后再决定记不记。审阅提到的「store 线程退出后菜单停在 Scanning」已修，不用记。
+- next-up 候选：用户做手动检查清单 A–G（尤其 B 的游戏情形和 G）；`make release-local` 现在应该能公证，出包和标准 10 归验收或协调者。
+- 审阅还建议补换日时菜单内容的断言、重开前后滚动位置的断言：这次没做（非阻断），可留给以后。
+
+### R1 踩过的坑
+
+- **macOS 的 `bash` 是 3.2**：脚本不能用空数组展开（`set -u` 下报错）、关联数组等 4.x 写法；不过的项用字符串累加。
+- **`wait` 只能在当前 shell 里调一次**：退出码要用 `reap`（`wait "$PID" || APP_RC=$?`）在当前 shell 取，放进 `$(…)` 就是子 shell，取不到子进程。
+- **函数在 `||` 里调用时 `set -e` 失效**：`step close || rc=$?` 里 `step` 的失败分支必须自己显式处理，不能指望 `-e`。
+- **`setActivationPolicy:` 设成已有的值返回 NO**，会被当成「被拒绝」打日志。
+- **测试替身要防止碰到真工具**：`test-screenshot-resident.sh` 用 `env -i` 和只含替身目录 + 系统目录的 PATH 跑，`cliclick` 只有替身（真的在 `/opt/homebrew/bin`，不在 PATH 里），替身被调用就算用例失败。

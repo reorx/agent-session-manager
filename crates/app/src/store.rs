@@ -121,8 +121,10 @@ impl Store {
         (Store { requests, reads, latest }, events)
     }
 
-    pub fn request(&self, request: StoreRequest) {
-        self.requests.send(request).ok();
+    /// False when the store thread is gone (it stops when the index cannot be opened): the
+    /// request is dropped and no event will ever answer it.
+    pub fn request(&self, request: StoreRequest) -> bool {
+        self.requests.send(request).is_ok()
     }
 
     /// Read a transcript for the detail panel on the reader thread, superseding any read that
@@ -212,6 +214,9 @@ fn run(claude: ClaudeDir, db_path: PathBuf, favorites: FavoritesDir, requests: m
     let mut worker = match Worker::open(claude, &db_path, favorites, events.clone()) {
         Ok(worker) => worker,
         Err(e) => {
+            // refuse requests before saying so: one sent after the app heard of the failure must
+            // not wait in the channel for an answer that never comes (`Store::request`)
+            drop(requests);
             events.send_blocking(StoreEvent::Failed(format!("open index: {e:#}"))).ok();
             return;
         }
@@ -850,5 +855,17 @@ mod tests {
         std::fs::write(&blocker, "x").unwrap();
         let (_store, events) = spawn(fixture_claude(), blocker.join("index.sqlite"));
         assert!(matches!(events.recv_blocking().unwrap(), StoreEvent::Failed(_)));
+    }
+
+    #[test]
+    fn requests_after_the_index_failed_to_open_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("file");
+        std::fs::write(&blocker, "x").unwrap();
+        let (store, events) = spawn(fixture_claude(), blocker.join("index.sqlite"));
+        assert!(matches!(events.recv_blocking().unwrap(), StoreEvent::Failed(m) if m.starts_with("open index")));
+        // the thread is gone by the time its failure arrives: nothing would ever answer a scan
+        assert!(!store.request(StoreRequest::Scan { quiet: true }), "the app must hear that the scan never started");
+        assert!(!store.request(StoreRequest::Scan { quiet: false }));
     }
 }

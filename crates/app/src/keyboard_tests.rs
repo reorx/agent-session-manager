@@ -29,13 +29,20 @@ fn launch(cx: &mut TestAppContext) -> Harness {
 
 /// `launch`, after `prepare` put whatever it likes into the throw-away directory (`state.json`).
 fn launch_with(cx: &mut TestAppContext, prepare: impl FnOnce(&std::path::Path)) -> Harness {
+    let h = start(cx, prepare, |dir| dir.join("index.sqlite"));
+    wait_until(cx, &h, "the start-up scan", |app, cx| matches!(app.index_status, IndexStatus::Idle(_)) && shown_rows(app, cx) > 0);
+    h
+}
+
+/// The app with its window, without waiting for anything; `db` says where the index goes.
+fn start(cx: &mut TestAppContext, prepare: impl FnOnce(&std::path::Path), db: impl FnOnce(&std::path::Path) -> std::path::PathBuf) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     prepare(dir.path());
     let claude = dir.path().join("claude");
     copy_fixture(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../core/tests/fixtures/claude")), &claude);
     let paths = AppPaths {
         claude: ClaudeDir::new(claude),
-        db: dir.path().join("index.sqlite"),
+        db: db(dir.path()),
         state: dir.path().join("state.json"),
         favorites: agent_session_core::favorites::FavoritesDir { root: dir.path().join("favorites"), trash: agent_session_core::favorites::Trash::Dir(dir.path().join("trash")) },
     };
@@ -52,9 +59,7 @@ fn launch_with(cx: &mut TestAppContext, prepare: impl FnOnce(&std::path::Path)) 
         app = Some(view.clone());
         Root::new(view, window, cx)
     });
-    let h = Harness { _dir: dir, app: app.expect("the window builds the app"), window: window.into() };
-    wait_until(cx, &h, "the start-up scan", |app, cx| matches!(app.index_status, IndexStatus::Idle(_)) && shown_rows(app, cx) > 0);
-    h
+    Harness { _dir: dir, app: app.expect("the window builds the app"), window: window.into() }
 }
 
 /// The store and search threads answer in real time, while the test executor only runs what
@@ -1136,6 +1141,40 @@ fn the_menu_commands_come_over_a_channel(cx: &mut TestAppContext) {
     cx.executor().advance_clock(crate::AUTO_SCAN_MIN_GAP);
     menu.try_send(ScanNow).unwrap();
     wait_until(cx, &h, "the scan from the menu", |app, _| app.scans_done > base);
+}
+
+#[gpui_kit::test]
+fn scans_fail_at_once_when_the_index_never_opened(cx: &mut TestAppContext) {
+    use crate::resident::ResidentCommand::ScanNow;
+    // a file where the index's directory should be: the store thread reports it and stops
+    let h = start(
+        cx,
+        |dir| {
+            std::fs::write(dir.join("not-a-dir"), "x").unwrap();
+            crate::settings::ViewState { resident_notice_shown: true, ..Default::default() }.save(&dir.join("state.json")).unwrap();
+        },
+        |dir| dir.join("not-a-dir").join("index.sqlite"),
+    );
+    let failed = |app: &AppRoot| matches!(&app.index_status, IndexStatus::Failed(m) if m.starts_with("open index"));
+    wait_until(cx, &h, "the open failure", |app, _| failed(app) && !app.scan_in_flight);
+    let menu = |cx: &mut TestAppContext| h.app.read_with(cx, |app, _| app.resident_view.clone().expect("the menu follows the scans"));
+    assert!(menu(cx).scanned.starts_with("Scan failed "), "{:?}", menu(cx));
+
+    // Scan Now, with the window hidden
+    press(cx, &h, "cmd-w");
+    menu_command(cx, &h, ScanNow);
+    h.app.read_with(cx, |app, _| {
+        assert!(!app.scan_in_flight, "no scan is running: nobody would ever end it");
+        assert!(failed(app), "the status bar keeps saying why: {:?}", app.index_status);
+    });
+    let after = menu(cx);
+    assert!(!after.scanning && after.scanned.starts_with("Scan failed "), "not Scanning… for ever: {after:?}");
+
+    // the idle timer's scan, too
+    cx.executor().advance_clock(crate::AUTO_SCAN_IDLE);
+    cx.run_until_parked();
+    h.app.read_with(cx, |app, _| assert!(!app.scan_in_flight));
+    assert!(menu(cx).scanned.starts_with("Scan failed "));
 }
 
 #[gpui_kit::test]

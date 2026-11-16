@@ -144,11 +144,11 @@ Rebuild
 | 事件的应用 | 照常：行、用量、今天的费用都更新到 `AppRoot` 里 |
 | 渲染 | 不发生：GPUI 在窗口被遮挡时停掉 display link，`cx.notify()` 只标脏，重开时一次重绘（usage-p2-probe 实测隐藏期间 `render` 调用 0 次）。所以 `on_store_events` 不需要为隐藏的窗口跳过任何计算 |
 | 菜单栏项 | `sync_resident` 在扫描开始 / 结束、收到用量、换日时把标题和三行信息推过去，内容没变就不推 |
-| 出错 | `Failed` 只改状态栏（看不见）和菜单第三行的计数；不弹通知。通知只由窗口里的操作引起，窗口隐藏时不会发生 |
+| 出错 | `Failed` 只改状态栏（看不见）和菜单第三行的计数；不弹通知。通知只由窗口里的操作引起，窗口隐藏时不会发生。store 线程已经不在时（索引打不开），扫描当场算失败，见「出错时」 |
 
 菜单栏菜单的命令从 AppKit 进来：菜单项的 target（`resident::MenuTarget`，`define_class!` 定义的 NSObject）只把一个 `ResidentCommand` 送进 `async_channel`，`AppRoot::listen_to_menu` 起的任务收到后调 `on_resident_command`。AppKit 的回调里不碰 GPUI 的 `App`（那时它可能正被借用）。Finder / Spotlight 再次打开应用时 AppKit 调 `applicationShouldHandleReopen:`（只在没有可见窗口时），`main()` 里的 `on_reopen` 往同一条通道送 `OpenSessions`。
 
-重开（`show_window`）的顺序固定：先切回 Regular，再 `cx.activate(true)`（`activateIgnoringOtherApps:`），再 `window.activate_window()`，然后焦点给表格、`roll_day`、`auto_scan("window shown")`。不用 `NSApp.activate()`：它是协作式的，由定时器、autoplay 这类不是点击的路径触发时拉不到前台（试验 0/4，真实点击菜单项时可以）。`activateIgnoringOtherApps:` 已被 Apple 标为弃用，哪天失效了，点击菜单项触发的 `NSApp.activate()` 是退路。
+重开（`show_window`）的顺序固定：先切回 Regular，再 `cx.activate(true)`（`activateIgnoringOtherApps:`），再 `window.activate_window()`，然后焦点给表格、`roll_day`、`auto_scan("window shown")`。用户点了 Open Sessions、或在 Finder 里再次打开应用时，在这之前还有一步：AppKit 的回调里当场调 `resident::bring_forward`（切 Regular，再 `NSApp.activate()`），之后才把命令送进通道。原因：macOS 14 起激活是协作式的，`NSApp.activate()` 紧跟用户自己的操作时才生效（试验：真实点击后 1/1，定时器触发 0/4）；`activateIgnoringOtherApps:` 不需要点击，前台是终端、Finder 时有效，前台是游戏时 3 次都被拒绝（usage-p2-accept）。两条都走：点击和 Finder 靠前者，autoplay 这类没有点击的路径靠后者。实测（usage-p2-resident-r1，Finder 在前台）：点击 Open Sessions、程序化选 Open Sessions、`open` 再次打开 bundle，三种都 `active=true`，菜单栏换回本应用的菜单，Dock 图标回来。Finder 再次打开时 LaunchServices 先把应用（还是 Accessory）激活了，回调里才切 Regular（日志 `active before: true`），菜单栏照样回来。`activateIgnoringOtherApps:` 已被 Apple 标为弃用，哪天失效了，autoplay 拿不到前台，用户的路径不受影响。
 
 第一次关窗（`state.json` 的 `resident_notice_shown` 为假）先弹 `window.prompt`（窗口上的 sheet），答案经一个任务回来：「好」隐藏窗口，「立即退出」退出；两种都把标记写进 `state.json`。对话框开着时再次关窗什么都不做。
 
@@ -305,7 +305,7 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 ## 出错时
 
 - 后台线程的顶层把所有错误转成 `Failed` 事件，界面在状态栏显示。单个请求失败不会带走线程
-- 索引打不开时 store 线程发出 `Failed` 后结束，表格保持为空。索引文件损坏、版本不符或 schema 与本版本建出的不一致都不算打不开：打开时会清空重建，之后按冷启动处理
+- 索引打不开时 store 线程先关掉请求通道，再发出 `Failed`，然后结束，表格保持为空。之后的扫描请求（定时、窗口激活、Scan Now、菜单的 Scan / Rebuild）发不出去，`Store::request` 返回 false，`AppRoot::request_scan` 当场按扫描失败处理：不留在扫描中，菜单第三行是 `Scan failed HH:MM`，状态栏保留打不开的原因（之前没有出错信息时显示 `cannot scan: the index is not open, restart the app`）。先关通道再报错，是为了让 app 收到 `Failed` 之后发的请求一定被拒，不会丢在通道里等一个永远不来的结束事件。索引文件损坏、版本不符或 schema 与本版本建出的不一致都不算打不开：打开时会清空重建，之后按冷启动处理
 - 搜索失败时搜索线程丢弃自己的连接，下次搜索重新打开。它的连接在第一次文本搜索时才建立，那时 store 线程已经把索引建好了
 
 ## 相关文件
