@@ -38,7 +38,9 @@ Output piped to another program or captured by an agent is never colored unless
 `asm projects --help` exits 0 only on a binary that has the commands for agents this reference
 describes; an older one exits 2 (unrecognized subcommand). Do not check with
 `asm search --help`: older binaries have a `search` too, with other options. When this reference
-adds commands, it names the one to check here.
+adds commands, it names the one to check here. In a checkout of the repository,
+`make install-cli` builds `asm` and copies it to `~/.local/bin/asm`; the copy stays as it is
+until `make install-cli` runs again.
 
 ### Where the index is
 
@@ -50,15 +52,27 @@ with these commands (plan P4). `--db` / `ASM_DB` still pick any file, the app's 
 Favorites and their settings live in the same directory and stay shared: a session favorited in
 the app is a favorite here too.
 
+Next to every index is a usage ledger, `usage-ledger.sqlite`, which keeps the token usage of
+every API response the index has read, even after its transcript is deleted or the index is
+rebuilt. The indexes in one directory share it, so the CLI's index and the app's write the same
+ledger. Commands that refresh the index add what the refresh read; none of the commands here
+print from the ledger.
+
+The first command on a new index builds it from every transcript: about 20 seconds for 3,400
+sessions and 8 GB of records (measured 2026-11-17). Later refreshes take well under a second.
+
 ### The index and the write lock
 
 A command that reads the index first brings it up to date with the files on disk (an incremental
 scan, usually under 0.2 s); `--no-scan` skips that step where the command offers it, except on an
-index no scan has gone through yet (see below). `stats` never refreshes. `transcript`, `search-old` without `--index` and `session-old --conversation` read the
-record files and do not touch the index at all.
+index no scan has gone through yet (see below). `stats` never refreshes. `transcript`,
+`search-old` without `--index` and `session-old --conversation` read the record files and do not
+touch the index at all.
 
-Another `asm` process, or the app when `--db` points at its index, may be writing the same index. When the scan cannot get the write lock within 2 seconds,
-the command drops the scan, prints one line on stderr and answers from the index as it is:
+Another `asm` process, or the app when `--db` points at its index, may be writing the same index;
+the app also writes the shared usage ledger whenever it scans. When the scan cannot get the write
+lock within 2 seconds (the ledger's within 5 seconds), the command drops the scan, prints one
+line on stderr and answers from the index as it is:
 
 ```
 index busy, results may miss the last few minutes
@@ -976,7 +990,7 @@ asm index [--rebuild]
 | `--rebuild` | — | off | Drop everything and index all files again |
 
 Output: one line of scan counts and timings, one line of index totals. Fails (exit 1) when the
-app holds the write lock (on an index no scan has gone through yet, it first waits up to 60
+app or another `asm` holds the write lock (on an index no scan has gone through yet, it first waits up to 60
 seconds for the process building it, unless `--rebuild` is given; see "The index and the write
 lock"), or when the Claude directory or favorites directory differs from the one the index was
 built from (run `asm index --rebuild`).

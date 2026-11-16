@@ -1,6 +1,6 @@
 ---
 created: 2026-09-15
-updated: 2026-11-16
+updated: 2026-11-17
 tags:
   - prd
   - product
@@ -52,7 +52,7 @@ tags:
 | 项目过滤 | ✅ 单选 + 隐藏项目 | Project 下拉按最近活动列出真实项目与 session 数；可把噪音项目（如 CodexBar 的 `ClaudeProbe`）整个隐藏并随时恢复；多选、可搜索、worktree 聚合待做 |
 | Kind 过滤 | ✅ | Kind 多选下拉（CLI / SDK / BG / History，各带 session 数），默认全选，选择持久化 |
 | 更多过滤 | ⬜ | 最少 prompt 数的界面控件、使用过的工具、有 PR、有 subagent |
-| 全文搜索、正则搜索 | ✅ | 文本模式 FTS5（2–40ms，两字 CJK 走 LIKE 约 20ms）、正则模式流式扫描 transcript（2GB 记录文件，260–530ms，带 Tools 范围时已到 500ms 的目标线）；Matches 列、高亮片段、详情内命中跳转（命中在工具输入输出、thinking 里也能跳到）。`asm search` 命令行同样可用 |
+| 全文搜索、正则搜索 | ✅ | 文本模式 FTS5（2–40ms，两字 CJK 走 LIKE 约 20ms）、正则模式流式扫描 transcript（2GB 记录文件，260–530ms，带 Tools 范围时已到 500ms 的目标线）；Matches 列、高亮片段、详情内命中跳转（命中在工具输入输出、thinking 里也能跳到）。命令行里同样逐条列出消息的是 `asm search-old`（与 Python 脚本逐字一致）；`asm search` 已改为按会话找，见「asm 命令行与 skill」 |
 | 真实数据读取与索引 | ✅ | 解析器、增量 SQLite 索引、history.jsonl 补位、损坏自动重建；界面热启动约 200ms 出表（5488 行），冷索引 1.27GB 约 4s 且表格流式填充；Index 菜单可手动 Scan / Rebuild |
 | 实时更新 | 🟡 定时 | 2026-11-16：应用开着时自动增量扫描（窗口回到前台、每 10 分钟，30 秒内只扫一次），有变化才刷新表格；关掉窗口后照常扫描；不监听文件。用量账本见 `../plans/2026-11-16-usage-stats/usage-ledger.md` |
 | 常驻菜单栏 | ✅ | 2026-11-16：启动后菜单栏有一个图标和今天的费用（取整到美元）；红色按钮和 `⌘W` 只隐藏窗口，Dock 图标随之消失，应用留在菜单栏继续扫描；菜单里有今天的费用、In / Out、上次扫描的时刻，Open Sessions、Open Usage、Scan Now、Quit；从 Finder 重开时窗口和关掉前一样。见 4.10 与 `../plans/2026-11-16-usage-stats/menubar-resident.md` |
@@ -61,6 +61,7 @@ tags:
 | 设置与状态持久化 | ✅ 视图状态 / ⬜ 设置页 | 项目与时间过滤（含自定义区间）、排序、Preview 模式、空 session 开关、详情面板开合、选中行存 `state.json`，下次启动恢复 |
 | 安装与自动更新 | ✅ | 2026-10-28 发布 1.0：Homebrew cask（`brew install --cask reorx/tap/agent-session-manager`）或 GitHub Release 的 dmg，Apple Silicon、macOS 14 起，Developer ID 签名并经 Apple 公证；应用内每天检查一次更新（也可菜单 Check for Updates…），用户确认后安装并重启；About 面板显示版本。见 `release.md` |
 | 精简 TXT 导出 | ✅ CLI / ✅ GUI | 2026-10-10 完成 Transcript Reader：通过 Session ID、唯一前缀或文件路径导出用户输入、最终回复与工具计数，去掉思考和工具结果，见 `../notes/2026-10-10-transcript-reader.md`；2026-10-27 GUI 完成：详情标题行的导出按钮或右键菜单弹出系统保存对话框，内容与 CLI 相同；同日起被用户打断留下的 `[Request interrupted by user]` 不再当成用户输入导出 |
+| asm 命令行与 skill | ✅ 找会话 / ⬜ 缓存检查 / ⬜ 随 app 发布 | 2026-11-17：`asm` 加上给 agent 用的命令。`search` 按会话找：每个 TERM 是一个概念，`\|` 分隔几种说法，会话里出现全部概念才算命中；prompt / reply / thinking / other 走全文索引（几十毫秒），工具输入输出扫原始文件（默认最近 30 天）；每个会话给出各类命中数、带回合号的片段和恢复命令，默认不含当前会话。`session` 是单个会话的卡片，`projects` 列项目，`transcript` 可以 `--outline` / `--turns` / `--grep` / `--tools` 按回合读；`--json`，输出不在终端时不带颜色。旧的 `search` / `session` 改名为 `search-old` / `session-old`，输出不变。`skills/asm/` 的 skill 教 Claude Code 用它找会话并给出恢复命令，在本仓库里打开的会话自动加载；`make install-cli` 把 `asm` 复制到 `~/.local/bin`（更新后要重跑）。开发期间 CLI 用自己的索引 `index-cli.sqlite`，和 app 共用收藏与用量账本。新会话里的端到端验收待做；缓存检查（P2）、随 app 发布（P4）未开始。见 `../plans/2026-11-15-asm-skill-and-cli/` |
 
 ## 3. 产品架构
 

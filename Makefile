@@ -6,6 +6,7 @@ CORE := agent-session-core
 TARGET_DIR := $(shell cargo metadata --format-version 1 --no-deps 2>/dev/null | python3 -c 'import sys, json; print(json.load(sys.stdin)["target_directory"])')
 BIN := $(TARGET_DIR)/debug/$(APP)
 SHOT_DIR ?= tmp/$(shell date +%Y-%m-%d)-screenshots
+PREFIX ?= $(HOME)/.local
 
 help: ## List available commands
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "} {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -82,6 +83,11 @@ asm: ## Run the asm CLI (release build), e.g. make asm ARGS="list -d 7"
 	@cargo build --release -p $(CORE) --bin asm -q
 	@$(TARGET_DIR)/release/asm $(ARGS)
 
+install-cli: ## Build a release asm and copy it to ~/.local/bin/asm (PREFIX=DIR for DIR/bin); a copy, so run it again after updating
+	@cargo build --release -p $(CORE) --bin asm -q
+	@mkdir -p "$(PREFIX)/bin"
+	install -m 755 "$(TARGET_DIR)/release/asm" "$(PREFIX)/bin/asm"
+
 transcript-reader: ## Export compact text with XML-style tags, e.g. make transcript-reader ARGS="SESSION_ID -o session.txt"
 	@cargo build --release -p $(CORE) --bin transcript-reader -q
 	@$(TARGET_DIR)/release/transcript-reader $(ARGS)
@@ -137,5 +143,5 @@ release-local: build-release ## The whole release chain locally into dist/releas
 clean: ## Remove this project's build artifacts only (the target dir is shared across projects)
 	cargo clean -p $(APP) -p $(CORE)
 
-.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search screenshot-detail screenshot-cost screenshot-usage screenshot-usage-view bin asm transcript-reader build-transcript-reader parity icon clean \
+.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search screenshot-detail screenshot-cost screenshot-usage screenshot-usage-view bin asm install-cli transcript-reader build-transcript-reader parity icon clean \
 	build-release notarize-app dmg notarize appcast test-release release-local

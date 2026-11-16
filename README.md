@@ -16,17 +16,40 @@ If Homebrew says it cannot load the cask, run `brew trust --tap reorx/tap` first
 
 The app checks for updates once a day and asks before installing; you can also choose **Agent Session Manager → Check for Updates…**. Its index, view state and favorites live in `~/Library/Application Support/dev.reorx.AgentSessionManager/`.
 
-## `asm` CLI
+## `asm` CLI and agent skill
+
+`asm` reads the same data from the command line, in a form meant for agents: find sessions by
+what was said in them, show one session's details, list projects, and read a session a few turns
+at a time. It is not installed with the app yet; build it from a checkout of this repository
+(see Requirements):
 
 ```sh
-cargo run --release -p agent-session-core --bin asm -- index          # build / refresh the index (~2s cold, 0.1s incremental)
-cargo run --release -p agent-session-core --bin asm -- list tenderbuddy -d 30
-cargo run --release -p agent-session-core --bin asm -- session 2149bb6d
-cargo run --release -p agent-session-core --bin asm -- search 'docker compose' -l tool_use:Bash   # regex over transcripts
-cargo run --release -p agent-session-core --bin asm -- search --index 重构                          # FTS5 over the index
+make install-cli    # release build, copied to ~/.local/bin/asm; run it again after pulling updates
 ```
 
-`ASM_CLAUDE_DIR` / `ASM_DB` override the data directory and index location; `NO_COLOR=1` disables colors.
+```sh
+asm search '连不上|无法连接|offline' 'healthz|健康检查' -d 30   # sessions that contain every TERM; | separates ways of saying one
+asm search 'ECONNRESET' --in tool-output -d 7                  # also search tool calls and their output
+asm session 1b2bda5d                    # an ID or unique prefix from search: title, project, cost, files, resume command
+asm projects -d 30                      # projects active in the last 30 days
+asm transcript 1b2bda5d --outline       # one line per turn
+asm transcript 1b2bda5d --turns 4 --grep healthz   # only the parts of turn 4 around the hits
+```
+
+- The first command builds the CLI's own index (`index-cli.sqlite` in the app's data directory,
+  about 20 seconds); after that each command catches up in well under a second. It keeps its own
+  index while the app's is on an older layout, and shares the app's favorites.
+- `search`, `session` and `projects` take `--json`. Output is colored only in a terminal.
+- The session you run `asm` from is left out of `search` and `projects` unless you add
+  `--include-self`.
+- `ASM_CLAUDE_DIR` / `ASM_DB` override the data directory and the index. `asm --help` lists the
+  other commands (`list`, `cost`, `stats`, `index`, favorites), and
+  [`skills/asm/references/cli.md`](skills/asm/references/cli.md) describes every option.
+
+The **`asm` skill** in [`skills/asm/`](skills/asm/SKILL.md) teaches Claude Code to use the CLI:
+ask "帮我找一下近期关于某个 app 连不上网的问题解决会话" or "where did we fix the flaky ECONNRESET?" and it
+searches, reads the matching turns, and answers with the session and the command to resume it.
+Claude Code sessions started in this repository load it automatically.
 
 ## Transcript Reader
 
@@ -93,6 +116,7 @@ All common commands are in the `Makefile`. `make` or `make help` lists them.
 | `make build` / `make release` | Debug build of the workspace / release build of the app |
 | `make check` / `make clippy` / `make test` / `make fmt` | The usual cargo tasks across the workspace |
 | `make asm ARGS="list -d 7"` | Run the `asm` CLI (release build) |
+| `make install-cli` | Copy a release `asm` to `~/.local/bin/asm` (`PREFIX=…` to change); a copy, so run it again after updating |
 | `make parity` | Diff `asm` against `~/Code/scripts/claude_session_search.py` on the real `~/.claude` |
 | `make screenshot` | Wake the screen, launch the app and save three window screenshots to `tmp/<date>-screenshots/` (override with `SHOT_DIR=…`) |
 | `make screenshot-search` | Run the scripted search session (`ASM_SEARCH_AUTOPLAY=1`) and save seven screenshots; types and clicks nothing |
@@ -113,5 +137,6 @@ Notes:
 crates/core   agent-session-core    parsing, SQLite index, FTS5 / regex search, `asm` CLI; no GPUI dependency
 crates/app    agent-session-manager gpui-kit UI
 scripts/      screenshot.sh, screenshot-clicks.sh, screenshot-search.sh, screenshot-detail.sh, winid.swift (window id lookup), compare-with-python.sh (parity check)
+skills/asm    the asm skill for Claude Code (linked from .claude/skills/asm)
 kb/           docs, plans, notes
 ```
