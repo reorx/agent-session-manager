@@ -30,7 +30,7 @@ Usage 视图告诉用户「这一天花了 $300，大头在某个项目的某几
 
 - 「费用最高的 session」里每一行都可以点（鼠标移上去整行高亮）。点了之后切到会话表，选中这个 session，表格滚到它，详情面板显示它，键盘焦点在表格上。
 - 如果当前的过滤或搜索把它挡在外面，应用只放宽挡住它的那几项，其余不动，并弹一条通知说明放宽了什么，例如「已清除过滤：Updated、Model」。可能被放宽的有：搜索词（清空）、Updated（改为 Any time）、Project（改为 All）、Kind（把它的类型勾上）、Model（改为 All）、只看收藏（关掉）、不显示没有 prompt 的 session（改为显示）、「这段时间里有活动」（清掉）。
-- 搜索只在结果确定还会显示它时保留：搜索已经结束、搜索框里的词就是搜过的词、它在结果里。新的词还在搜（或刚打完、还没开始搜）时，旧结果说明不了新词，搜索被清空，免得新结果到达时把刚选中的它换掉。
+- 搜索只在结果确定还会显示它时保留：搜索框里的词就是搜过的词、结果已经上屏、它在结果里，而且回到会话表时不会重搜（在 Usage 里没改过 Project / Kind / Model、扫描没有重读表格，这次跳转也没放宽过滤）。新的词还在搜（或刚打完、还没开始搜）时，旧结果说明不了新词；要重搜时，结果只留最新 200 个，它可能不在里面。这些情况下搜索被清空，免得新结果到达时把刚选中的它换掉。
 - 「这段时间里有活动」开着时，Model 按调用比（见下）：它在这段时间里调用过别的模型、没调用过选中的模型，放宽的是 Model；这段时间里一次调用都没有，放宽的是 Active（Model 回到按主模型比，它的主模型不是选中的那个时 Model 也放宽）。
 - 这个 session 的记录文件已被清理、会话表里只剩 History 行时：照常选中，详情显示它在历史里的 prompt。
 - 会话表里完全没有这个 session（记录已删，也不在历史里）：不切换视图，弹一条通知「这个 session 的记录已被清理，只保留了用量」。这种行的短 id 用灰色显示，鼠标移上去的提示写明原因。
@@ -222,7 +222,7 @@ app `keyboard_tests.rs`（无界面窗口，fixture 的调用时间固定，范�
 
 依据审阅 `tmp/2026-11-12-usage-stats/reviews/usage-p4-rv.md` 的 R1、D1 和实机验收 `tmp/2026-11-12-usage-stats/usage-p4-accept/report.md`「发现的问题」1–4。证据和红绿记录在 `tmp/2026-11-12-usage-stats/usage-p4-drill/r1/`，总结在 `kb/sessions/2026-11-16-usage-p4-drill.md` 的 r1 一节。
 
-- **R1，搜索结果还在路上时点 session**：表格在新搜索的第一批结果到达前留着旧命中，原来只看 `hit(id)`，旧命中里有它就保留搜索，新结果到达后把刚选中的它换掉。现在由 `drilldown::keeps_search(settled, hit, truncated, widened)` 决定：搜索已结束、搜索框里的词就是搜过的词（`settled`），它在命中里，而且结果没被截到最新 200 个时才允许在放宽后的过滤上重跑；否则清空搜索（通知里的 `Search`），旧 `seq` 作废，迟到的结果被丢掉。搜索框里打了词还在防抖的情况一样处理（词和 `query` 不同）。选了「清空」而不是「等结果到了再决定」：点击是明确要看它，等待会让它先被选中、再在结果到达时被拿走或出现第二次通知。测试在同一次 update 里发起新搜索、切到 Usage、点它，再手动投递那次搜索的结果，不靠线程竞速。
+- **R1，搜索结果还在路上时点 session**（判断规则在第二次返工改了，见下节；这里记的是第一次返工的做法）：表格在新搜索的第一批结果到达前留着旧命中，原来只看 `hit(id)`，旧命中里有它就保留搜索，新结果到达后把刚选中的它换掉。现在由 `drilldown::keeps_search(settled, hit, truncated, widened)` 决定：搜索已结束、搜索框里的词就是搜过的词（`settled`），它在命中里，而且结果没被截到最新 200 个时才允许在放宽后的过滤上重跑；否则清空搜索（通知里的 `Search`），旧 `seq` 作废，迟到的结果被丢掉。搜索框里打了词还在防抖的情况一样处理（词和 `query` 不同）。选了「清空」而不是「等结果到了再决定」：点击是明确要看它，等待会让它先被选中、再在结果到达时被拿走或出现第二次通知。测试在同一次 update 里发起新搜索、切到 Usage、点它，再手动投递那次搜索的结果，不靠线程竞速。
 - **D1，用户决定（brief 决定 20）：下钻时按调用筛**。`Filter.active` 开着时 `Filter::matches` 不看主模型，Model 并进活动集合：`UsageData::active_sessions(span, model)` 只算这个模型的桶，`AppRoot::active_ids_for(filter)` 按过滤的范围和模型取集合；`apply_filter` 在 `active` 或 `model` 变了时重算，所以跳转后再换模型也按调用比，清掉 Active 后回到主模型。`relaxed_for` 的第二个参数从 `active_ok: bool` 换成 `CallsInRange`（`None` / `OtherModels` / `Picked`）：一次调用都没有放宽 Active（之后 Model 按主模型比，不符也放宽），只调用过别的模型放宽 Model。按审阅的 A / B / C 例子写了集合和通知的测试（`under_the_active_filter_the_model_is_the_one_called_in_those_days`）。会话表 Model 下拉里的数字仍是按主模型数的全部 session（它本来就不随 Project、Updated 变），Active 下没有改成按调用数；只在某些天被调用、从来不是主模型的模型在会话表的下拉里选不到，要在 Usage 里选好再跳。
 - **验收 1，会话表工具栏在窄窗口下溢出**：选了换行，不收起控件。理由：和 Usage 工具栏一致；所有控件仍是一次点击，不多一层菜单；默认宽度下一行放得下时布局不变（1440px 下各控件位置改前改后逐个对过，`r1/toolbar-1440-before.txt` / `-after.txt`，默认状态完全一致；开着 Active 和正则时搜索框比原来宽 6px，因为去掉的占位元素原来也占一个间距）。Preview 改用 `ml_auto()` 靠右，搜索框 `flex_basis(160).flex_grow(1.).max_w(220)`，先缩到 160 再换行。`screenshot-clicks.sh` 的坐标对默认状态不受影响；但它的 x 坐标早在第 3 期加 `Sessions | Usage` 切换时就已经偏了（例如 Kind 现在在 530–614，脚本点 383），交给协调者。
 - **验收 2，700pt 下 Usage 的大数字折行、分隔线落在行末**：窗口窄于 960（`NARROW_W`）时指标卡排成三张加两张，大数字 `whitespace_nowrap`。分隔线的规则不用写死阈值（项目名长短会改变断行处）：`on_children_prepainted` 量出这一帧各子元素的位置，分隔线和前后控件在同一行才画，不画时 `.invisible()` 照样占位，免得宽度变了又能放下一行、来回闪。
@@ -230,3 +230,14 @@ app `keyboard_tests.rs`（无界面窗口，fixture 的调用时间固定，范�
 - **验收 4，通知盖住 Sessions 卡的 `↗`**：改了。通知统一放到右下角、状态栏上方（`install_theme` 里 `theme.notification.placement`）。右上角会盖住工具栏右端、Usage 的 Sessions 卡 `↗`，以及跳转之后详情面板标题行的按钮（Copy resume 等），都是下一下最可能点的地方；右下角盖的是内容。测试在通知滑到最终位置后用测试窗口的鼠标点 `↗`。
 - **导览加 `sessions-narrow`**：`jump-session` 之后把窗口改到 700px 截会话表（Active 标签还在），状态行加 `toolbar=<行数>/inside|overflow`，脚本判定多于一行且都在窗口里。截图从 17 张变成 18 张（`16-sessions-narrow.png`，之后 `17-empty`、`18-no-usage`）。
 - **先红后绿**：R1 两个、D1 三个（含 model.rs 的纯函数测试）在改实现之前跑过红（`r1/red-app.log`）；窄窗口、分隔线、指标卡、通知四个测试也先在旧布局上跑红再改。之后又用 `r1/mutate-r1.py` 把每一项改回旧行为（11 处，含 core 的 `active_sessions` 忽略模型），各自让对应的测试失败（`r1/mutations.log`）。
+
+## 第二次返工（2026-11-17，usage-p4-drill-r2）
+
+依据审阅复核 `tmp/2026-11-12-usage-stats/reviews/usage-p4-rv.md` 末尾「协调者摘要（usage-p4-rv-r1）」的 R1.1。证据在 `tmp/2026-11-12-usage-stats/usage-p4-drill/r2/`。
+
+- **R1.1，在 Usage 里先放宽过滤再点旧命中**：第一次返工只看了这次跳转自己放宽的过滤。在 Usage 里把 Project 改成 All 时搜索不重跑，只记 `search_stale = Rerun`，旧命中留在屏幕上；点一个旧命中的 session，`relaxed_for` 什么也不用放宽，旧结果也没截断，搜索就被保留，回到会话表在全部项目上重搜，前 200 个可能没有它，选中又被移走。
+- **规则改成 `keeps_search(settled, hit, again)`**：`again` = `search_stale` 不为空或这次跳转放宽了过滤，有就清空搜索。`truncated` 不再参与：旧结果完整只说明旧范围，扩大范围或数据变新后的前 200 个里有没有它，不重搜就不知道。扫描在 Usage 里重读了表格（`Refresh`）也算：重搜的数据变新，同样可能把它挤出前 200。第一次返工里「放宽过滤后同一个搜索重跑、结果攒齐再换」的那段（把 stale 改成 `Refresh`）随之删掉：保留搜索时不会再有重搜。
+- **`settled` 仍是 `!search_pending`**，只改了说明：它不是「全部结果已返回」，是这次搜索的第一批结果已经上屏；之后来的只会添加命中（上限在搜索线程里），已上屏的命中不会被拿掉。要求 `Done` 会让还在流式扫描、但已经命中它的正则搜索也被清空，没有必要。
+- **代价**：实际使用中，Usage 开着时每分钟扫描一次，有 session 在写就会重读表格，所以在 Usage 里待过一会儿再点 session，搜索多半会被清空（通知里写明 `Search`）。要在这种情况下也保留搜索，得让重搜一定带上它（比如搜索请求带一个必须保留的 session），或比较两次搜索的对象范围；这次没做，交给协调者。
+- **测试**：按复核报告补的两个（Usage 里改 Project 为 All、跳转本身不放宽；旧结果已截断、Usage 里放宽），外加一个扫描在 Usage 里重读表格的。三个都在同一次 update 里点 session，并在有搜索在途时立刻投递一个「更新的 200 个」的答案（不含它、`truncated`），不靠线程竞速。前两个在改之前的代码上失败（`r2/red.log`：选中的是 S2 而不是 S1）。第一次返工的 `a_finished_search_with_the_session_among_its_hits_stays_when_a_filter_gives_way` 断言的正是被否定的行为，改成 `…_ends_when_a_filter_gives_way`（通知 `已清除过滤：Search、Kind`）。变异检查 3 处全部抓到（`r2/mutations.log`）。
+

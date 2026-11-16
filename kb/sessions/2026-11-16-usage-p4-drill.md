@@ -134,3 +134,16 @@ tags: [usage, filter, navigation, gpui, screenshots]
 - **`debug_bounds` 只认 `&'static str`。** `debug_selector` 的闭包可以返回 `format!("toolbar-{id}")`，但测试里 `cx.debug_bounds(..)` 只收 `&'static str`，查的时候写字面量（`"toolbar-preview"`）或常量。
 - **`flex_1` 的占位在换行时会骗人。** 它宽度为 0，换行时留在上一行末尾，右边那组跑到下一行最左边；改成 `ml_auto()`。去掉它之后开着 Active 和正则时搜索框宽了 6px（少了一个间距），默认状态不变。
 - **变异检查会改源码的 mtime。** `mutate-r1.py` 改完会还原，但文件时间比测试日志晚，看上去像测试之后又改过代码；最后在还原后的源码上重跑了一次 `make test` 作证。
+
+## 协调者摘要（usage-p4-drill-r2）
+
+- 结果：R1.1 修好。`keeps_search(settled, hit, again)`：`search_stale` 不为空（Usage 里改过过滤是 `Rerun`，扫描重读了表格是 `Refresh`）或这次跳转放宽了过滤，就清空搜索；`truncated` 不再参与。r1 里把 stale 改成 `Refresh` 的那段随之删掉（保留搜索时不会再重搜）。`!search_pending` 的说明改正：它是「第一批结果已上屏、之后只会添加」，不是「全部结果已返回」；代码仍用它（要求 `Done` 会白白清掉正在流式扫描、已命中它的正则搜索）。`keeps_search` 的单元测试和注释按新规则重写。
+- 提交：本节与代码、测试、文档同一提交，hash 见最终回复。
+- 测试：新增 3 个（按报告补的两个：Usage 里改 Project 为 All 后点、旧结果已截断再放宽后点；外加扫描在 Usage 里重读表格后点），前两个改之前失败（`r2/red.log`，选中的是 S2 不是 S1），改后通过。r1 的 `…_stays_when_a_filter_gives_way` 断言的正是被否定的行为，改名为 `…_ends_when_a_filter_gives_way`。变异 3 处全部抓到（`r2/mutations.log`）。`cargo test -p agent-session-manager` 259 passed / 0 failed / 2 ignored；`make test` 642 passed / 0 failed / 9 ignored（core 383 未变）。只改了搜索判断，没重跑截图导览。
+- 证据目录：`tmp/2026-11-12-usage-stats/usage-p4-drill/r2/`（`red.log`、`green.log`、`mutations.log`、`mutate-r2.py`、`app-tests.log`、`make-test.log`）。
+- 自己的决定：扫描引起的 `Refresh` 也算「要重搜」（重搜的数据变新，同样可能挤出前 200）；`settled` 不改成要求 `Done`；跳转本身放宽过滤的那一项保留在 `again` 里作防御（要命中又要被过滤挡住，过滤必定是在搜索之后改的，在 Usage 里就已经是 stale，测试碰不到它单独起作用）。
+- 交给协调者：这条规则的代价是 Usage 开着时每分钟扫描一次，有 session 在写就会重读表格，所以在 Usage 里待一会儿再点 session，搜索多半被清空（通知会写 `Search`）。要在这时也保留搜索，得让重搜一定带上它（搜索请求带一个必须保留的 session id，改 `search.rs`），或比较两次搜索的对象范围；要不要做是产品决定。`AGENTS.md` 不用为这条改。
+
+## 踩过的坑（r2）
+
+- **变异脚本还原文件后，cargo 跑的还是变异版。** 脚本用 `shutil.move` 把 `.bak` 挪回来，文件的 mtime 是 `.bak` 创建时的，比最后一次（变异版）的构建早；cargo 按 mtime 判断，认为测试二进制是新的，下一次单独的 `cargo test -p agent-session-manager` 跑的仍是最后一个变异（`r1-pending-is-settled`），一个测试连续失败。`make test`（`--workspace`，是另一组构建单元）不受影响，所以两边结果对不上。`touch` 之后就过了。`mutate-r2.py` 和 r1 的 `mutate-r1.py` 都在还原后加了 `os.utime`。r1 的结论不受影响：r1 最后的 `make test` 是 `--workspace` 的单元；导览用的是普通的 app 二进制，变异脚本只构建测试二进制，从没构建过它（它构建于 11-16 23:45:15，变异 23:44:30 跑完之后）；复核者在 791890e 上单独跑的也是 256 全过。

@@ -2132,10 +2132,115 @@ fn revealing_a_session_while_a_typed_query_waits_ends_the_search(cx: &mut TestAp
     assert_eq!(notices(cx, &h), ["已清除过滤：Search"]);
 }
 
-/// A search that is over and has the session among its hits stays, also when a filter has to
-/// give way: the same search runs again over the wider filter, and the session stays selected.
+/// One update, so nothing the search thread sends comes in between: the click on `id` in Usage,
+/// then, when a search is on its way after it, its answer: the `newer` sessions fill the newest
+/// results and the rest is cut off, as when more than 200 sessions match.
+fn reveal_then_newer_hits(cx: &mut TestAppContext, h: &Harness, id: &str, newer: &[&str]) {
+    use crate::search::{RowHit, SearchEvent, SearchSummary};
+    let hit = || std::sync::Arc::new(RowHit { count: 1, label: "user".into(), snippet: "…".into(), ranges: Vec::new() });
+    let hits: Vec<_> = newer.iter().map(|id| (gpui_kit::SharedString::from(id.to_string()), hit())).collect();
+    let summary = SearchSummary { sessions: hits.len(), total_sessions: None, matches: hits.len(), truncated: true, elapsed: Duration::ZERO };
+    let app = h.app.clone();
+    in_window(cx, h, |window, cx| {
+        app.update(cx, |app, cx| {
+            app.reveal_session(id, window, cx);
+            if app.search_pending {
+                let seq = app.search_seq;
+                app.on_search_events(vec![SearchEvent::Hits { seq, hits }, SearchEvent::Done { seq, summary }], cx);
+            }
+        })
+    });
+    // whatever the search thread still sends
+    for _ in 0..20 {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// "parser" in S1's project only: its one hit, all of them in.
+fn search_parser_in_s1_s_project(cx: &mut TestAppContext, h: &Harness) {
+    let project = h.app.read_with(cx, |app, cx| app.table.read(cx).delegate().row_by_id(S1).unwrap().project_key.clone());
+    h.app.update(cx, |app, cx| app.set_project(Some(project), cx));
+    press(cx, h, "cmd-f");
+    type_text(cx, h, "parser");
+    press(cx, h, "enter");
+    wait_until(cx, h, "the search", |app, cx| search_done(app, cx) && !app.search_pending);
+    assert_eq!(h.app.read_with(cx, listed), [S1]);
+}
+
+/// usage-p4-rv R1.1: Project set to All in Usage. The search is not run there, its old results
+/// stay on screen until the table is back, and then it runs over every project: other
+/// sessions may fill its newest 200 and leave S1 out. The reveal relaxes nothing itself, and
+/// the old results were not cut, which says nothing about the new ones.
 #[gpui_kit::test]
-fn a_finished_search_with_the_session_among_its_hits_stays_when_a_filter_gives_way(cx: &mut TestAppContext) {
+fn revealing_a_hit_after_usage_widened_a_filter_ends_the_search(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    search_parser_in_s1_s_project(cx, &h);
+    assert!(h.app.read_with(cx, |app, _| !app.search_summary.as_ref().unwrap().truncated), "all its hits are in");
+    usage_on(cx, &h, september());
+    // Usage's Project menu: All
+    h.app.update(cx, |app, cx| app.set_project(None, cx));
+    assert!(h.app.read_with(cx, |app, cx| app.table.read(cx).delegate().hit(S1).is_some()), "the old hits are still there");
+
+    reveal_then_newer_hits(cx, &h, S1, &[S2, S3]);
+
+    assert_revealed(cx, &h, S1);
+    assert_eq!(search_box(cx, &h), "", "the search box is emptied");
+    assert!(h.app.read_with(cx, |app, cx| !app.searching() && !app.table.read(cx).delegate().search_active()));
+    assert_eq!(notices(cx, &h), ["已清除过滤：Search"]);
+}
+
+/// The same with old results that were cut to the newest: the reveal relaxes nothing, the
+/// widening was Usage's.
+#[gpui_kit::test]
+fn revealing_a_hit_of_cut_results_after_usage_widened_a_filter_ends_the_search(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    search_parser_in_s1_s_project(cx, &h);
+    // as if more than 200 sessions of the project had matched, S1 among the newest
+    h.app.update(cx, |app, _| app.search_summary.as_mut().unwrap().truncated = true);
+    usage_on(cx, &h, september());
+    h.app.update(cx, |app, cx| app.set_project(None, cx));
+
+    reveal_then_newer_hits(cx, &h, S1, &[S2, S3]);
+
+    assert_revealed(cx, &h, S1);
+    assert_eq!(search_box(cx, &h), "");
+    assert!(h.app.read_with(cx, |app, _| !app.searching()));
+    assert_eq!(notices(cx, &h), ["已清除过滤：Search"]);
+}
+
+/// A scan in Usage that reloads the rows leaves the search to run again once the table is
+/// back, over sessions that may have new hits: as unsure as a widened filter.
+#[gpui_kit::test]
+fn revealing_a_hit_after_a_scan_in_usage_reloaded_the_rows_ends_the_search(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    wait_until(cx, &h, "the ledger", usage_loaded);
+    press(cx, &h, "cmd-f");
+    type_text(cx, &h, "parser");
+    press(cx, &h, "enter");
+    wait_until(cx, &h, "the search", |app, cx| search_done(app, cx) && !app.search_pending);
+    assert_eq!(h.app.read_with(cx, listed), [S1]);
+    press(cx, &h, "ctrl-2");
+    let base = h.app.read_with(cx, |app, _| app.scans_done);
+    append_response(&h._dir.path().join("claude"), S2, "msg_r11", "claude-opus-5", now_ms());
+    h.app.update(cx, |app, cx| app.rescan(false, cx));
+    wait_until(cx, &h, "the scan and its reload", |app, _| app.scans_done > base && !app.scan_in_flight);
+    cx.run_until_parked();
+
+    reveal_then_newer_hits(cx, &h, S1, &[S2, S3]);
+
+    assert_revealed(cx, &h, S1);
+    assert_eq!(search_box(cx, &h), "");
+    assert_eq!(notices(cx, &h), ["已清除过滤：Search"]);
+}
+
+/// A search that is over and has the session among its hits still ends when a filter has to
+/// give way for it: the search would run again over more sessions, and their newest 200 may
+/// not have it (R1.1). The session is shown, the filter and the search are both said.
+#[gpui_kit::test]
+fn a_finished_search_with_the_session_among_its_hits_ends_when_a_filter_gives_way(cx: &mut TestAppContext) {
     use crate::model::Kind;
     let h = launch(cx);
     wait_until(cx, &h, "the ledger", usage_loaded);
@@ -2149,11 +2254,11 @@ fn a_finished_search_with_the_session_among_its_hits_stays_when_a_filter_gives_w
     assert!(h.app.read_with(cx, |app, cx| app.table.read(cx).delegate().position_of(S1).is_none()));
 
     reveal(cx, &h, S1);
-    wait_until(cx, &h, "the search again", |app, cx| search_done(app, cx) && !app.search_pending);
     assert_revealed(cx, &h, S1);
-    assert_eq!(search_box(cx, &h), "parser", "the search stays");
-    assert_eq!(h.app.read_with(cx, listed), [S1]);
-    assert_eq!(notices(cx, &h), ["已清除过滤：Kind"]);
+    assert_eq!(search_box(cx, &h), "", "the search ends");
+    assert!(h.app.read_with(cx, |app, cx| !app.searching() && !app.table.read(cx).delegate().search_active()));
+    assert!(h.app.read_with(cx, |app, cx| app.current_filter(cx).kinds.contains(Kind::Cli)), "CLI is back");
+    assert_eq!(notices(cx, &h), ["已清除过滤：Search、Kind"]);
 }
 
 #[gpui_kit::test]

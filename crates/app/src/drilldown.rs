@@ -33,14 +33,18 @@ pub fn unlisted_notice(unlisted: usize, gone: usize) -> Option<String> {
     }
 }
 
-/// Whether a reveal keeps the search on screen. Its results are the box's only when `settled`
-/// (the query typed is the one searched, and all its results are in): results still on their
-/// way, or a query still waiting for the typing to pause, may not have the session and would
-/// take it away when they come (usage-p4-rv R1). The session must be among them (`hit`), and
-/// when a filter gives way (`widened`) the same search runs again over more sessions: results
-/// cut to the newest (`truncated`) may then leave it out.
-pub fn keeps_search(settled: bool, hit: bool, truncated: bool, widened: bool) -> bool {
-    settled && hit && !(truncated && widened)
+/// Whether a reveal keeps the search on screen: only when the results on screen are sure to
+/// stay as they are, with the session among them (`hit`). They are the box's only when
+/// `settled`: the query typed is the one searched and its results are on screen (more may come,
+/// they only add). Results still on their way, or a query still waiting for the typing to
+/// pause, may not have the session and would take it away when they come (usage-p4-rv R1).
+/// And no search may run again (`again`): one
+/// that went stale while Usage was shown (a filter changed there, or a scan reloaded the rows)
+/// runs once the table is back, and so does one over a filter this reveal relaxes. A search
+/// run again over other or newer sessions keeps only the newest 200 with a hit, so the session
+/// may drop out, however complete the old results were (R1.1).
+pub fn keeps_search(settled: bool, hit: bool, again: bool) -> bool {
+    settled && hit && !again
 }
 
 /// `[from, until)` of the Active filter's days (each from 4:00 local).
@@ -104,10 +108,12 @@ impl AppRoot {
         let mut relaxed = Vec::new();
         let typed = self.search.read(cx).value().trim().to_string();
         if self.searching() || !typed.is_empty() {
+            // not the end of the search: its first results clear `search_pending` (a refresh's end
+            // does), and what still comes only adds hits (the search thread keeps to the newest
+            // 200), so a hit on screen stays until another search
             let settled = typed == self.query.as_ref() && !self.search_pending;
-            let delegate = self.table.read(cx).delegate();
-            let truncated = self.search_summary.as_ref().is_some_and(|s| s.truncated);
-            if !keeps_search(settled, delegate.hit(id).is_some(), truncated, !names.is_empty()) {
+            let again = self.search_stale.is_some() || !names.is_empty();
+            if !keeps_search(settled, self.table.read(cx).delegate().hit(id).is_some(), again) {
                 // empty the box and end the search (a query still waiting for the typing to
                 // pause then finds the box empty), the focus stays where it is (unlike Escape)
                 self.search.update(cx, |input, cx| input.set_value("", window, cx));
@@ -122,13 +128,8 @@ impl AppRoot {
         // whatever the filter change selects on its way (it may be another row) gives way to it,
         // and a selection still awaited from the saved state is dropped
         self.wanted_id = Some(row.id.clone());
-        let searching = self.searching();
+        // a search still on is one nothing runs again: the filter changes only when it went
         self.apply_filter(filter, cx);
-        // the session is among the hits: the same search over the wider filter finds it again;
-        // its results swap in once all are there, so it stays selected meanwhile
-        if searching && self.search_stale.is_some() {
-            self.search_stale = Some(crate::StaleSearch::Refresh);
-        }
         if !relaxed.is_empty() {
             self.say(format!("已清除过滤：{}", relaxed.join("、")), window, cx);
         }
@@ -220,13 +221,11 @@ mod tests {
 
     #[test]
     fn a_reveal_keeps_only_a_search_that_is_sure_to_still_show_the_session() {
-        // (settled, hit, truncated, widened)
-        assert!(keeps_search(true, true, false, false));
-        assert!(keeps_search(true, true, false, true), "all its results are in: the session is found again over more");
-        assert!(keeps_search(true, true, true, false), "nothing runs again");
-        assert!(!keeps_search(true, true, true, true), "the newest results over more sessions may not have it");
-        assert!(!keeps_search(true, false, false, false));
-        assert!(!keeps_search(false, true, false, false), "old hits: the results on their way decide");
+        // (settled, hit, again)
+        assert!(keeps_search(true, true, false), "the results on screen stay, the session among them");
+        assert!(!keeps_search(true, true, true), "searched again, the newest 200 may not have it, complete or cut before");
+        assert!(!keeps_search(true, false, false));
+        assert!(!keeps_search(false, true, false), "old hits: the results on their way decide");
     }
 
     #[test]
