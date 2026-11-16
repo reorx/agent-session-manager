@@ -149,9 +149,9 @@ asm search TERM... [--in KINDS] [--tool NAME]... [--regex] [--same-message]
 关键决定：
 
 - **thinking 和 `other` 进索引，用新列 `kind` 区分**，`role` 保留。被否决：把 thinking 当成一个新 role（会改变 `role` 的含义，app 的 `FtsRoles` 要跟着改语义）。
-- **`prompt` 与 `other` 的划分和回合编号同一口径**：一条 user 记录是 `prompt` 当且仅当 `transcript::is_human_input` 为真。这样 `asm search` 片段的回合号可以直接从索引算出（同一会话里位置不晚于命中行的 `prompt` 行数），与 `transcript --turns`、app 详情一致。
+- **`prompt` 与 `other` 的划分和回合编号同一口径**：一条 user 记录是 `prompt` 当且仅当它开启新回合（`transcript::opens_turn`：`is_human_input` 为真且不是中断标记；计划交接的 `Implement the following plan:…` 开回合，本地命令的输出不开，brief 决定 13、24、25）。这样 `asm search` 片段的回合号可以直接从索引算出（同一会话里位置不晚于命中行的 `prompt` 行数），与 `transcript --turns`、app 详情一致。
 - **扫描路径不复用旧的 `search::regex::search`**，另写 `scan_groups`，预过滤只加在新路径上；旧命令和 app 的正则模式这一期不动，`make parity` 不受影响。被否决：直接改 `find_in_bytes`（要同时满足 Python 比对和 app 的流式扫描，风险大，留到以后单独做）。
-- **时间范围按会话活动时间过滤**（`updated_at`，扫描路径对应文件 mtime），命中可以在会话任何位置，两条路径口径一致。被否决：按消息时间过滤（会话跨天时，「近期」的会话会因为关键句在范围外被漏掉）。
+- **时间范围按会话活动时间过滤**：会话的活动区间（首条 prompt 到最后更新）与范围相交就参与（规则见 `cli.md`「Time range」），命中可以在会话任何位置，两条路径口径一致。被否决：按消息时间过滤（会话跨天时，「近期」的会话会因为关键句在范围外被漏掉）。
 - **CLI 拆成目录**：`src/bin/asm/main.rs` 加若干模块，避免单文件继续膨胀。
 
 ### 数据变动
@@ -159,7 +159,7 @@ asm search TERM... [--in KINDS] [--tool NAME]... [--regex] [--same-message]
 - `schema.sql`：
   - `messages` 加 `kind TEXT NOT NULL CHECK (kind IN ('prompt','reply','thinking','other'))`；`role` 的 CHECK 不变（thinking 行的 role 是 assistant）。
   - `messages_fts` 加 `kind UNINDEXED` 列，两个触发器同步写入 `kind`。
-- `SCHEMA_VERSION` 4 → 5，打开旧索引时整库重建（既有机制，无迁移）。同步 `db.rs` 里 `insert_messages` / `messages()` 的列。
+- `SCHEMA_VERSION` 4 → 5（P1-2 改回合规则后为 6），打开旧索引时整库重建（既有机制，无迁移）。同步 `db.rs` 里 `insert_messages` / `messages()` 的列。
 - `model.rs`：新增 `pub enum TextKind { Prompt, Reply, Thinking, Other }`（`as_str` / `parse`），`MessageRow` 加 `kind: TextKind`。
 - 一条 assistant 记录可能同时有 thinking 和 text block，会写成两行（相同 `byte_offset`，不同 `kind`）；`messages_session_ts` 不是唯一索引，不受影响。
 - 只有 thinking 正文非空（trim 后）的 block 入库；同一记录的多个 thinking block 用换行拼成一行。
@@ -169,7 +169,7 @@ asm search TERM... [--in KINDS] [--tool NAME]... [--regex] [--same-message]
 **core 解析（`claude/parse.rs`）**
 
 - `RawRecord` 补上 `is_human_input` 需要的字段（`isCompactSummary`、`origin.kind`，如尚未有）。把 `transcript::is_human_input` 的判断改成只依赖一个小的输入结构（或给 `RawRecord` 写一个等价函数），两处共用，避免两套口径。
-- `on_user`：`kind = Prompt` 若 `is_human_input`，否则 `Other`；`delta` 的计数逻辑不变（`user_msg_count` 仍按 `is_human_prompt`，和 Python 脚本一致）。
+- `on_user`：`kind = Prompt` 若这条记录开启新回合（`opens_turn`），否则 `Other`；哪些记录被跳过（主记录里的 sidechain、同 uuid 的重复）由 `transcript::RecordFilter` 决定，详情面板、导出、解析器共用，追加扫描时 indexer 把已索引的 user uuid 交给解析器；只贴了图片的输入写一行空文本；`delta` 的计数逻辑不变（`user_msg_count` 仍按 `is_human_prompt`，和 Python 脚本一致）。
 - `on_assistant`：text block 照旧拼成 `Reply` 行；另把非空 thinking 拼成一行 `Thinking`。`assistant_msg_count`、`last_message` 只看 text，不变。
 - `user_line_may_have_text` 的预过滤不变；`usage_only` 模式不产生消息行，不变。
 - `gen_fixtures.py`：加一个含 thinking 正文的 assistant 记录、一个空 thinking（只有签名）、一条 `origin.kind` 非 human 的 user 记录、一条 compact 摘要，`uv run` 重生成并提交。
@@ -193,7 +193,11 @@ asm search TERM... [--in KINDS] [--tool NAME]... [--regex] [--same-message]
 
 **core 其他**
 
-- `transcript.rs`：新增 `TranscriptOptions { outline, turns: Option<(u32, u32)>, grep: Option<Query>, context: u32, thinking: bool, tools: bool }` 和 `read_transcript_with(path, &opts)`；`read_transcript(path)` 等价于默认选项，输出逐字不变（`tests/transcript_reader.rs` 不改）。带选项时 `<user turn="5" ts="2026-11-13 08:01">`；`--outline` 每回合一行；`--grep` 以回合为单位，回合内任一类别（含 `--thinking` / `--tools` 打开的部分）命中任一 group 即保留，再按 `context` 扩展。工具输出每段截到 2,000 字符，末尾 `…[cut N chars]`。
+- `transcript.rs`：新增 `TranscriptOptions { outline, turns: Option<TurnRange>, grep: Option<Query>, context, thinking, tools }` 和 `read_transcript_with(path, &opts)`，实现在 `transcript/reading.rs`。`TurnRange { first, last: Option<u32> }` 支持 `N`、`N-M`、`N-`（原写的 `(u32, u32)` 表达不了 `N-`）。没有阅读选项时直接调 `read_transcript`，输出逐字不变（`tests/transcript_reader.rs` 不改）。
+  - 按范围读时每个回合显示 `asm search` 搜的全部 item（不按 `RecordFilter` 丢记录），`<user turn="5" ts="2026-11-13 08:01">` 里是原文；`--outline` 每回合一行，用清理后的首行。
+  - `--grep` 判定 prompt、reply、thinking（不加 `--thinking` 也判，命中的 thought 照样显示）和 `other`；工具调用只在 `--tools` 时判定（brief 决定 22）。有命中的回合保留，再按 `--context` 带上前后回合（可以从范围外的命中回合伸进范围）。保留的回合里只显示 prompt、命中的 item 和它前后各 1 个 item，其余折叠成一行 `…[skipped N items, M chars; --turns N without --grep shows them]`；不带 `--grep` 的 `--turns` 照旧整回合（决定 23）。
+  - 开头标签的 `matched` 是有命中的回合数，带 `--context` 时另有 `context="N"`。`TranscriptExport.tool_hits_hidden` 数范围内因为命中只在工具调用里、没带 `--tools` 而没保留的回合，CLI 在 stderr 提示加 `--tools`（exit 0）。
+  - 工具调用的输入和输出按字符截断：没有命中取前 2,000；有命中取前 500，再给每个命中开窗 `[h-300, h+700)`，相接的窗口合并，累计到 4,000 后这个命中和之后的都不开窗，计入最后一个空隙行 `…[cut N chars, M more hits]`。`<user>`、`<agent>`、`<thinking>` 不截。细节以 `cli.md` 为准。
 - 恢复命令：`resume_command` 和 `shell_quote` 从 `crates/app/src/actions.rs` 移到 core（如 `core::format` 或新的 `core::session`），app 改为调用 core，app 的测试不变。
 
 **CLI（`crates/core/src/bin/asm/`）**
@@ -211,29 +215,41 @@ asm search TERM... [--in KINDS] [--tool NAME]... [--regex] [--same-message]
 **脚本与构建**
 
 - `scripts/compare-with-python.sh`：`asm_args=(session …)` → `session-old`，`(search …)` → `search-old`。
-- `Makefile`：新增 `install-cli`（release 构建后 `ln -sf` 到 `$(PREFIX)/bin/asm`，`PREFIX ?= $(HOME)/.local`）；`help` 文案更新。
+- `Makefile`：新增 `install-cli`（release 构建后 `install -m 755` 复制到 `$(PREFIX)/bin/asm`，`PREFIX ?= $(HOME)/.local`）；`help` 文案更新。复制而不是 `ln -sf`（brief 决定 26）：开发中的构建会反复重建共享构建目录里的 `asm` 并提升 `SCHEMA_VERSION`，符号链接会让全局 `asm` 悄悄变成开发版；代价是更新后要重跑。
 - 仓库加 `.claude/skills/asm` → `../../skills/asm` 的相对符号链接（确认 `.gitignore` 没有忽略 `.claude/`）。
 
 **skill（`skills/asm/`，英文）**
 
-- `SKILL.md` frontmatter：`name: asm`；`description` 写清触发场景（find / search past Claude Code sessions or conversations, "where did we fix X", "找一下之前……的会话", resume an old session, read what happened in a session）。正文：前提检查（`command -v asm`、`asm --version`；缺失时在本仓库 `make install-cli`）、命令一览、通用规则、场景路由（P1 只有找会话）。
+- `SKILL.md` frontmatter：`name: asm`；`description` 写清触发场景（find / search past Claude Code sessions or conversations, "where did we fix X", "找一下之前……的会话", resume an old session, read what happened in a session）。正文：前提检查（`asm projects --help`：`asm --version` 恒为 `0.1.0`，旧版也有 `search`，都分不出新旧；缺失或旧版时在本仓库 `make install-cli`）、命令一览、通用规则、场景路由（P1 只有找会话）。
 - `references/cli.md`：每个命令一个 `### asm <name>` 小节：用途、参数表（名字、取值、默认值）、输出示例、JSON 字段、退出码（0 成功，含 0 结果；1 错误；2 参数错误）。
 - `references/finding-sessions.md`：方法与例子（PRD 第 7 点）。例子里给出真实可跑的命令序列和期望看到的输出形状。
 
 ### 实施步骤
 
-- [ ] 1. 写 `skills/asm/references/cli.md` 的 P1 部分（新 `search` / `session` / `projects` / `transcript` 选项 / 全局参数 / 旧命令一览）和规范一致性测试；此时测试应失败
-- [ ] 2. CLI 拆目录、旧命令改名、`--color`；更新 `tests/cli.rs` 和 `compare-with-python.sh`；`cargo test -p agent-session-core` 和 `make parity` 通过
-- [ ] 3. `TextKind`、schema 5、解析出 thinking / prompt / other；先补 fixture 和测试（类别划分、全量 == 增量、回合号与 `read_conversation` 一致、app `FtsRoles` 结果不变），再实现
-- [ ] 4. `search/query.rs` + `search/sessions.rs::search_index`：先写行为测试（会话级 AND、`|`、`--same-message`、类别过滤、短词、时间与项目过滤、排除会话、片段回合号）
-- [ ] 5. `search/prefilter.rs` + `search_scan`：先写测试（JSON 转义、引号 / 反斜杠 / 换行、大小写、非 ASCII、正则字面量提取、预过滤与不过滤结果相同），再实现；在真实数据上量 30 天带工具输出的耗时
-- [ ] 6. 新 `asm search`（文字 / JSON、默认时间、排序、截断、空结果提示、排除当前会话）+ CLI 测试
-- [ ] 7. `resume_command` 移到 core；新 `asm session`、`asm projects` + 测试
-- [ ] 8. `transcript` 新选项 + 测试（默认输出不变、回合号一致、`--grep` / `--context` / `--tools` 截断）
-- [ ] 9. 写锁回退（用一个持有写事务的连接模拟 app）+ 测试
-- [ ] 10. `SKILL.md`、`finding-sessions.md`、cli.md 补全；`.claude/skills/asm` 链接、`make install-cli`
-- [ ] 11. 真实数据验收（见下），新开 Claude Code 会话验收 skill
-- [ ] 12. 更新 `AGENTS.md`（当前状态、开发命令、parity 说明）、`kb/docs/product-prd.md`、`README.md`，commit
+- [x] 1. 写 `skills/asm/references/cli.md` 的 P1 部分（新 `search` / `session` / `projects` / `transcript` 选项 / 全局参数 / 旧命令一览）和规范一致性测试；此时测试应失败
+  - 2026-11-16 完成（P1-1，与第 2、9 步一起）：`kb/sessions/2026-11-15-asm-p1-cli.md`
+- [x] 2. CLI 拆目录、旧命令改名、`--color`；更新 `tests/cli.rs` 和 `compare-with-python.sh`；`cargo test -p agent-session-core` 和 `make parity` 通过
+  - 2026-11-16 完成：`kb/sessions/2026-11-15-asm-p1-cli.md`
+- [x] 3. `TextKind`、schema 5、解析出 thinking / prompt / other；先补 fixture 和测试（类别划分、全量 == 增量、回合号与 `read_conversation` 一致、app `FtsRoles` 结果不变），再实现
+  - 2026-11-16 完成（P1-2，含决定 24、25 的回合规则，schema 6）：`kb/sessions/2026-11-15-asm-p1-kinds.md`
+- [x] 4. `search/query.rs` + `search/sessions.rs::search_index`：先写行为测试（会话级 AND、`|`、`--same-message`、类别过滤、短词、时间与项目过滤、排除会话、片段回合号）
+  - 2026-11-16 完成（P1-3，与第 5 步一起）：`kb/sessions/2026-11-15-asm-p1-search.md`
+- [x] 5. `search/prefilter.rs` + `search_scan`：先写测试（JSON 转义、引号 / 反斜杠 / 换行、大小写、非 ASCII、正则字面量提取、预过滤与不过滤结果相同），再实现；在真实数据上量 30 天带工具输出的耗时
+  - 2026-11-16 完成：`kb/sessions/2026-11-15-asm-p1-search.md`（扫描在 `search/scan.rs`）
+- [x] 6. 新 `asm search`（文字 / JSON、默认时间、排序、截断、空结果提示、排除当前会话）+ CLI 测试
+  - 2026-11-16 完成（P1-4，与第 7 步一起）：`kb/sessions/2026-11-16-asm-p1-cmds.md`
+- [x] 7. `resume_command` 移到 core；新 `asm session`、`asm projects` + 测试
+  - 2026-11-16 完成：`kb/sessions/2026-11-16-asm-p1-cmds.md`（移到 core `session.rs`）
+- [x] 8. `transcript` 新选项 + 测试（默认输出不变、回合号一致、`--grep` / `--context` / `--tools` 截断）
+  - 2026-11-16 完成（P1-5）：`kb/sessions/2026-11-16-asm-p1-transcript.md`
+- [x] 9. 写锁回退（用一个持有写事务的连接模拟 app）+ 测试
+  - 2026-11-16 完成（并入 P1-1）：`kb/sessions/2026-11-15-asm-p1-cli.md`
+- [x] 10. `SKILL.md`、`finding-sessions.md`、cli.md 补全；`.claude/skills/asm` 链接、`make install-cli`
+  - 2026-11-17 完成（P1-6）：`kb/sessions/2026-11-16-asm-p1-skill.md`
+- [x] 11. 真实数据验收（见下），新开 Claude Code 会话验收 skill
+  - 2026-11-17 完成（P1-7）：`kb/sessions/2026-11-17-asm-p1-accept.md`
+- [x] 12. 更新 `AGENTS.md`（当前状态、开发命令、parity 说明）、`kb/docs/product-prd.md`、`README.md`，commit
+  - 2026-11-17 完成：README 与 product-prd 在 P1-6，其余在 P1 收尾：`kb/sessions/2026-11-17-asm-p1-docs.md`
 
 ### 测试与验证
 
@@ -243,7 +259,7 @@ asm search TERM... [--in KINDS] [--tool NAME]... [--regex] [--same-message]
 | 会话级结果、片段、恢复命令、排除当前会话 | `tests/cli.rs` 新用例（fixture 沙盒，设 `CLAUDE_CODE_SESSION_ID` 为某个 fixture 会话）；真实数据上 `asm search "连不上\|无法连接\|offline"` 人工核对 |
 | 跨消息 AND / `--same-message` | `search/sessions.rs` 行为测试 + fixture |
 | thinking / 工具输出可搜 | fixture 里只在 thinking、只在 tool_result 出现的词各一个 |
-| 30 天带工具输出 ≤ 2 秒 | 真实数据实测 3 次取中位数，记进 session 总结；超出时记下瓶颈，不阻塞验收但要写进 `known-issues.md` |
+| 30 天带工具输出 ≤ 2 秒 | 真实数据实测 3 次取中位数，记进 session 总结；超出时记下瓶颈，不阻塞验收但要写进 `known-issues.md`。实测：P1-3 在 30 天 5.7 GB 上中位数 0.86–2.0 s；P1-7 验收时负载 3.5–6.5，`--in tool` 的 `connection refused` 2.49 s、`ECONNRESET` 1.92 s、`offline` 1.75 s，在目标边缘，没做空载复测，已记进 `known-issues.md` |
 | `session` 卡片 / 前缀不唯一 | CLI 测试 |
 | `projects --days` | CLI 测试 |
 | transcript 选项、回合号一致 | `tests/transcript_reader.rs` 新用例；对真实数据的 3 个会话比较 `asm transcript --outline` 的回合数与 `asm session-old --conversation` 的 `turns=` |

@@ -8,11 +8,14 @@ M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监�
 
 用量统计（`kb/plans/2026-11-16-usage-stats/`，四期）已完成（2026-11-17）：用量账本（含状态栏 Today、4:00 分日、自动扫描，真实账本已从索引备份导入）、常驻菜单栏、Usage 视图、从 Usage 下钻回会话表。
 
-接下来：asm skill 与 CLI（`kb/plans/2026-11-15-asm-skill-and-cli/`，P1 代码已完成，暂停在 skill 文档与验收，记录在 `tmp/2026-11-14-asm-skill-cli/`）和缓存失效判定（`kb/plans/2026-11-16-cache-break-accuracy.md`，第 1 步参考脚本已完成，记录在 `tmp/2026-11-16-cache-break-accuracy/`），顺序见 asm 记录的 `status.md`。
+asm skill 与 CLI（`kb/plans/2026-11-15-asm-skill-and-cli/`）的 P1 找会话已完成（2026-11-17）：面向 agent 的 `search` / `session` / `projects`、`transcript` 按范围读、`skills/asm/`，真实数据与 skill 端到端验收都已通过。
+
+进行中：缓存失效判定（`kb/plans/2026-11-16-cache-break-accuracy.md`，第 2 步起在写代码，记录在 `tmp/2026-11-16-cache-break-accuracy/`）。它签收后再拆 asm P2（缓存检查），协调记录在 `tmp/2026-11-14-asm-skill-cli/status.md`。
 
 ## 结构
 
-- `crates/core`（`agent-session-core`，无 gpui 依赖）：JSONL 解析（`claude/`）、增量 SQLite 索引（`index/`）、FTS5 / 正则搜索（`search/`）、费用（`pricing.rs`、`cost.rs`）、收藏、用量账本（`ledger.rs`，索引同目录的 `usage-ledger.sqlite`，app 和 `asm` 的索引共用一份）、用量日与内存里的用量聚合（`usage.rs`）、`asm` CLI 与 `transcript-reader`（`bin/`）
+- `crates/core`（`agent-session-core`，无 gpui 依赖）：JSONL 解析（`claude/`）、增量 SQLite 索引（`index/`）、FTS5 / 正则搜索与 `asm search` 的会话级搜索（`search/`：TERM 在 `query.rs`，索引路径 `sessions.rs`，扫描路径 `scan.rs` + 字节预过滤 `prefilter.rs`）、app 和 CLI 共用的会话事实（`session.rs`：恢复命令、会话种类、改过的文件）、费用（`pricing.rs`、`cost.rs`）、收藏、用量账本（`ledger.rs`，索引同目录的 `usage-ledger.sqlite`，app 和 `asm` 的索引共用一份）、用量日与内存里的用量聚合（`usage.rs`）、`asm` CLI（`bin/asm/`：面向 agent 的 `search.rs` / `session.rs` / `projects.rs` 及共用的 `agent.rs`，与 Python 脚本比对的旧命令在 `old.rs`）与 `transcript-reader`（`bin/`）
+- `skills/asm/`：英文的 asm skill，教 agent 用 CLI 找会话。`SKILL.md` 是总说明，`references/cli.md` 是 CLI 的规范（先改规范再实现，`bin/asm/spec.rs` 的测试要求每个命令和参数在里面都有），`references/finding-sessions.md` 是找会话的方法。仓库里的 `.claude/skills/asm` 链接到它；`README.md` 有一节 CLI，改命令时要同步
 - `crates/app`（`agent-session-manager`）：gpui-kit 界面，保持薄。界面向三条后台线程发请求，线程回事件：
   - `asm-store`（`store.rs`）独占 `Db`：启动先读索引出表，再流式增量扫描
   - `asm-search`（`search.rs`）自带只读连接：文本模式走 FTS，正则模式流式扫描 transcript
@@ -33,7 +36,7 @@ M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监�
 - Context 窗口优先读 Claude 数据目录的 `cache/model-catalog/`，缺失时回退内置表；启动与扫描后重读，窗口变了刷新整表，不用重建索引
 - 缓存失效：读 Conversation 时 core `conversation.rs::cache_check` 逐次比较主线调用，比上一次少读缓存 ≥ 10k token 记为一次失效
 - 收藏的快照存到索引旁的 `favorites/claude/`；取消收藏是移到废纸篓
-- 导出 TXT：CLI（`transcript-reader` / `asm transcript`）和界面共用 `transcript::read_transcript`，输出是 XML 风格标签分隔的精简文本，不要求是标准 XML
+- 导出 TXT：CLI（`transcript-reader` / `asm transcript`）和界面共用 `transcript::read_transcript`，输出是 XML 风格标签分隔的精简文本，不要求是标准 XML。CLI 的阅读选项（`--outline` / `--turns` / `--grep`）在 `transcript/reading.rs`，显示 `asm search` 搜的全部 item，不带选项时输出与完整导出逐字相同
 - 发布：打 `v*` tag 触发 GitHub Actions（构建、签名、公证、本仓库 Release、`reorx/homebrew-tap` 的 cask）。应用内更新用 Sparkle 2，`updater.rs` 运行时加载 bundle 里的 framework，debug 二进制没有更新器
 
 ## 开发命令
@@ -42,12 +45,12 @@ M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监�
 
 - `make dev`：编译并启动 app（`run` 会先 pkill 旧实例）。手动起的 app 验证后必须 kill，用 `pgrep -fl agent-session-manager` 检查。关窗不会退出（常驻菜单栏），用菜单 Quit 或 `pkill -f agent-session-manager`
 - 测试：`cargo test -p agent-session-core`、`cargo test -p agent-session-manager`（纯逻辑，加上无界面窗口里的键盘测试）、`make test` 全跑
-- `make asm ARGS="…"` 跑 `asm` CLI，`make transcript-reader ARGS="SESSION_ID -o session.txt"` 导出精简 TXT；子命令和参数看 `--help`。改价格表或用量解析后跑一次 `asm cost --compare`（自算费用与 `cost-state` 的偏差）
-- `make parity`：在真实 `~/.claude` 上把 `asm` 与 Python 脚本（`~/Code/scripts/claude_session_search.py`，本项目的行为基准）逐字比对；改解析器、清理逻辑、`regex.rs` 或输出格式后必须跑。两边的列表顺序一致（开始时间降序，并列时按更新时间降序、再按 id），改排序要两边一起改（脚本的测试在它旁边的 `tests/test_claude_session_search.py`）。比对期间有 session 正在写入时 search 组偶尔失败，重跑即过
+- `make asm ARGS="…"` 跑 `asm` CLI，`make transcript-reader ARGS="SESSION_ID -o session.txt"` 导出精简 TXT；子命令和参数看 `--help`。`make install-cli` 把 release `asm` 复制到 `~/.local/bin/asm`：是副本不是链接（开发中的构建会提升 `SCHEMA_VERSION`，链接会让全局 `asm` 悄悄变成开发版），代码更新后要重跑。改价格表或用量解析后跑一次 `asm cost --compare`（自算费用与 `cost-state` 的偏差）
+- `make parity`：在真实 `~/.claude` 上把 `asm` 的 `list`、`session-old`、`search-old` 与 Python 脚本（`~/Code/scripts/claude_session_search.py`，本项目的行为基准）逐字比对；改解析器、清理逻辑、`regex.rs` 或输出格式后必须跑。两边的列表顺序一致（开始时间降序，并列时按更新时间降序、再按 id），改排序要两边一起改（脚本的测试在它旁边的 `tests/test_claude_session_search.py`）。比对期间有 session 正在写入时 search 组偶尔失败，重跑即过
 - 截图：`make screenshot`、`screenshot-search`、`screenshot-detail`、`screenshot-cost` 由 app 的 autoplay 自己走流程；`screenshot-clicks` 用 cliclick 真点击，坐标写在 `scripts/screenshot-clicks.sh`，改布局后要校对。都跑在真实索引上，输出到 `tmp/<date>-screenshots/`（`SHOT_DIR=` 可改）。各脚本截哪些图、怎么用 `ASM_AUTOPLAY_*` 指定 session 和查询，见 `kb/docs/gpui-kit-guide.md`「脚本化交互与截图」。`make screenshot-usage`（状态栏 Today、文件驱动的扫描 / 重建）例外：必须设 `ASM_DB`、`ASM_CLAUDE_DIR` 指向副本。`make screenshot-usage-view`（Usage 视图导览，18 张：范围、按小时 / 按天、悬停、点进某天、窄窗口、空状态、两步下钻、会话表窄窗口）要设 `ASM_DB`，账本放在它旁边。`make screenshot-resident`（菜单栏常驻：关窗、重开、菜单；`RESIDENT_CLICK=1` 改用真点击）和它的行为测试 `make test-screenshot-resident`：验收以退出码为准，不看日志里的 passed
 - 量耗时：搜索用 `ASM_BENCH_DB=<索引副本> cargo test -p agent-session-manager real_index_timings -- --ignored --nocapture`（`ASM_BENCH_QUERIES`、`ASM_BENCH_REGEX` 可换查询）；详情打开速度看 app 日志的 `detail:` 行（read / build / first frame），量的时候要停在 Conversation tab，停在 Metadata 上首帧要等切回来才打点。不要用截图脚本日志里的耗时，刚唤醒屏幕后的数字可以偏高 4–8 倍
-- 构建产物在 `~/Library/Caches/cargo-target`（全局 cargo 配置），不在 `./target`；`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒
-- 环境变量：`ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（默认 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`）、`ASM_STATE`（仅 app，默认为索引同目录的 `state.json`）、`ASM_FAVORITES_DIR`（覆盖共享配置中的收藏目录）、`ASM_TRASH_DIR`（取消收藏改用此目录，测试必设）、`ASM_USAGE_AUTOPLAY`（gate 目录，用文件驱动扫描 / 重建，见 gpui-kit-guide）、`ASM_USAGE_VIEW_AUTOPLAY`（Usage 视图导览）、`ASM_RESIDENT_AUTOPLAY`（菜单栏常驻流程）。验收时把 `ASM_DB` / `ASM_STATE` 指到 `tmp/`，可反复测冷启动而不动真实索引；账本跟着 `ASM_DB` 在同一目录，所以也不会动真实账本
+- 构建产物在 `~/Library/Caches/cargo-target`（全局 cargo 配置），不在 `./target`；`make bin` 打印二进制路径。首次构建约 1.5 分钟，增量约 2 秒。在导出的源码树里跑 cargo 要设自己的 `CARGO_TARGET_DIR`：几棵树共用这个目录时产物会互相覆盖，主 checkout 的测试和 `make install-cli` 可能用上别的源码
+- 环境变量：`ASM_CLAUDE_DIR`（默认 `$CLAUDE_CONFIG_DIR` 或 `~/.claude`）、`ASM_DB`（app 默认 `~/Library/Application Support/dev.reorx.AgentSessionManager/index.sqlite`；`asm` 没设时用同目录的 `index-cli.sqlite`，开发期和 app 的索引分开，免得两边 schema 版本不同来回整库重建，随 app 发布时再合并）、`ASM_STATE`（仅 app，默认为索引同目录的 `state.json`）、`ASM_FAVORITES_DIR`（覆盖共享配置中的收藏目录）、`ASM_TRASH_DIR`（取消收藏改用此目录，测试必设）、`ASM_USAGE_AUTOPLAY`（gate 目录，用文件驱动扫描 / 重建，见 gpui-kit-guide）、`ASM_USAGE_VIEW_AUTOPLAY`（Usage 视图导览）、`ASM_RESIDENT_AUTOPLAY`（菜单栏常驻流程）。验收时把 `ASM_DB` / `ASM_STATE` 指到 `tmp/`，可反复测冷启动而不动真实索引；账本跟着 `ASM_DB` 在同一目录，所以也不会动真实账本
 - Rust 由 mise 管理（版本锁在 `mise.toml`）；新机器先 `make setup`（含 Metal Toolchain）
 - 发布：`make release-local` 在本地走完整条链（产物在 `dist/release/`，不上传），`make test-release` 是发布脚本的行为测试。名字、最低系统、Sparkle 公钥集中在 `scripts/release/config.sh`。Sparkle 私钥（`~/Sync/apple-developer/sparkle/agent-session-manager_ed25519.key`）永远不要重新生成
 - `make icon`：把 `assets/icon/` 的两张 SVG 渲染成 `AppIcon.icns`；改了 SVG 要重跑，并提交生成的 `.icns`
@@ -68,6 +71,7 @@ M0–M4 和 1.0 发布已完成。下一个里程碑是 M5（主要剩实时监�
 - 解析器先写行为测试：fixture 在 `crates/core/tests/fixtures/`，由该目录的 `gen_fixtures.py` 生成（`uv run` 重跑并提交结果）；新记录类型先加进生成脚本再改 `parse.rs`
 - 改 `parse.rs::classify`（字节预过滤）前，按 M1 笔记的方法在真实数据上全量验证
 - `&RawValue` 不能放在 `#[serde(tag)]` / `untagged` / `flatten` 之下；记录和 block 都用「大结构体 + Option 字段 + match type」
+- 哪些记录被跳过、哪些 user 记录开回合，只由 `transcript.rs` 的 `RecordFilter` + `opens_turn` 决定，详情面板、导出、索引的解析器和扫描搜索共用，所以 `messages` 里 `kind = 'prompt'` 的行数就是回合数。回合规则的例外只写在 `transcript::is_human_input`（计划交接看 `planContent`，本地命令输出看开头标签），改它要提升 `SCHEMA_VERSION`。索引给每条有自己输入（`has_own_input`）的 user 记录写一行，追加扫描靠这些行的 uuid 接上过滤器；一条 assistant 记录可能写成 thinking 和 reply 两行
 - 改 `schema.sql` 必须同步 `db.rs` 的 `SESSION_COLUMNS` 和 `row_to_session` 的列序。索引没有迁移：打开时版本号不符，或磁盘上的 schema 与本版本建出的不一致，都会整库重建。schema 的变化会被自动发现；schema 看不出的变化要提升 `SCHEMA_VERSION`，包括改 `pricing.rs` 的价格和改解析结果（费用在索引时算好存进 `api_usage`，不重建就不会变）
 - 用量按 API 响应一行存在 `api_usage`（主键 `session_id, agent, msg_id`，subagent 文件的 `agent` 为文件名 stem）。`sessions` 上的费用 / token 列只由 `refresh_session_usage` 从这张表汇总写入，`upsert_session` 不写它们。同一次响应会被增量扫描切成两半，所以去重只能靠这张表，不能在 `SessionDelta` 里累加
 - `session_model_usage`（用量按模型 × fast × prompt 是否超过 `LONG_PROMPT` 分组）也只由 `refresh_session_usage` 重写，`SessionSummary::set_usage` 在内存里按同样规则分组（有测试断言两者一致）。启动时直接读这张表，不要改回读 session 时对 `api_usage` 现做 GROUP BY（冷缓存多 350ms）
@@ -129,6 +133,7 @@ plans / notes / sessions（当时的方案、实测与取舍），改到对应�
 - `kb/plans/2026-11-12-columns-and-cache-breaks.md` — 列开关、命中率、缓存失效的判定与原因；改表格列、`conversation.rs::cache_check` 或回合卡说明行前读
 - `kb/plans/2026-11-16-usage-stats/` — 用量统计四期（账本、常驻菜单栏、Usage 视图、下钻）：各期共用的口径（4:00 分日、按调用时间归日、In 的定义、账本只增不删）在 `index.md`，各期一份 spec；改账本、`usage.rs`、自动扫描、状态栏 Today、会话表的时间预设、常驻菜单栏（`resident.rs`）或 Usage 视图前读。各期的实现与验收在 `kb/sessions/2026-11-16-usage-p*-*.md`
 - `kb/plans/2026-11-16-cache-break-accuracy.md` — 失效判定的新规则：用量明细（`iterations`）、按 rewind 的祖先调用比较、请求记录（`api-request`）给出的原因、分段的缓存时长；改用量解析、失效判定（实现后在 `claude/cache.rs`）或回合卡失效文案前读
+- `kb/plans/2026-11-15-asm-skill-and-cli/` — asm skill 与 CLI 四期（找会话、缓存检查、可插拔文本索引、分发）：文本类别、会话级匹配等共用概念在 `index.md`，P1 的方案在 `session-search.md`；改 `asm` 的 search / session / projects、`transcript` 的阅读选项、`messages.kind` 或 skill 前读。P1 各任务的实现与验收在 `kb/sessions/2026-11-1*-asm-p1-*.md`
 - `kb/plans/2026-10-26-favorites.md` — 收藏快照、目录迁移、去重优先级、索引根目录守卫；改收藏流程前读
 - `kb/notes/2026-10-10-transcript-reader-xml.md`（导出格式）、`kb/notes/2026-10-10-transcript-reader.md`（压缩规则）；改导出内容前读
 - `kb/sessions/2026-10-28-release-1.0.md` — 1.0 发布的决定、升级测试证据、Sparkle 延后弹提示的原因

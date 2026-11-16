@@ -89,7 +89,7 @@ P1 和 P2 期间，在本机通过 `make` 安装 CLI，在本仓库里使用 ski
 - **旧命令改名，新命令占用原名**：`search` → `search-old`、`session` → `session-old`，输出逐字不变，`scripts/compare-with-python.sh` 改调新名字；新的 `search` / `session` 是面向 agent 的会话级命令（用户 2026-11-15 决定）。被否决：保留旧名另起 `find` / `show`。
 - **thinking 和 `other` 类别进全文索引**，工具输入输出仍靠扫描（数据量是对话文本的 10 倍以上，trigram 索引会到 GB 级），扫描加按字节预过滤（用户 2026-11-15 决定）。
 - **缓存失效在建索引时算好存表**，查询不读原始文件（用户 2026-11-15 决定）。判定逻辑只有一份，app 回合卡和索引共用。
-- **skill 名 `asm`，英文**，放在 `skills/asm/`；开发期间仓库里的 `.claude/skills/asm` 链接到它，本机 `make install-cli` 把 `asm` 链接到 `~/.local/bin`。
+- **skill 名 `asm`，英文**，放在 `skills/asm/`；开发期间仓库里的 `.claude/skills/asm` 链接到它，本机 `make install-cli` 把 release `asm` 复制到 `~/.local/bin`（不用链接，原因见 [session-search.md](session-search.md)「脚本与构建」）。
 - **`skills/asm/references/cli.md` 是 CLI 的规范**：每一期先改规范，再实现；core 的测试遍历 clap 命令树，规范里缺命令或参数就失败。
 - **对 agent 输出透明的证据而不是分数**：每个结果给出各文本类别的命中数和片段，由 agent 判断相关性。
 
@@ -102,7 +102,7 @@ P1 和 P2 期间，在本机通过 `make` 安装 CLI，在本仓库里使用 ski
 
 ### 实施步骤
 
-- [ ] P1 找会话，见 [session-search.md](session-search.md)
+- [x] P1 找会话，见 [session-search.md](session-search.md)（2026-11-17 完成）
 - [ ] P2 缓存检查，见 [cache-health.md](cache-health.md)
 - [ ] P3 可插拔文本索引，见 [pluggable-text-index.md](pluggable-text-index.md)（开工前先调研选型，补 Tech Design）
 - [ ] P4 分发，见 [distribution.md](distribution.md)（开工前补 Tech Design）
@@ -116,5 +116,5 @@ P1 和 P2 期间，在本机通过 `make` 安装 CLI，在本仓库里使用 ski
 
 ### 跨期的风险
 
-- 新命令要先增量扫描索引，app 开着时两个进程都会写同一个索引，SQLite 只等 2 秒锁。推测 app 正在全量扫描时 CLI 会报 database is locked（未复现）。P1 的处理：拿不到写锁就跳过扫描、只读查询，并在 stderr 说明。
+- 新命令要先增量扫描索引，和 app 写同一个索引时会争锁。P1 的处理：CLI 等锁 2 秒（app 的连接是默认的 5 秒），拿不到写锁就跳过扫描、用现有索引查询，并在 stderr 说明；新建或重建中的索引则等它建完（最多 60 秒）。开发期 CLI 默认用自己的 `index-cli.sqlite`（两边 schema 版本不同，共用会来回整库重建），只共用用量账本；P4 合并索引后争锁才常见，遗留的几处见 `kb/known-issues.md`。
 - CLI 规范和 skill 写成英文，但用户的查询多是中文；场景文档里的例子要中英文都有，避免 agent 只扩写英文同义词。

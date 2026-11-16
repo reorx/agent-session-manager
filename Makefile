@@ -143,5 +143,5 @@ release-local: build-release ## The whole release chain locally into dist/releas
 clean: ## Remove this project's build artifacts only (the target dir is shared across projects)
 	cargo clean -p $(APP) -p $(CORE)
 
-.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search screenshot-detail screenshot-cost screenshot-usage screenshot-usage-view bin asm install-cli transcript-reader build-transcript-reader parity icon clean \
+.PHONY: help setup build run run-autoplay dev dv dev-autoplay release check test clippy fmt screenshot screenshot-clicks screenshot-search screenshot-detail screenshot-cost screenshot-usage screenshot-usage-view screenshot-resident test-screenshot-resident bin asm install-cli transcript-reader build-transcript-reader parity icon clean \
 	build-release notarize-app dmg notarize appcast test-release release-local

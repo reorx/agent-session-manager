@@ -2,6 +2,42 @@
 
 > 当前 app 已知、待后续处理的问题：缺陷、简化实现、未验收项、待建流程。只反映最新状态——解决了就删掉条目，经过记到 `kb/sessions/`。
 
+## 会话表与 asm：闲置会话被 Claude Code 追加记录后，更新时间变成刚才
+
+- 记录：2026-11-16（asm P1-4 跑 parity 时发现，`kb/sessions/2026-11-16-asm-p1-cmds.md`「交给协调者」第 4 条）；2026-11-17 P1-7 验收实证（`kb/sessions/2026-11-17-asm-p1-accept.md` F1）
+- 新版 Claude Code（约 2.1.321）会往打开着但闲置的会话追加不带时间戳的 `permission-mode`、`session-owner`、`atis-latch` 记录，看上去每小时一次（推测，只看了几个会话）。`updated_at` 取记录文件的 mtime，于是这些会话在会话表的 Updated 列和按它的排序、时间过滤里，以及 `asm` 的 `updated`、`--days` / `--until`、按最近活动排序里，都像刚活动过。例：`36050a78` 最后一个回合在 11-15 11:52，`asm session` 的 updated 是 11-16 09:54。
+- 处理方向：`updated_at` 改用最后一条带时间戳的记录的时间，mtime 只用来判断文件变没变。`list` 的输出会变，要和 Python 脚本一起改（`make parity`），并提升 `SCHEMA_VERSION`。
+
+## asm：在 app 里换了收藏目录后，`asm` 的命令都报 RootsChanged 失败
+
+- 记录：2026-11-16（`index-cli.sqlite` 的连带影响，`kb/sessions/2026-11-16-asm-p1-cmds.md` 返工 R1「交给协调者」第 2 条）
+- 开发期 app 和 `asm` 各用一个索引（`index.sqlite`、`index-cli.sqlite`），收藏目录记在两者共用的 `config.json`，索引里的 `favorites_root` 却只有换目录的那一方会更新。在 app 里换目录后，`asm` 下次刷新时发现根目录不符，报 `RootsChanged: index roots differ; use --db or index --rebuild` 并 exit 1，直到有人跑 `asm index --rebuild`；skill 让 agent 不要自己跑 `asm index`，所以 agent 只能报错。反过来用 `asm favorites-dir` 换目录，app 下次扫描会整库重建一次（约 20 s）。
+- 处理方向：随 app 发布时把两个索引合并（asm 计划 P4），问题随之消失；在那之前可以让 `asm` 在只有 `favorites_root` 不符时自动重建。
+
+## 索引：app 打开或写索引失败后，扫描和重建请求被悄悄丢掉
+
+- 记录：2026-11-15（asm P1-1 返工，`kb/sessions/2026-11-15-asm-p1-cli.md` R1 / R2 / R4「交给协调者」；复核 R2-4，`tmp/2026-11-14-asm-skill-cli/reviews/asmcli-p1-rv-cli-r2.md`）
+- app 的 store 线程等锁 5 s，没有 `asm` 那样「拿不到锁就跳过刷新」的回退。打开索引时要重建、而另一个进程持锁超过 5 s，或者磁盘满、没有权限，store 线程报错后直接退出：状态栏有完整报错，但之后菜单里的扫描、重建都没有反应，只能重启 app。另外 `asm` 冷建索引要写 8–12 s，这期间菜单发起的扫描或重建以 busy 失败，下次扫描恢复。开发期 `asm` 默认用自己的 `index-cli.sqlite`，只有 `ASM_DB` / `--db` 指向 app 的索引时才碰得到；两个索引合并（P4）后会常见。
+- 处理方向：store 线程打开失败后留在循环里，下一个请求再试；手动扫描遇到 busy 也像自动扫描一样跳过并提示。
+
+## asm：重建索引的头几秒里启动的 `asm` 用几乎空的索引作答，不提示
+
+- 记录：2026-11-15（复核 R3-1，`tmp/2026-11-14-asm-skill-cli/reviews/asmcli-p1-rv-cli-r3.md`；`kb/sessions/2026-11-15-asm-p1-cli.md` 返工 R4「交给协调者」第 1 条）
+- 重建分两步：先 `clear_all` 清空，再单独一个扫描事务，而 `has_scanned` 只是扫描前读到的快照。`clear_all` 结束前约 2 s 内启动的 `asm` 照旧当作「扫描过」，把根目录和 history-only 行写进刚清空的索引，然后用它作答（exit 0，没有提示）；之后整个重建期间（真实数据约 17 s）别的 `asm` 也带着 busy 提示用这份残缺的索引作答。agent 会以为没有匹配。`cli.md` 说会等正在重建的索引，在这个窗口里不成立。要有人跑 `asm index --rebuild`（或共用索引时 app 重建）的同时有查询才会碰到。
+- 处理方向：清空和扫描放进同一个写事务，或清空时在 `meta` 写一个重建中的标记，查询方看到就等。
+
+## 索引：`--db` / `ASM_DB` 指错文件时，别的程序的 SQLite 库会被清空
+
+- 记录：2026-11-15（复核 R2-3，`tmp/2026-11-14-asm-skill-cli/reviews/asmcli-p1-rv-cli-r2.md`）
+- 打开索引时 schema 和本版本不一致就删掉全部表重建，不检查这是不是本应用的库。`--db` 或 `ASM_DB`（app 也读）误指到别的程序的 SQLite 文件，就会把它清空。`cli.md`「Only a file that is not an index at all … is deleted」容易让人以为别的库是安全的。
+- 处理方向：建库时写 `PRAGMA application_id`，打开时 id 不符且库里有表就报错、不清空；同时改 `cli.md` 那句。
+
+## asm：app 写账本时，`asm` 要等 5 s 才回退（索引锁只等 2 s）
+
+- 记录：2026-11-17（asm P1-6 实测，`kb/sessions/2026-11-16-asm-p1-skill.md`「交给协调者」第 5 条；用户定先记下，P4 合并索引时一起看）
+- `asm` 打开索引时等锁 2 s，拿不到就跳过刷新、用现有索引作答；但用量账本的连接用 `ledger.rs` 自己的 5 s busy timeout。app 或另一个 `asm` 正在写账本时，命令要 5 s 多才回退（实测持有账本写锁时 5.69 s 后 `index_refresh: "busy"`，exit 0），agent 连着调用时每条多等约 3 s。`cli.md` 写的是现状。
+- 处理方向：CLI 打开索引后把账本连接的 busy timeout 也设成 2 s，或在 P4 合并索引时统一。
+
 ## 窗口：700 pt 左右时会话表的状态栏文字重叠，详情面板被挤成半宽
 
 - 记录：2026-11-17（usage-p4-accept 复验与 usage-p4-drill 返工时发现，`tmp/2026-11-12-usage-stats/usage-p4-accept/report.md`）
@@ -75,11 +111,12 @@
 - 用户粘贴的长文本在记录里包在 `<pasted_content id="9c86">…</pasted_content>` 里。表格 Preview 列、详情标题和回合卡 prompt 的第一行都是这个标签，真正的内容要往下看；本机 2061 个 session 里有 72 个的第一条 prompt 以它开头（`tmp/2026-10-27-m4a-turn-cards/accept/pasted-count.py`）。
 - 处理方向（推测）：显示时剥掉标签外壳、保留内容，必要时加一个 `pasted` 小标签。First prompt / Preview 的文字也进 `asm list` 的输出，和 Python 脚本逐字比对（`make parity`），所以只在 app 显示层改，或者两边一起改。
 
-## 搜索：正则扫描远超 500ms 目标，30 天的数据要 6–8 秒
+## 搜索：扫描原始文件的搜索慢，app 的正则模式 30 天要 6–8 秒，`asm search` 搜工具输出在负载下约 2 秒
 
-- 记录：2026-09-28（复测 M3 的数字时发现；`kb/sessions/2026-09-28-m3-known-issues.md`）；2026-11-14 复测
-- 2026-09-28 本机 2.0GB 时，app 探针量到只搜 User + Assistant 250–310ms、加上 Tools 460–530ms，PRD 目标 500ms 以内。2026-11-14 数据已到 7.4GB，用 CLI 的正则搜索（`asm search` 无 `--index`）量到约 1 秒/GB：7 天 1.6GB 2.4s，30 天 5.1GB 6.0–7.7s，只搜 User + Assistant 与全搜一样慢，时间花在逐行解析 JSON 上（当时机器 load 5–6）。app 的正则模式用同一套逐行解析，推测同样慢，未在 app 里量。结果是流式出现的，首批行远早于结束。
-- 处理方向：每行先在原始字节上做字面量预过滤，通过了再解析 JSON；整份文件不含查询词时直接跳过。`kb/plans/2026-11-15-asm-skill-and-cli/session-search.md` 先在新的 `asm search` 上做，旧路径（app、`search-old`）之后再接，改完必须跑 `make parity`。
+- 记录：2026-09-28（复测 M3 的数字时发现；`kb/sessions/2026-09-28-m3-known-issues.md`）；2026-11-14 复测；2026-11-17 asm P1-7 验收量了新的 `asm search`（`kb/sessions/2026-11-17-asm-p1-accept.md` F4）
+- app 的正则模式和 `asm search-old`：2026-09-28 本机 2.0GB 时，app 探针量到只搜 User + Assistant 250–310ms、加上 Tools 460–530ms，PRD 目标 500ms 以内。2026-11-14 数据已到 7.4GB，用 CLI 的正则搜索量到约 1 秒/GB：7 天 1.6GB 2.4s，30 天 5.1GB 6.0–7.7s，只搜 User + Assistant 与全搜一样慢，时间花在逐行解析 JSON 上（当时机器 load 5–6）。app 的正则模式用同一套逐行解析，推测同样慢，未在 app 里量。结果是流式出现的，首批行远早于结束。
+- 新的 `asm search` 搜工具类别或用 `--regex` 时也扫原始文件，但先做字节预过滤（整份不含某个 TERM 的文件跳过，行里没有 TERM 的不解析）。P1-3 在 30 天 5.7GB 上量到中位数 0.86–2.0s；P1-7 验收时机器负载 3.5–6.5，`--in tool` 三组查询中位数 1.75 / 1.92 / 2.49s，2 秒的目标在边缘，没做空载复测。TERM 里有常见词（`error`）时文件跳不掉，接近 1 秒/GB。
+- 处理方向：app 的正则模式和 `search-old` 接上同样的预过滤（`kb/plans/2026-11-15-asm-skill-and-cli/session-search.md` 的 `search/prefilter.rs`），改完必须跑 `make parity`；`asm search` 要稳在 2 秒内的话，先空载复测，再看时间花在读文件还是解析上。
 
 ## 搜索：刚唤醒屏幕后的十几秒里查询耗时可以到平时的 4–8 倍，原因没有查明
 
