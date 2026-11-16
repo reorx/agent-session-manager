@@ -219,7 +219,7 @@ edition 2024 下，`fn f(cx: &App) -> impl IntoElement` 的返回值会捕获 `c
 | 操作 | `gpui_kit::test::TestWindowExt`：`press("cmd-f")`、`input("文字")`、`click(id)` |
 | 后台线程 | 先调 `cx.executor().allow_parking()`。测试调度器默认把别的线程发来的唤醒当成"测试不确定"而报错，而 store 和搜索线程是真线程 |
 | 等后台结果 | 真实时间轮询：`run_until_parked()` 后检查条件，不满足就睡 10ms 再看。`wait_for` 走的是测试时钟，等不到真线程 |
-| 定时器 | 防抖这类定时器走测试时钟，用 `cx.executor().advance_clock(..)` 推进 |
+| 定时器 | 防抖这类定时器走测试时钟，用 `cx.executor().advance_clock(..)` 推进。`cx.spawn` 里的 `timer(..)` 要等执行器第一次跑这个任务时才开始计时：输入之后先 `run_until_parked` 再 `advance_clock`，否则时钟推进了计时器还没建，它会在后面某次推进时钟时才触发（2026-11-16 一个审阅复现用例就因此在推进 30 秒时多跑了一次搜索，把表格滚回顶部）。按 Enter 立即搜索不会取消已排上的防抖搜索 |
 | 计时 | 要和定时器一起被 `advance_clock` 推进的时刻（自动扫描的 30 秒节流），记 `cx.background_executor().now()`，不用 `Instant::now()` |
 | 窗口激活 | 测试窗口创建时不是激活的。`window.activate_window()` 让它激活，`observe_window_activation` 的回调照常触发；要模拟「切走再回来」，再开一个窗口（`cx.add_window(\|_, _\| gpui_kit::EmptyView)`）激活它，再激活回来 |
 | 剪贴板 | 测试平台有自己的剪贴板：应用里 `cx.write_to_clipboard(..)` 写进去，测试里 `cx.read_from_clipboard()` 读出来，不碰系统剪贴板 |

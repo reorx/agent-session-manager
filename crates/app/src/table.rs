@@ -249,6 +249,13 @@ impl SessionTableDelegate {
         }
     }
 
+    /// All hits of a search repeated over the results on screen, in place of theirs (the table
+    /// is in search mode already, so the columns stay).
+    pub fn replace_hits(&mut self, hits: Vec<(SharedString, Arc<RowHit>)>) {
+        self.search = Some(hits.into_iter().collect());
+        self.recompute();
+    }
+
     /// The sessions a search should look into: whatever passes the filters, newest first.
     pub fn search_targets(&self) -> Vec<SearchTarget> {
         let mut rows: Vec<&Arc<SessionRow>> = self.rows.iter().filter(|r| self.filter.matches(r)).collect();

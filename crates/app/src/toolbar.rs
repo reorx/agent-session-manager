@@ -197,6 +197,7 @@ impl AppRoot {
     /// Search for what the box holds now, in the sessions the filters let through. The table
     /// keeps the previous results until the first ones of this search arrive.
     pub fn run_search(&mut self, cx: &mut Context<Self>) {
+        self.search_refresh = None;
         self.query = self.search.read(cx).value().trim().to_string().into();
         self.matcher = self.search_opts.matcher(&self.query);
         // the conversation is marked when it is read: read it again only for another search
@@ -215,6 +216,24 @@ impl AppRoot {
         self.search_seq = self.searcher.search(self.query.to_string(), self.search_opts.clone(), targets);
         self.search_pending = true;
         cx.notify();
+    }
+
+    /// A reload changed the rows under the results on screen: search for the same again, without
+    /// the user noticing. The table keeps the old results and the status bar their summary until
+    /// the new ones are all in; they then replace them in one go, and the table is not scrolled
+    /// (`on_refresh_events`). When the results on screen are not those of the box (it changed,
+    /// or the first results have not come yet) this is a new search.
+    pub(crate) fn refresh_search(&mut self, cx: &mut Context<Self>) {
+        let typed = self.search.read(cx).value().trim().to_string();
+        let shown = self.table.read(cx).delegate().search_active() && (!self.search_pending || self.search_refresh.is_some());
+        if typed != self.query.as_ref() || !shown {
+            self.run_search(cx);
+            return;
+        }
+        let targets = self.table.read(cx).delegate().search_targets();
+        self.search_seq = self.searcher.search(self.query.to_string(), self.search_opts.clone(), targets);
+        self.search_pending = true;
+        self.search_refresh = Some(Vec::new());
     }
 
     fn end_search(&mut self, cx: &mut Context<Self>) {
@@ -246,6 +265,10 @@ impl AppRoot {
         if current.is_empty() {
             return;
         }
+        if self.search_refresh.is_some() {
+            self.on_refresh_events(current, cx);
+            return;
+        }
         if std::mem::take(&mut self.search_pending) {
             self.show_search_results(true, cx);
         }
@@ -263,6 +286,36 @@ impl AppRoot {
             }
         }
         self.after_rows_changed(cx);
+        cx.notify();
+    }
+
+    /// Events of a refresh (`refresh_search`): hold the hits until it ends, then swap them in.
+    /// A session that is still found stays selected, and the table stays where it was scrolled.
+    fn on_refresh_events(&mut self, events: Vec<SearchEvent>, cx: &mut Context<Self>) {
+        let mut ended = false;
+        for ev in events {
+            match ev {
+                SearchEvent::Hits { hits, .. } => self.search_refresh.get_or_insert_default().extend(hits),
+                SearchEvent::Done { summary, .. } => {
+                    println!("search {:?} ({:?}): {summary:?}", self.query, self.search_opts.mode);
+                    self.search_summary = Some(summary);
+                    self.search_error = None;
+                    ended = true;
+                }
+                SearchEvent::Failed { message, .. } => {
+                    eprintln!("search: {message}");
+                    self.search_error = Some(message.into());
+                    ended = true;
+                }
+            }
+        }
+        if !ended {
+            return;
+        }
+        let hits = self.search_refresh.take().unwrap_or_default();
+        self.search_pending = false;
+        self.table.update(cx, |table, _| table.delegate_mut().replace_hits(hits));
+        self.relocate_selection(false, cx);
         cx.notify();
     }
 

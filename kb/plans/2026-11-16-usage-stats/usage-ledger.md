@@ -246,6 +246,7 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   - `roll_day(now)` 末尾总是调 `refresh_today(now)`，收到 `Usage` / `ScanDone`、窗口激活、定时器醒来都会调它；所以「今天」只有 `roll_day` 一个入口，Today 不会在换日之前按旧的一天算。
   - `auto_scan(trigger, cx)` 多一个触发来源参数，只用于日志（`auto-scan: timer` / `window activated`），返回是否发出了请求；计时用 `cx.background_executor().now()`（测试能用 `advance_clock` 推进）。菜单的 `rescan` 也置 `scan_in_flight`；`scan_in_flight` 初值为 true（启动扫描）。
   - store 侧的请求处理抽成 `Worker::serve`，错误在那里变成 `Failed` 或 `ScanSkipped`。
+  - **返工 R1（2026-11-16）**：安静的扫描不转发 `Progress`，`Session` 先攒在 store 线程，事务提交后才发。原来等锁时界面已经收到 `Progress` 变成 `indexing 3/4`，跳过后也没有复原；账本被锁时更糟：索引写完、提交前写账本失败而回滚，回滚掉的行已经发到了表格。现在跳过的安静扫描只发一条 `ScanSkipped`，索引被锁和账本被锁都一样（core `887ef2c` 起账本的 BUSY 也被 `is_busy` 认出）。用例 `store.rs` 的 `a_quiet_scan_that_finds_the_index_busy_is_skipped_without_a_failure`、`a_quiet_scan_that_finds_the_ledger_busy_changes_nothing_on_screen`，`keyboard_tests.rs` 的 `an_automatic_scan_that_finds_the_index_busy_changes_nothing_on_screen`（等锁期间和跳过之后都核对状态栏和表格）。
   - 验收用的 autoplay：`ASM_USAGE_AUTOPLAY=<gate 目录>`，脚本 `make screenshot-usage`（用法见 `kb/docs/gpui-kit-guide.md`「脚本化交互与截图」）。
 - `kb/docs/`、`AGENTS.md`：见总 plan「各期都要更新的文档」。
 
@@ -316,6 +317,7 @@ app：
 - **账本上线前索引很可能先被重建。** 规划时工作区里还有把 `SCHEMA_VERSION` 从 5 提升到 6 的改动（`asm` CLI 改了 prompt 的判定）；core 实现时已作为 `bd56682` 提交。它合并后，任何用新构建打开真实 `index.sqlite` 的动作（`make dev`、截图脚本、发版后的应用）都会重建索引，已删 session 的用量随之丢失；`asm` 自己用的是 `index-cli.sqlite`，不受影响。备份 `tmp/2026-11-12-usage-stats/index-copy.sqlite` 里有这批用量，实施步骤 7 负责把它找回来。账本这一期合并之后就不再有这个问题：重建前会先抢救。
 - **自动扫描后表格会滚回选中的行。** `after_rows_changed` → `select_row` 在选中的 session 换了位置时调 `set_selected_row`，它会顺带滚动（gpui-kit 没有只选中不滚动的入口）。手动扫描时这不是问题，每 10 分钟自动来一次就可能在用户往下翻的时候把表格拉回去。实现时先实测；确实打扰的话，自动扫描引起的刷新里，选中行不在当前可见范围内时不调 `set_selected_row`，只更新 `selected`。
   - **实测与处理（2026-11-16）**：无界面测试能复现：窗口压到 260px 高、选中第一行、滚到底，往排在最后的记录文件追加一条后自动扫描，滚动位置从 −86px 回到 0。没有照上面的做法（只更新 `selected`、不调 `set_selected_row`）：那样表格的选中行号还指着旧位置，高亮会落在另一个 session 上。改为照常 `set_selected_row`，但在同一个 update 里把它放进 `vertical_scroll_handle` 的延迟滚动请求拿掉（`deferred_scroll_to_item` 是公开字段，下一帧 prepaint 才执行）。范围是所有扫描引起的刷新（含菜单的 Scan for Changes），只对「同一个 session 换了行」生效；新选中的行、过滤和排序照常滚动。用例 `keyboard_tests.rs::an_automatic_scan_does_not_scroll_the_table_back_to_the_selected_row`。真实窗口里的手感留给实机验收。
+  - **返工 R2（2026-11-16）**：上面只管了会话表。搜索模式下扫描结束后的整表重读会重搜，原来走普通的 `run_search`，第一批结果到达时 `show_search_results(true)` 清空表格并 `scroll_to_row(0)`。改为 `refresh_search`：同一个查询再搜一次，命中攒到搜索结束一次换上（`replace_hits`），不滚动，状态栏留着旧摘要直到新的到达，再按 `relocate_selection(false)` 重新定位选中（选中的 session 不在新结果里时照旧退回第一行）。用户发起的搜索不变。用例 `an_automatic_scan_does_not_scroll_search_results_back_to_the_top`、`a_selected_session_gone_from_refreshed_results_hands_the_selection_to_the_first_row`。审阅者的复现用例里，输入触发的防抖搜索在测试推进 30 秒时钟时才跑，自己就会滚回顶部；正式用例先让它跑完，再在修复前的代码上确认重读这条路径本身也会滚回顶部。
 - **两个索引的解析版本不同。** `index-cli.sqlite` 的 schema 比已发布的 app 新，两边对同一次调用解析出的值如果不同，账本里是后写的那个。目前用量字段两边相同。
 - **账本和会话表的数字可以不同**：只增不删带来的（subagent 被单独删、文件被重写）。这是定下的语义，不登记为问题。
 - **核对只比调用数。** 账本里某个 session 多出几行（subagent 被单独删过）、同时又缺了另外几行时，两边的数可能相等或账本更大，这次缺的就补不上。要同时发生「只增不删造成的多」和「崩溃造成的少」，而后者在先提交账本的顺序下本来就不该出现，所以不为它付逐行比对的代价（110 ms，且随历史变慢）。

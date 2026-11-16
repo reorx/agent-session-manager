@@ -9,7 +9,8 @@
 //! Right after the first `Loaded` comes `Usage { full: true }`: every session in the usage ledger
 //! (or `UsageUnavailable`). Every scan then sends `Usage { full: false }` with the ledger's rows
 //! of the sessions it wrote, before its `ScanDone`. A quiet scan (`Scan { quiet: true }`, the
-//! app's automatic ones) that finds the index locked by another process ends in `ScanSkipped`
+//! app's automatic ones) sends no `Progress`, and its `Session`s only once it committed; one that
+//! finds the index or the usage ledger locked by another process ends in `ScanSkipped` alone
 //! instead of `Failed`.
 //!
 //! A second thread, `asm-reader`, reads transcripts for the detail panel straight from the file
@@ -42,8 +43,9 @@ pub enum StoreRequest {
     Favorite(String),
     Unfavorite(String),
     SetFavoritesDir(Option<PathBuf>),
-    /// An incremental scan. `quiet` ones (automatic) give up without a `Failed` when another
-    /// process holds the index (`ScanSkipped`).
+    /// An incremental scan. `quiet` ones (automatic) show nothing until they are through (no
+    /// `Progress`, `Session`s after the commit) and give up without a `Failed` when another
+    /// process holds the index or the ledger (`ScanSkipped`).
     Scan { quiet: bool },
     Rebuild,
 }
@@ -57,8 +59,8 @@ pub enum StoreEvent {
     Session(SessionSummary),
     /// `quiet`: the scan was asked for with `Scan { quiet: true }`.
     ScanDone { report: ScanReport, stats: IndexStats, quiet: bool },
-    /// A quiet scan found the index locked by another process and did nothing; the next one
-    /// tries again.
+    /// A quiet scan found the index or the usage ledger locked by another process and gave up
+    /// (rolled back; it sent nothing before this); the next one tries again.
     ScanSkipped,
     /// Usage ledger rows: every session in the ledger (`full`, once after the first `Loaded`),
     /// or those of the sessions a scan wrote (always before its `ScanDone`). Sessions a scan did
@@ -249,7 +251,7 @@ impl Worker {
     }
 
     /// One request; a failure becomes `Failed`, or `ScanSkipped` for a quiet scan that found the
-    /// index busy.
+    /// index or the ledger busy.
     fn serve(&mut self, request: StoreRequest) {
         let quiet = matches!(request, StoreRequest::Scan { quiet: true });
         let result = match request {
@@ -318,15 +320,22 @@ impl Worker {
         }
         let events = self.events.clone();
         let mut written = Vec::new();
-        let result = self.indexer.scan_streaming(&mut self.db, &mut |ev| {
-            let event = match ev {
-                ScanEvent::Progress(p) => StoreEvent::Progress(p),
-                ScanEvent::Session(s) => {
-                    written.push(s.id.clone());
-                    StoreEvent::Session(s)
+        // A quiet scan shows nothing until it is through: no progress, and the rows it wrote only
+        // once its transaction committed (one that waited for a lock and gave up rolled back).
+        let mut held = Vec::new();
+        let result = self.indexer.scan_streaming(&mut self.db, &mut |ev| match ev {
+            ScanEvent::Progress(_) if quiet => {}
+            ScanEvent::Progress(p) => {
+                events.send_blocking(StoreEvent::Progress(p)).ok();
+            }
+            ScanEvent::Session(s) => {
+                written.push(s.id.clone());
+                if quiet {
+                    held.push(s);
+                } else {
+                    events.send_blocking(StoreEvent::Session(s)).ok();
                 }
-            };
-            events.send_blocking(event).ok();
+            }
         });
         let report = match result {
             Err(e) if e.is::<agent_session_core::index::indexer::RootsChanged>() => {
@@ -335,6 +344,9 @@ impl Worker {
             }
             result => result?,
         };
+        for s in held {
+            self.events.send_blocking(StoreEvent::Session(s))?;
+        }
         if let Some(sessions) = self.db.ledger_usage(Some(&written))?.filter(|s| !s.is_empty()) {
             self.events.send_blocking(StoreEvent::Usage { sessions, full: false })?;
         }
@@ -762,31 +774,73 @@ mod tests {
         assert_eq!(usage.sessions.get(S2), Some(&before), "the UI keeps S2's usage");
     }
 
+    /// A worker on a fixture copy whose index holds the fixture already, without the start-up
+    /// thread: the test sends its requests through `serve` and reads every event.
+    fn scanned_worker(dir: &std::path::Path) -> (Worker, ClaudeDir, Receiver<StoreEvent>) {
+        let (tx, events) = async_channel::unbounded();
+        let favorites = FavoritesDir { root: dir.join("favorites"), trash: favorites::Trash::Dir(dir.join("trash")) };
+        let claude = fixture_copy(dir);
+        let mut worker = Worker::open(claude.clone(), &dir.join("index.sqlite"), favorites, tx).unwrap();
+        worker.serve(StoreRequest::Scan { quiet: false });
+        let seen: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(seen.iter().any(|e| matches!(e, StoreEvent::ScanDone { .. })), "{seen:?}");
+        (worker, claude, events)
+    }
+
+    fn drain(events: &Receiver<StoreEvent>) -> Vec<StoreEvent> {
+        std::iter::from_fn(|| events.try_recv().ok()).collect()
+    }
+
     #[test]
     fn a_quiet_scan_that_finds_the_index_busy_is_skipped_without_a_failure() {
         let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("index.sqlite");
-        let (tx, events) = async_channel::unbounded();
-        let favorites = FavoritesDir { root: dir.path().join("favorites"), trash: favorites::Trash::Dir(dir.path().join("trash")) };
-        let mut worker = Worker::open(fixture_copy(dir.path()), &db_path, favorites, tx).unwrap();
+        let (mut worker, claude, events) = scanned_worker(dir.path());
         worker.db.set_busy_timeout(Duration::from_millis(100)).unwrap();
-        // asm scanning the same index
-        let writer = Db::open(&db_path).unwrap();
+        // something to index, and asm scanning the same index
+        crate::keyboard_tests::append_response(claude.root(), S1, "msg_busy", "claude-opus-5", chrono::Utc::now().timestamp_millis());
+        let writer = Db::open(&dir.path().join("index.sqlite")).unwrap();
         writer.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
-        let drain = || std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
 
         worker.serve(StoreRequest::Scan { quiet: true });
-        let seen = drain();
-        assert!(matches!(seen.last(), Some(StoreEvent::ScanSkipped)), "{seen:?}");
-        assert!(!seen.iter().any(|e| matches!(e, StoreEvent::Failed(_) | StoreEvent::ScanDone { .. })), "{seen:?}");
+        let seen = drain(&events);
+        assert!(matches!(&seen[..], [StoreEvent::ScanSkipped]), "no progress, no failure, nothing at all: {seen:?}");
 
         worker.serve(StoreRequest::Scan { quiet: false });
-        assert!(matches!(drain().last(), Some(StoreEvent::Failed(m)) if m.contains("locked")), "a scan the user asked for says why it failed");
+        let seen = drain(&events);
+        assert!(seen.iter().any(|e| matches!(e, StoreEvent::Progress(_))), "a scan the user asked for shows its progress: {seen:?}");
+        assert!(matches!(seen.last(), Some(StoreEvent::Failed(m)) if m.contains("locked")), "and says why it failed: {seen:?}");
 
         writer.conn().execute_batch("COMMIT").unwrap();
         worker.serve(StoreRequest::Scan { quiet: true });
-        let seen = drain();
-        assert!(matches!(seen.iter().find(|e| matches!(e, StoreEvent::ScanDone { .. })), Some(StoreEvent::ScanDone { quiet: true, .. })), "{seen:?}");
+        let seen = drain(&events);
+        assert!(!seen.iter().any(|e| matches!(e, StoreEvent::Progress(_))), "a quiet scan shows no progress: {seen:?}");
+        let session = seen.iter().position(|e| matches!(e, StoreEvent::Session(s) if s.id == S1));
+        let usage = seen.iter().position(|e| matches!(e, StoreEvent::Usage { full: false, .. }));
+        let done = seen.iter().position(|e| matches!(e, StoreEvent::ScanDone { quiet: true, .. }));
+        assert!(session.is_some() && session < usage && usage < done, "what it wrote, its usage, then ScanDone: {seen:?}");
+    }
+
+    #[test]
+    fn a_quiet_scan_that_finds_the_ledger_busy_changes_nothing_on_screen() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut worker, claude, events) = scanned_worker(dir.path());
+        crate::keyboard_tests::append_response(claude.root(), S1, "msg_ledger_busy", "claude-opus-5", chrono::Utc::now().timestamp_millis());
+        // another process writing the ledger: the scan parses and writes the index, then cannot
+        // write the ledger before its commit and rolls back
+        let other = tempfile::tempdir().unwrap();
+        let writer = Db::open(&other.path().join("index.sqlite")).unwrap();
+        let ledger = agent_session_core::claude::paths::ledger_path(&dir.path().join("index.sqlite"));
+        writer.conn().execute_batch(&format!("ATTACH '{}' AS l; BEGIN; INSERT INTO l.meta (key, value) VALUES ('test-lock', '1');", ledger.display())).unwrap();
+
+        worker.serve(StoreRequest::Scan { quiet: true });
+        let seen = drain(&events);
+        assert!(matches!(&seen[..], [StoreEvent::ScanSkipped]), "rows of a scan that rolled back never reach the table: {seen:?}");
+
+        writer.conn().execute_batch("ROLLBACK").unwrap();
+        worker.serve(StoreRequest::Scan { quiet: true });
+        let seen = drain(&events);
+        assert!(seen.iter().any(|e| matches!(e, StoreEvent::Session(s) if s.id == S1)), "the next one writes it: {seen:?}");
+        assert!(seen.iter().any(|e| matches!(e, StoreEvent::ScanDone { quiet: true, .. })), "{seen:?}");
     }
 
     #[test]

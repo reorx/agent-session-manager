@@ -55,7 +55,7 @@ use crate::actions::{CopyResume, CopySessionId, ExportTranscript, HideProject, O
 use crate::conversation::{Card, ConversationView};
 use crate::detail::{DETAIL_W, DetailState, DetailTab, Load};
 use crate::model::{DisplayMode, Filter, Kind, ModelEntry, ProjectEntry, RangePreset, SessionRow, kind_counts, model_entries, project_entries, split_hidden, today_at};
-use crate::search::{SearchMode, SearchOptions, SearchSummary, Searcher};
+use crate::search::{RowHit, SearchMode, SearchOptions, SearchSummary, Searcher};
 use crate::settings::{SortDir, ViewState, default_state_path};
 use crate::store::{Store, StoreEvent, StoreRequest};
 use crate::table::{PREVIEW_MIN_W, ROW_H, SessionTableDelegate, ShowAllColumns, ToggleColumn};
@@ -97,7 +97,7 @@ const AUTO_SCAN_MIN_GAP: Duration = Duration::from_secs(30);
 const AUTO_SCAN_IDLE: Duration = Duration::from_secs(600);
 
 /// What the index is doing, shown in the middle of the status bar.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum IndexStatus {
     Loading,
     Scanning { done: usize, total: usize },
@@ -139,8 +139,12 @@ pub struct AppRoot {
     matcher: Option<Matcher>,
     /// Events of any other search are stale.
     search_seq: u64,
-    /// The table still shows what came before `search_seq`; its first event swaps the results.
+    /// The table still shows what came before `search_seq`; its first event swaps the results
+    /// (a refresh: its end does).
     search_pending: bool,
+    /// The running search repeats the one on screen after a reload (`refresh_search`): its hits
+    /// gather here and replace the results in one go once it is done. `None`: a new search.
+    search_refresh: Option<Vec<(SharedString, Arc<RowHit>)>>,
     search_summary: Option<SearchSummary>,
     search_error: Option<SharedString>,
     range: RangePreset,
@@ -368,6 +372,7 @@ impl AppRoot {
             matcher: None,
             search_seq: 0,
             search_pending: false,
+            search_refresh: None,
             search_summary: None,
             search_error: None,
             range: saved.range,
@@ -514,7 +519,7 @@ impl AppRoot {
         }
         // a reload follows a scan that changed the index: the results on screen may be out of date
         if reloaded && self.searching() {
-            self.run_search(cx);
+            self.refresh_search(cx);
         }
         cx.notify();
     }

@@ -50,11 +50,11 @@ store 线程启动后先自己走完一遍固定流程，然后才开始处理�
 | `Loaded` | 索引里的全部行 | 整表替换 |
 | `Usage { full: true }` | 账本里全部 session 的小时汇总，紧跟第一个 `Loaded` | 整份替换 `UsageData`，算今天的费用 |
 | `UsageUnavailable` | 这次运行没有账本（更新版本写的账本，或读不了） | 状态栏 `Today —` |
-| `Progress` | 已处理与总文件数 | 状态栏进度 |
-| `Session` | 扫描刚写入的一行（新增或有变化） | 按 session id 新增或替换 |
+| `Progress` | 已处理与总文件数；安静的扫描不发 | 状态栏进度 |
+| `Session` | 扫描刚写入的一行（新增或有变化）；安静的扫描等事务提交后才一起发 | 按 session id 新增或替换 |
 | `Usage { full: false }` | 这次扫描写过的 session 在账本里的小时汇总，在 `ScanDone` 之前；没有就不发 | 按 session id 替换，算今天的费用 |
 | `ScanDone` | 扫描报告、消息数、索引大小、是不是安静的扫描（`quiet`） | 状态栏摘要（安静的扫描什么都没变时不改）；结束扫描计时 |
-| `ScanSkipped` | 安静的扫描发现索引被另一个进程锁着，什么都没做 | 只结束扫描计时，界面没有反应 |
+| `ScanSkipped` | 安静的扫描等不到索引或账本的锁，回滚了；在它之前这次扫描什么都没发 | 只结束扫描计时，界面没有反应 |
 | `Conversation` | 读取线程读好的回合卡（`ConversationView`）或出错信息，带 `seq` 和读取 / 转换耗时 | 见下文"详情的读取" |
 | `FavoriteChanged` | 收藏 / 取消收藏完成 | 通知提示；行沿 Session / Loaded 更新 |
 | `FavoritesDirChanged` | 新目录、迁移与跳过数 | 更新路径并通知 |
@@ -125,8 +125,9 @@ Rebuild
 | 上一次扫描（任何来源，包括启动时那次和菜单发起的）还没结束，或结束不到 `AUTO_SCAN_MIN_GAP`（30 秒），就跳过 | 切窗口很频繁；扫描排在 store 线程上，叠在一起会让收藏等请求排队 |
 | 发的是 `Scan { quiet: true }`，不把状态栏改成 `loading index…` | 没有变化时界面不应有任何反应 |
 | 安静的扫描什么都没变时，`ScanDone` 不改状态栏中间的摘要 | 同上；菜单发起的扫描照旧写「index up to date」 |
-| 安静的扫描遇到索引被锁（`is_busy`），store 线程发 `ScanSkipped` 而不是 `Failed` | `asm` 正好在扫描时不报错，等下一次 |
-| 有变化时和手动扫描一样流式更新、整表重读、搜索重跑 | 规则只有一套 |
+| 安静的扫描不发 `Progress`，写过的行先攒在 store 线程，事务提交后再发 | 等锁的那几秒状态栏不变成 `indexing n/m`；等不到锁时整个事务回滚，回滚掉的行不能进表格。账本也会被锁：索引写完、提交前写账本时等不到，同样回滚 |
+| 安静的扫描遇到索引或账本被锁（`is_busy`），store 线程只发 `ScanSkipped`，不发 `Failed` | `asm` 正好在扫描时不报错，等下一次 |
+| 有变化时和手动扫描一样整表重读、搜索重跑 | 规则只有一套；重搜是静默的，见「搜索」 |
 
 计时用 `cx.background_executor().now()`，不用 `Instant::now()`：测试里 `advance_clock` 能推进它，30 秒和 10 分钟的用例不用真等（`keyboard_tests.rs` 的 `scans_triggered_within_thirty_seconds_run_once`、`ten_minutes_later_…`）。`scan_in_flight` 在 `AppRoot::new` 里就是 true（store 线程打开索引后马上扫描），由 `ScanDone` / `ScanSkipped` / `Failed` 清掉；所以启动时窗口第一次激活不会多扫一次。
 
@@ -160,7 +161,7 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 |---|---|
 | 选中换了 session | 详情清空成骨架（`DetailState::begin_loading`，上一个 session 的内容不留在屏幕上，Metadata 的文件列表也收起），带当前搜索的 `Matcher` 发请求（有记录文件的 `read_conversation`，History session 的 `read_history`），记下返回的 `seq` 和这次请求的 pattern |
 | 收到 `Conversation` | `seq` 等于最新一次请求、`session_id` 是当前选中的才用。屏幕上已经有这个 session 的对话（为新搜索重读）就保留展开状态，否则全部折叠；都停在第一个命中位置，没有搜索时回到顶部 |
-| 搜索重跑（`run_search`） | 新 `Matcher::pattern()` 和最近一次请求的 pattern 不同才重读；过滤变化、扫描后整表重读引起的重搜 pattern 不变，不读文件（`keyboard_tests.rs` 有测试）。重读期间旧内容留在屏幕上 |
+| 搜索重跑（`run_search`；扫描后的 `refresh_search` 不改查询，不读） | 新 `Matcher::pattern()` 和最近一次请求的 pattern 不同才重读；过滤变化、扫描后整表重读引起的重搜 pattern 不变，不读文件（`keyboard_tests.rs` 有测试）。重读期间旧内容留在屏幕上 |
 | 读取失败 | 对话区显示事件里的说明 |
 
 每次换 session，第一帧画出对话时 stdout 打一行 `detail: <短 id> <大小> read <ms> build <ms> first frame <ms>`，起点是 `select_row`，终点是这一帧的 paint（列表后面的一个 `canvas` 在 paint 阶段打这行）。debug 下 70MB 的 `5f6eea99` 约 read 21ms、build 0.7ms、first frame 50–70ms。
@@ -210,6 +211,16 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 
 流式到达的 `Session` 不触发重搜，原因见上文"扫描之后为什么要整表重读"第 2 点。
 
+### 扫描后的重搜是静默的
+
+前三种是用户发起的新搜索：第一批结果到达时清空表格换上新结果并滚到顶部，状态栏先显示 `searching…`。扫描后的整表重读不是：自动扫描每 10 分钟就可能来一次，用户正往下翻搜索结果时不能被拉回顶部。所以重读走 `refresh_search`：
+
+- 同样的查询再搜一次，命中先攒在 `AppRoot::search_refresh` 里；表格留着旧结果，状态栏留着旧摘要
+- 搜索结束（`Done` 或 `Failed`）时用 `replace_hits` 一次换上全部命中，不滚动，再按 `relocate_selection(false)` 重新定位选中：还在结果里就留在原 session 上，不在了照旧退回第一行（这时会滚到第一行）
+- 只在屏幕上的就是搜索框里这个查询的结果时才这样做；搜索框已经改了、或者新搜索的第一批结果还没到，就当新搜索跑。用户发起的任何搜索都会清掉 `search_refresh`，被取代的静默重搜的事件按序号丢弃
+
+`keyboard_tests.rs` 的 `an_automatic_scan_does_not_scroll_search_results_back_to_the_top` 和 `a_selected_session_gone_from_refreshed_results_hands_the_selection_to_the_first_row` 锁住这两点。
+
 ## 选中
 
 选中跟着 session 走，不跟着行号走。数据、过滤条件、搜索结果或排序（包括点表头）变化后，按下面的顺序决定选中哪一行：
@@ -223,7 +234,7 @@ store 线程是单循环，扫描进行中到达的请求（收藏、取消收�
 - **扫描正在流式填表、且当前没有选中时，不自动选第一行。** 设置选中行会顺带滚动到该行，而扫描期间第一行一直在变。等扫描结束再选
 - **启动时要恢复上次的选中，但那一行还没出现时，先等。** 行出现就选中它；扫描结束仍然没有，才按第 2 条选第一行
 
-**扫描引起的刷新不把表格滚回选中的行。** 自动扫描每 10 分钟就可能来一次，选中的 session 因为别的 session 排到前面而换了行号时，`set_selected_row` 会顺带把它滚进视口，用户正往下翻的表格就被拉回去。所以 `on_store_events` 走 `relocate_selection(false)`：选中的还是同一个 session、只是换了行时，照样 `set_selected_row`（高亮跟着 session 走），但在同一个 update 里把它留在列表滚动句柄上的延迟滚动请求（`vertical_scroll_handle.0.deferred_scroll_to_item`）拿回去，下一帧就不会滚。新选中的行（恢复上次的选中、退回第一行）照常滚进视口；过滤、排序引起的重新定位也照常滚动。`keyboard_tests.rs` 的 `an_automatic_scan_does_not_scroll_the_table_back_to_the_selected_row` 锁住这一点（不这样做时滚动位置会从 −86px 回到 0）。
+**扫描引起的刷新不把表格滚回选中的行。** 自动扫描每 10 分钟就可能来一次，选中的 session 因为别的 session 排到前面而换了行号时，`set_selected_row` 会顺带把它滚进视口，用户正往下翻的表格就被拉回去。所以 `on_store_events` 走 `relocate_selection(false)`：选中的还是同一个 session、只是换了行时，照样 `set_selected_row`（高亮跟着 session 走），但在同一个 update 里把它留在列表滚动句柄上的延迟滚动请求（`vertical_scroll_handle.0.deferred_scroll_to_item`）拿回去，下一帧就不会滚。新选中的行（恢复上次的选中、退回第一行）照常滚进视口；过滤、排序引起的重新定位也照常滚动。搜索模式下扫描还会引起重搜，那条路径见「扫描后的重搜是静默的」。`keyboard_tests.rs` 的 `an_automatic_scan_does_not_scroll_the_table_back_to_the_selected_row` 锁住这一点（不这样做时滚动位置会从 −86px 回到 0）。
 
 点表头排序是表格组件自己做的，它重排行却不改选中的行号。所以 `AppRoot` 观察表格时记下上一次的排序，一变就按上面的规则重新定位选中；记录要在重新定位之前更新，因为重新定位会再通知一次表格。
 

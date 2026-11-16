@@ -850,3 +850,130 @@ fn an_automatic_scan_does_not_scroll_the_table_back_to_the_selected_row(cx: &mut
     });
     assert_eq!(offset(cx), scrolled, "the table stays where the user scrolled to");
 }
+
+#[gpui_kit::test]
+fn an_automatic_scan_that_finds_the_index_busy_changes_nothing_on_screen(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    // asm scanning the same index, with something for this scan to write
+    let writer = agent_session_core::index::Db::open(&h._dir.path().join("index.sqlite")).unwrap();
+    append_response(&h._dir.path().join("claude"), S1, "msg_busy", "claude-opus-5", now_ms());
+    writer.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
+    cx.executor().advance_clock(crate::AUTO_SCAN_MIN_GAP);
+    let before = h.app.update(cx, |app, cx| {
+        app.index_status = IndexStatus::Idle("previous summary".into());
+        assert!(app.auto_scan("test", cx));
+        updated_at(app, cx, S1)
+    });
+    let unchanged = |app: &AppRoot, cx: &App| {
+        assert!(matches!(&app.index_status, IndexStatus::Idle(s) if s == "previous summary"), "status: {:?}", app.index_status);
+        assert_eq!(updated_at(app, cx, S1), before, "nothing of the skipped scan reaches the table");
+    };
+    for _ in 0..800 {
+        cx.run_until_parked();
+        if h.app.read_with(cx, |app, cx| {
+            unchanged(app, cx);
+            !app.scan_in_flight
+        }) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    writer.conn().execute_batch("ROLLBACK").unwrap();
+    h.app.read_with(cx, |app, cx| {
+        assert!(!app.scan_in_flight, "the scan gave up on the lock");
+        unchanged(app, cx);
+    });
+    // the next one writes it
+    cx.executor().advance_clock(crate::AUTO_SCAN_MIN_GAP);
+    h.app.update(cx, |app, cx| assert!(app.auto_scan("test", cx)));
+    wait_until(cx, &h, "S1 written by the next scan", |app, cx| updated_at(app, cx, S1) != before);
+}
+
+#[gpui_kit::test]
+fn an_automatic_scan_does_not_scroll_search_results_back_to_the_top(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    // enough matching sessions for the results to scroll
+    let project = h._dir.path().join("claude/projects/-Users-me-Code-alpha");
+    let template = std::fs::read_to_string(project.join(format!("{S1}.jsonl"))).unwrap();
+    for n in 10..22 {
+        let id = format!("aaaaaaaa-aaaa-4bbb-8ccc-{n:012}");
+        std::fs::write(project.join(format!("{id}.jsonl")), template.replace(S1, &id)).unwrap();
+    }
+    let base = h.app.update(cx, |app, cx| {
+        app.rescan(false, cx);
+        app.scans_done
+    });
+    wait_until(cx, &h, "the extra sessions", |app, cx| app.scans_done > base && shown_rows(app, cx) > 12);
+
+    press(cx, &h, "cmd-f");
+    type_text(cx, &h, "e");
+    // The typed query is searched once its debounce timer is due, and that timer starts only when
+    // the executor first runs the task. Left pending, it would fire when the test moves the clock
+    // for the automatic scan, and a new search scrolls to the top on its own.
+    cx.run_until_parked();
+    cx.executor().advance_clock(SEARCH_DEBOUNCE);
+    wait_until(cx, &h, "search results", |app, cx| search_done(app, cx) && shown_rows(app, cx) > 12);
+    cx.simulate_window_resize(h.window, gpui_kit::size(gpui_kit::px(1000.), gpui_kit::px(220.)));
+    let selected = h.app.update(cx, |app, cx| {
+        app.select_row(0, cx);
+        let last = app.table.read(cx).delegate().ix.len() - 1;
+        app.table.update(cx, |table, cx| table.scroll_to_row(last, cx));
+        app.selected.as_ref().unwrap().id.clone()
+    });
+    cx.run_until_parked();
+    let offset = |cx: &mut TestAppContext| h.app.read_with(cx, |app, cx| app.table.read(cx).vertical_scroll_handle.0.borrow().base_handle.offset());
+    let before = offset(cx);
+    assert!(before.y < gpui_kit::px(0.), "the results scrolled down: {before:?}");
+
+    let (seq, summary) = h.app.read_with(cx, |app, _| (app.search_seq, app.search_summary.clone().unwrap()));
+    append_response(&h._dir.path().join("claude"), S1, "msg_search", "claude-opus-5", now_ms());
+    cx.executor().advance_clock(crate::AUTO_SCAN_MIN_GAP);
+    cx.run_until_parked();
+    assert_eq!(offset(cx), before, "nothing pending moves the results before the scan");
+    h.app.update(cx, |app, cx| assert!(app.auto_scan("test", cx)));
+    // the scan, its reload and the same search run again, all of it on screen
+    wait_until(cx, &h, "the scan and the repeated search", |app, cx| {
+        !app.scan_in_flight && app.search_seq > seq && !app.search_pending && search_done(app, cx)
+    });
+    cx.run_until_parked();
+    h.app.read_with(cx, |app, cx| {
+        let table = app.table.read(cx);
+        assert_eq!(table.delegate().row(0).id, S1, "the written session sorts first in the new results");
+        assert_eq!(app.search_summary.as_ref().unwrap().matches, summary.matches + 1, "the new results are on screen");
+        assert_eq!(app.selected.as_ref().unwrap().id, selected, "the same session stays selected");
+        assert_eq!(table.selected_row(), table.delegate().position_of(&selected), "on its row");
+    });
+    assert_eq!(offset(cx), before, "the results stay where the user scrolled to");
+}
+
+#[gpui_kit::test]
+fn a_selected_session_gone_from_refreshed_results_hands_the_selection_to_the_first_row(cx: &mut TestAppContext) {
+    let h = launch(cx);
+    press(cx, &h, "cmd-f");
+    type_text(cx, &h, "e");
+    cx.run_until_parked();
+    cx.executor().advance_clock(SEARCH_DEBOUNCE);
+    wait_until(cx, &h, "search results", |app, cx| search_done(app, cx) && shown_rows(app, cx) > 1);
+    // the second result's transcript goes away: the next search cannot find it
+    let (gone, path) = h.app.update(cx, |app, cx| {
+        app.select_row(1, cx);
+        let row = app.selected.clone().unwrap();
+        (row.id.clone(), row.transcript_path.clone().unwrap())
+    });
+    let removed = h._dir.path().join("removed");
+    std::fs::create_dir_all(&removed).unwrap();
+    std::fs::rename(&path, removed.join(path.file_name().unwrap())).unwrap();
+
+    let seq = h.app.read_with(cx, |app, _| app.search_seq);
+    cx.executor().advance_clock(crate::AUTO_SCAN_MIN_GAP);
+    h.app.update(cx, |app, cx| assert!(app.auto_scan("test", cx)));
+    wait_until(cx, &h, "the scan and the repeated search", |app, cx| {
+        !app.scan_in_flight && app.search_seq > seq && !app.search_pending && search_done(app, cx)
+    });
+    h.app.read_with(cx, |app, cx| {
+        let table = app.table.read(cx);
+        assert_eq!(table.delegate().position_of(&gone), None, "no longer found");
+        assert_eq!(table.selected_row(), Some(0));
+        assert_eq!(app.selected.as_ref().unwrap().id, table.delegate().row(0).id, "the highlight and the detail panel agree");
+    });
+}
