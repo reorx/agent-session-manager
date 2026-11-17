@@ -42,7 +42,8 @@ asm cache [--days 7 | --since DATE [--until DATE]] [--project P]... [--model M] 
           [--by day|project|model] [--sort rebuild-cost|hit|tokens] [-n 10] [--json]
 ```
 
-- 默认最近 7 天。统计范围内发生的调用（会话可以开始得更早）；subagent 的调用计入 token 总量，不判断重建。
+- 默认最近 7 天。统计范围内发生的调用（会话可以开始得更早）；subagent 的调用计入 token 总量，不判断重建。`--model` 按范围内调用的规范化模型过滤，包含 subagent token；重建按当次调用模型归组，不按会话主模型或 model switch 的原模型。
+- 时间沿用 P1：`--days N` 为滚动 N×24h（支持小数和 0），`--since` / `--until` 为本地午夜，区间 [since, until)，支持单独 until；`--by day` 按本地自然日，与 app Usage 的 4:00 用量日不同。
 - 输出（示意）：
 
 ```
@@ -63,14 +64,14 @@ top sessions by rebuild cost:
 
 - `--by day|project|model`：在总览下面多一张分组表，每行是命中率、写缓存占比、重建次数和花费。
 - `--sort`：会话列表按重建花费（默认）、命中率（从低到高）、输入 token 排序；`-n` 控制列出几个。
-- 范围内没有调用：输出 `0 calls in range` 和所用的范围。
+- 范围内没有调用：输出 `0 calls in range` 和所用的范围。零分母命中率为 JSON null / 文本 `—`；未知模型金额为 null / `unpriced`，不能当作 0。limit 只截会话榜单，不截总数和分组。
 
 **2. `asm cache ID`：单个会话**
 
 - 头部：标题、项目、时间、命中率、输入 token 分布、重建次数和花费。
 - 每次重建一行：回合号、时间、原因（含间隔与缓存时长或原模型）、少读的 token、写入的 token、花费。回合号与 `asm transcript --turns` 一致。
 - `--calls`：列出每次主线调用：时间、回合号、模型、输入大小、读 / 写（5m / 1h）/ 未缓存、是否重建。
-- 全部支持 `--json`。前缀不唯一时同 `asm session`。
+- 全部支持 `--json`。前缀不唯一时同 `asm session`。ID 模式看整个会话，拒绝只适用于总览的过滤、分组、排序及榜单限制参数，不静默忽略。history-only 和无调用输出空明细；缺失 transcript 仍显示已存事实。首个 prompt 前及 AUTO 卡片中的调用编号为 null / `—`，不造第 0 回合。
 
 **3. 判定口径**
 
@@ -95,81 +96,80 @@ top sessions by rebuild cost:
 - `asm cache` 默认给出最近 7 天的总览、原因分布和最该看的会话；`--by day` / `--by project` / `--by model` 给出分组表；`--json` 可解析。
 - 任取 3 个会话，`asm cache ID` 的命中率与 app 表格的 Hit% 一致，重建列表与 app 回合卡上的说明一致（次数、原因、金额）。
 - 索引里 60 天的重建（次数、原因、金额）与 cache-break-accuracy 真实数据核对时输出的 TSV 逐条一致。
-- 总览查询不读原始记录文件，30 天范围在 1 秒内返回。
+- 总览查询本身不读原始记录文件，热索引 `--no-scan` 的 30 天范围三次均在 1 秒内返回；默认刷新另计增量扫描时间。
 - 在本仓库新开的 Claude Code 会话里问「看看最近 7 天缓存命中得好不好」，agent 加载 skill，给出命中率、重建次数和原因、花费、最值得看的会话和有依据的建议，数字与 `asm cache` 一致。
 
 ## Tech Design
 
 ### 现状
 
-- 以下按 [cache-break-accuracy](../2026-11-16-cache-break-accuracy.md) 完成之后的代码写；开工前对照代码核实。重建判断在 `claude/cache.rs::CacheTracker`：`compacted()` 和 `call(&CallInput) -> Option<CacheBreak>`。`CallInput` 是 msg_id、接续调用的 msg_id（沿 `parentUuid` 找到）、回复时间与请求开始时间、模型、effort、speed、计费 token、判定用的 prompt 与读缓存，以及请求事实（system 与工具指纹、beta 哈希、登录标记、`keep`、同一来源上一次请求的长度，来自 `api-request` 记录）。app 的 `conversation.rs::Reader` 从记录里拼出它。
-- app 的 `crates/app/src/conversation.rs::cache_note` 把 `CacheBreak` 渲染成回合卡说明，摘要里统计 `rebuilds`。
-- 用量：`claude/parse.rs::tokens_of` 按 `iterations` 各项求和（计费口径），`prompt_of` 取最后一个 `message` 项（判定口径）。`UsageSink` 保留每个响应第一条记录的位置和时间。`on_usage` 用 `row.prompt_tokens()` 更新 `context_tokens` / `context_peak`（只看非 sidechain）。
-- `api_usage`（主键 `session_id, agent, msg_id`，WITHOUT ROWID）没有记录位置；`Db::insert_usage` 冲突时 `ts = min(..)`、其余覆盖。`refresh_session_usage` 从 `api_usage` 汇总写 `sessions` 的 token / 费用列和 `session_model_usage`。
-- 索引解析时 `classify` 把 `system` 记录当作 Skip（`META_TYPES` 不含 `system`），所以索引看不到 `compact_boundary`；`isCompactSummary` 的 user 记录会经过 `on_user`。
-- 已有的对照脚本：`tmp/cache-breaks.py`、`tmp/cache-breaks-per-session.py`、`tmp/2026-11-16-cache-accuracy-plan/`（请求记录的覆盖与语义），以及 cache-break-accuracy 的参考脚本和它输出的 TSV。
+- 已核对 `f961f5e`，P2-0 证据在 `tmp/2026-11-14-asm-skill-cli/asmcli-p2-explore/report.md`（T1–T16）。core `claude/conversation.rs::Reader` 从记录拼出 `CallInput`，按顺序调用 `CacheTracker::compacted`、`new_turn` 和 `call`；app 只消费、渲染 `CacheBreak`。
+- 完整输入是 msg_id、parent、nullable 回复 / 请求开始时间、model、nullable effort / speed、全部计费 Tokens、判定 prompt / read 和 nullable RequestFacts（shape、betas、sign_in、keep、prev_len）。无请求与字段全缺的请求不同；None、0、false、空 beta 集合不能混淆。缺任一开始时间时整对退回回复时间；无时间间隔为 0。
+- `UsageSink` 保留的是 Vec 顺序和首次时间，不是 byte_offset。计费同响应末条覆盖，`insert_usage` 的 ts 取 min；Reader 缓存则保留首个经过 RecordFilter 的合格响应。两套快照不可共用覆盖策略。
+- `tokens_of` 是全部 iterations 之和，`prompt_of` 是最后一个 message 项。决定 37：本期仅存判定 prompt，不改 `UsageRow::prompt_tokens`、context、长 prompt、pricing、分组或账本口径；后者留待独立调整。
+- 当前 compact 全量核对：主记录 509 boundary / 509 summary，subagent 5 / 5，两向缺失为 0；只用 summary 在当前语料成立，但不能保证未来 boundary-only 记录。
 
 ### 方案
 
-`CacheTracker` 由 cache-break-accuracy 抽出，app 的回合卡和索引共用。索引时多存三样东西：每次调用在文件里的位置和 `CallInput` 的各项（`api_usage` 加列）、请求记录的事实（新表），以及 compact 的位置（新表）。每个会话写完用量后，从这两张表按位置合并、喂给 `CacheTracker`，把结果整体重写进 `cache_breaks` 表，做法与 `refresh_session_usage` 相同：不在增量解析里维持状态，「全量 == 增量」自然成立。`asm cache` 只查表。
+索引保存按 byte_offset 排列的精简缓存事件（独立 `cache_events`），作为完整断点恢复；从表内事件重建 RecordFilter、祖先图和请求状态，再喂既有 CacheTracker，整体重写 `cache_calls` 与 `cache_breaks`。重放不读原文件，不改变判定算法、计费覆盖策略及单写线程事务顺序。
 
-关键决定：
-
-- **重建存表、按会话从表里重算**（用户 2026-11-15 决定存表）。被否决：在 `SessionDelta` 里增量追踪（要跨扫描保存上次调用的状态，和「全量 == 增量」的约束冲突）；查询时读原文件（30 天要读 5 GB）。
-- **接续调用在解析时算好存列**：解析时维护 `uuid → parentUuid` 和 `uuid → 调用` 的映射，为每次调用记下沿 `parentUuid` 找到的接续调用（`parent_msg_id`）。增量解析从断点继续时前面的记录不在内存里，这时记为空，`CacheTracker` 退回按位置比较上一次调用。
-- **请求事实**：`classify` 放行 `api-request` 行（不放行很大的 `api-request-blob` 行，二者按 `type` 的完整字符串区分），按 AGENTS.md 的要求在全部真实记录上验证。同一来源上一次请求的长度在 `refresh_cache_breaks` 里按位置从请求表算，不在增量解析里维持状态。
-- **compact 位置只用 `isCompactSummary`**，不改 `classify`（AGENTS.md：改字节预过滤要全量验证）。第 2 步在全部真实记录上确认每个 `compact_boundary` 之后、下一次调用之前都有一条 `isCompactSummary` 记录；不成立再考虑放行 `system` 记录。
+- **完整祖先与去重事实**：保存所有可被 Reader 解码记录的 uuid、parentUuid、两组去重类别和 sidechain 标记，含 tool-only user、无正文 assistant、同响应多个块的 uuid。先按 RecordFilter 去重（即使 sidechain 被剔除也占据 uuid），再更新图。沿已存图找祖先，只有原始链确实缺失或达到 Reader 的步数上限才走 Tracker 既有回退；不允许扫描断点造成差异。
+- **按位置保存请求事件**：主键 `(session_id, byte_offset)`，request_id 可空，重复 ID 按位置覆盖。先更新每个 querySource（含独立 None 桶）的 last_len，再处理 ID；长度为 keep.unwrap_or(0) 与 tail 数量的 u32 饱和相加。保存 shape 原字符串及规范 beta 集合，只在重放内计算 Reader 使用的指纹，不持久化 DefaultHasher 的跨版本哈希；tail 正文与 blob 内容均不保存。
+- **事件包含回合和 compact**：同时保留 boundary、summary、new_turn 与 AUTO 卡片边界，复现 compact→call→新 prompt 的清标记行为。编号随事件保存，缺失文件也可恢复；AUTO / 首 prompt 前的调用为 None。混合 tool_result 的 user 先按 Reader 处理工具结果，不误开回合。
+- **独立缓存投影**：缓存事件通过共享的 `transcript::Record` 字段级降级解析读取，位于搜索/计费预过滤之前，保证节点不被既有 tool-only / metadata 过滤丢掉。原 classify、搜索与计费路径不改；缓存投影只留下语义和图节点，不索引正文。真实全量核对缓存投影及 Reader 一致性，额外量读取成本。
+- 使用统一事件表替代独立 api_requests / session_compactions / ancestry 表，使无 ID 请求、重复 ID、重复 uuid 的历史顺序可精确恢复。被否决：仅给 api_usage 加列（首次缓存事实会被末次计费覆盖）、只存最终祖先图（未来节点会改变历史解析）、断点缺图就退回上一调用（违反一致性）。
 
 ### 数据变动
 
-- `api_usage` 加列：`byte_offset INTEGER NOT NULL`（响应第一条记录的位置）、`prompt_tokens INTEGER NOT NULL`（`prompt_of` 的 prompt：最后一个 message 项的输入合计）、`prompt_cache_read INTEGER NOT NULL`（判定用的读缓存）、`parent_msg_id TEXT`、`request_id TEXT`（`requestRef`）、`effort TEXT`、`speed TEXT`。`insert_usage` 冲突时 `byte_offset = min(..)`，与 `ts` 一样保留第一条记录的值。
-- 新表 `api_requests (session_id, request_id, byte_offset, ts, query_source, shape_hash, betas_hash, sign_in, keep, len, PRIMARY KEY (session_id, request_id)) WITHOUT ROWID`，只记主记录文件。
-- 新表 `session_compactions (session_id TEXT, byte_offset INTEGER, ts INTEGER, PRIMARY KEY (session_id, byte_offset)) WITHOUT ROWID`，只记主记录文件。
-- 新表 `cache_breaks (session_id, msg_id, byte_offset, ts, model, dropped, written, cost_usd REAL, cause TEXT CHECK (cause IN ('compaction','model_switch','effort','fast_mode','sign_in','request_settings','idle','system_or_tools','earlier_messages','request_unchanged','unknown')), from_value TEXT, to_value TEXT, gap_ms INTEGER, ttl_ms INTEGER, PRIMARY KEY (session_id, msg_id)) WITHOUT ROWID`，加 `cache_breaks_ts` 索引。只由 `refresh_cache_breaks` 写。
-- `SCHEMA_VERSION` 在 cache-break-accuracy 之后再 +1，整库重建。
-- `model.rs`：`UsageRow` 加 `byte_offset`、`prompt_tokens`、`prompt_cache_read`；`UsageRow::prompt_tokens()` 方法改为读字段（或重命名，调用处一并改）。`CacheBreak` 加 `msg_id`、`model`（索引需要；app 不用）。
+- `cache_events (session_id, byte_offset, data)`：WITHOUT ROWID，session 外键级联删除。data 为强类型精简事件 JSON：uuid / parent / user_input / sidechain 及 Node、Request、Call、Compact、Turn、Auto 的有效载荷。Call 保留首条候选的 nullable ts、model、tokens、prompt/read、effort/speed、requestRef；每个合格候选块均保存，以恢复 uuid→msg_id。
+- `cache_calls`：以 `(session_id, msg_id)` 为键保存重放确定的首条缓存快照，含 byte_offset、nullable ts / turn、model、parent_msg_id、判定 prompt / read 及精简 payload。与 api_usage 的末条计费快照分离。
+- `cache_breaks`：以 `(session_id, msg_id)` 为键，byte_offset、nullable ts / turn、model、dropped、written、nullable cost_usd、cause 和完整 CacheBreak payload；显式原因码覆盖 compaction / model_switch / effort / fast_mode / sign_in / request_settings / idle / system_or_tools / earlier_messages / request_unchanged / unknown，附带 from/to/on/gap/ttl 无损往返，时间索引 `cache_breaks_ts`。
+- `model.rs` 添加缓存事件、调用与 `IndexedCacheBreak` 包装类型；CacheBreak 原公共字段不变，只增加序列化支持。api_usage、sessions 列及 SESSION_COLUMNS / row_to_session 的列序不变。
+- `SCHEMA_VERSION` 7 → 8，索引整库重建；账本不删不迁移，salvage 仍用原计费结构。
 
 ### 逻辑变动
 
 **core**
 
-- `claude/cache.rs`、`conversation.rs` 在 cache-break-accuracy 里已经改好，本期不动。
-- `parse.rs`：`usage_row` 产出新字段（`on_usage` 传入行位置；`parent_msg_id` 用上面的映射）；`classify` 放行 `api-request`，解析出请求事实交给 `Feed`；`on_user` 遇到 `isCompactSummary` 时往 `Feed` 里加一条 compact 位置（`Feed.compactions: Vec<(u64, i64)>`）。
-- `index/db.rs`：`insert_usage` 写新列；`insert_compactions` / `delete_compactions`；`insert_requests` / `delete_requests`；`refresh_cache_breaks(session_id)`：`SELECT … FROM api_usage WHERE session_id = ? AND agent = '' ORDER BY byte_offset` 与 `session_compactions`、`api_requests` 按位置归并，拼出 `CallInput` 喂 `CacheTracker`，删旧行写新行；查询：`cache_overview(&CacheFilter)`（按调用时间范围汇总 token：`api_usage` 含 subagent；重建：`cache_breaks`）、`cache_groups(&CacheFilter, by)`、`cache_sessions(&CacheFilter, sort, limit)`、`session_cache(session_id)`（重建列表；`--calls` 时读 `api_usage` 主线行）。
-- `index/indexer.rs`：`write_parsed` 写完用量和 compact 后调用 `refresh_cache_breaks`；会话被删除、整份重解析（Rebuilt）时一并清掉该会话的 `session_compactions` / `cache_breaks`（找到 `delete_usage` 的所有调用处同步处理）。subagent 文件不产生 compact 和重建。
-- 回合号：`cache_breaks` 不存回合号，CLI 输出时按 P1 的办法从 `messages` 里数 `kind = 'prompt'` 的行。
+- `claude/cache.rs` 判定不改；`conversation.rs` Reader 保持独立，作为逐条对照基准。
+- 新增缓存事件投影 / 重放模块，复用 Record、RecordFilter、opens_turn、tokens_of、prompt_of；feed 返回 cache_events，subagent usage_only 不采集缓存事件。
+- `index` 独立缓存存取模块提供 `insert_cache_events`、`delete_cache_facts`、`refresh_cache_breaks`、`cache_events`、`cache_calls`、`cache_breaks`。每次追加仅写新事件，再按会话重放全部事件；只在写入事务内刷新派生表。
+- `indexer::write_parsed` 主文件非 Append 时清旧缓存事实；upsert session 后写事件并重放。文件仅缺失时保留事实、调用和重建（与 usage 保留同步）；真删 session / clear_all / schema 重建级联清理；subagent 单独删除只改计费用量，不改主线缓存。
 
-**CLI**
+**CLI（P2-2）**
 
-- `bin/asm/cache.rs`：`asm cache [ID]`，复用 P1 的 `RangeArgs`（默认 7 天）、`SessionFilterArgs`（`--project`、`--model`、`--include-self`）、渲染与 JSON 约定。时间范围按调用时间（`api_usage.ts`）过滤；会话列表里的数字也只算范围内的调用；`asm cache ID` 看整个会话。
-- `references/cli.md` 先补 `### asm cache`，规范一致性测试覆盖它。
+- 先写 `references/cli.md` 的 asm cache 契约（默认值、空集合、错误、排序并列键），再实现命令与聚合。复用已有 RangeArgs、当前会话排除、项目解析、前缀查找、JSON 错误约定和 --no-scan / 锁回退；当前不存在 SessionFilterArgs，有实际复用需求再提取。
+- 调用级时间 / model 过滤，token 从 api_usage（含 subagent）汇总，重建从 cache_breaks 汇总，两边先按键聚合再合并，避免一对多 JOIN 放大费用。根据 EXPLAIN QUERY PLAN 决定 api_usage 时间索引。
+- `--calls` 读 cache_calls 的首条缓存输入，费用与总 Hit% 仍按 api_usage 计费事实；不加模型 / 时间裁剪的全会话命中率才能直接与 app 表格比较。
 
-**skill**
+**skill（P2-3）**
 
-- `SKILL.md`：场景路由加缓存检查；`references/cache-health.md` 按 PRD 第 4 点写，对策部分逐条引用 `kb/refs/claude-code-prompt-caching.md` 对应小节的线上地址（skill 对外发布，不能引用仓库内路径）。
+- SKILL.md 路由、references/cache-health.md 与 PRD 一致；官方依据引用线上地址，示例全部虚构。
 
 ### 实施步骤
 
-- [ ] 1. 前置：[cache-break-accuracy](../2026-11-16-cache-break-accuracy.md) 完成；对照它落地后的代码核实本节的「现状」
-- [ ] 2. 在全部真实记录上核对：`compact_boundary` 与 `isCompactSummary` 的对应关系；放行 `api-request` 后 `classify` 的结果（不误放 `api-request-blob`）；结果记进 session 总结
-- [ ] 3. 存表（含 `api_requests` 和 `parent_msg_id`）：`api_usage` 新列、`session_compactions`、`cache_breaks`、`refresh_cache_breaks`；测试「全量 == 增量」（一次解析与分两次追加的结果相同，含响应被切成两半的情况）、删除与重解析时的清理、索引里的重建与 `read_conversation` 的结果一致
-- [ ] 4. `cli.md` 加 `asm cache` → `asm cache` 总览、分组、会话列表、`asm cache ID`、`--calls`、`--json` + CLI 测试
-- [ ] 5. `cache-health.md`、`SKILL.md` 路由
-- [ ] 6. 真实数据验收（见下），新开 Claude Code 会话验收 skill
-- [ ] 7. 更新 `AGENTS.md`、`kb/docs/product-prd.md`、`kb/docs/claude-session-data-format.md`（索引里的请求记录），commit
+- [x] 1. 核实 cache-break-accuracy 完成后的现状。
+  - 2026-11-17，证据：`tmp/2026-11-14-asm-skill-cli/asmcli-p2-explore/report.md` §2（T1–T16）。
+- [x] 2. 全量 compact 对应及 api-request 分类核对。
+  - 2026-11-17，证据：同报告 §3、`audit-frozen.log` / `audit.json`（1,346,307 行，零差异）。
+- [x] 3. 缓存事实持久化、重放、全量 == 各断点增量、Reader 对照、生命周期清理、冻结 842 条审计、大小与耗时测量。
+  - 2026-11-17，证据：[P2-1 总结](../../sessions/2026-11-17-asm-p2-store.md)；681 项测试通过，842 条 TSV 零差异，parity 第二轮 21/21。
+- [ ] 4. cli.md → cache 聚合与命令、JSON、CLI 行为测试、规范反向检查。
+- [ ] 5. cache-health skill、路由及相关文档（含决定 33 的虚构例子清理）。
+- [ ] 6. 真实数据与新会话 skill 验收。
+- [ ] 7. 协调者更新共享文档和状态、安排 CLI 安装及收尾。
 
 ### 测试与验证
 
-| 验收标准 | 怎么验 |
-|---|---|
-| 总览、分组、JSON | CLI 测试（fixture 里放 compact、空闲超时、换模型各一次）；真实数据人工核对一次 |
-| 与 app 的 Hit% 和回合卡一致 | 测试：fixture 上索引里的 `cache_breaks` 与 `read_conversation` 的 `cache_breaks` 逐条相同；真实数据取 3 个会话对照 app（截图或 `asm session-old --conversation` 的输出） |
-| 与 cache-break-accuracy 的结果一致 | 索引里 60 天的 `cache_breaks` 与它真实数据核对时输出的 TSV 逐条相同，差异存进 `tmp/<date>-asm-p2/` |
-| 增量与断点 | 「全量 == 增量」测试；真实数据上增量扫描后的 `cache_breaks` 与整库重建后的相同（断点处退回按位置比较，差异逐条看） |
-| 30 天总览 1 秒内 | 真实索引上量 3 次 |
-| skill 端到端 | 在本仓库新开 Claude Code 会话（herdr 新 tab）提问，记录命令序列和回答 |
+- 先红后绿：全部 11 原因，延迟 compact、compact→调用→新 prompt，rewind 跨断点、tool-only 节点、同 msg_id 多块（usage 相同 / 不同），同 uuid 两组及 sidechain，请求缺字段 / 错类型 / 无 ID / 重复 ID / 缺 querySource，缺时间 / 时间倒序、EOF 半行、替换 / 截断 / 缺失 / 真删 / subagent 单独删除、未知模型金额。
+- 按每条记录与半行分割，比较落库事件、首条调用和重建的所有字段；与 read_conversation 逐条比较重建和编号，不只比较数量。
+- 冻结审计复用 `tmp/2026-11-16-cache-break-accuracy/cache-break-ref/{manifest.json,calls.jsonl,after.tsv}`，缺失文件用 `cbreak-tracker/r1/manifest.json` 已验证相同 SHA256 的备用前缀。3,398 文件、133,186 calls、842 rebuilds；完整键、原因、时间、量和金额对照。不用今日滚动范围替代，旧 30 天 455 次仅为旧算法历史基线。
+- `make test`、账本回归、隔离索引 `asm cost --compare` 与基线一致；parity 两次，遵循 brief 的动态会话差异判定。
+- 同一冻结副本测 HEAD 与完整存表版本：空库冷建（不宣称清 OS 缓存）、checkpoint 后索引大小、增量与重放时间。30 天聚合在 P2-2 用热库 --no-scan 量三次，另列默认扫描时间。
+- 所有 scratch 在 `tmp/2026-11-14-asm-skill-cli/asmcli-p2-store/`，真实索引和账本不写入；不运行 GUI、不安装全局 CLI。
 
 ### 风险与待定
 
-- 增量断点处没有接续调用，rewind 恰好跨断点时索引会与 app 不一致（app 读整份文件）。正在写的会话才有断点，影响面小；验证数据里出现了就记进 known-issues。
-- `api_usage` 加列后变大（本机行数约等于调用次数），对启动读表没有影响（启动读的是 `session_model_usage`），但重建索引会慢一点；量一次 `asm index --rebuild` 的耗时并记录。
+- 保存完整顺序和图会增加索引与扫描成本，按同输入实测；不能用探索阶段仅放行请求、尚未落库的零体积增量外推。
+- 新缓存事实与计费首次 / 末次策略分离，异常多块响应可能呈现不同 token，属于各自既有语义，不可为统一显示改变 CacheTracker 或账本。
+- context / 长 prompt 切换到最后 message iteration 留待独立工作，本期严格不改（决定 37）。

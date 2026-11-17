@@ -158,3 +158,45 @@ CREATE TABLE index_state (
 );
 
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+-- Ordered, text-free Reader facts. Includes graph nodes and records rejected by RecordFilter:
+-- rejected UUIDs must still be consumed when restoring the two duplicate sets.
+CREATE TABLE cache_events (
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  byte_offset INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  PRIMARY KEY (session_id, byte_offset)
+) WITHOUT ROWID;
+
+-- First eligible cache snapshot, separate from api_usage's last-block billing snapshot.
+CREATE TABLE cache_calls (
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  msg_id TEXT NOT NULL,
+  byte_offset INTEGER NOT NULL,
+  ts INTEGER,
+  turn INTEGER,
+  model TEXT NOT NULL,
+  parent_msg_id TEXT,
+  prompt_tokens INTEGER NOT NULL,
+  prompt_cache_read INTEGER NOT NULL,
+  data TEXT NOT NULL,
+  PRIMARY KEY (session_id, msg_id)
+) WITHOUT ROWID;
+CREATE INDEX cache_calls_position ON cache_calls(session_id, byte_offset);
+
+CREATE TABLE cache_breaks (
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  msg_id TEXT NOT NULL,
+  byte_offset INTEGER NOT NULL,
+  ts INTEGER,
+  turn INTEGER,
+  model TEXT NOT NULL,
+  dropped INTEGER NOT NULL,
+  written INTEGER NOT NULL,
+  cost_usd REAL,
+  cause TEXT NOT NULL CHECK (cause IN ('compaction','model_switch','effort','fast_mode','sign_in','request_settings','idle','system_or_tools','earlier_messages','request_unchanged','unknown')),
+  data TEXT NOT NULL,
+  PRIMARY KEY (session_id, msg_id)
+) WITHOUT ROWID;
+CREATE INDEX cache_breaks_ts ON cache_breaks(ts);
+CREATE INDEX cache_breaks_position ON cache_breaks(session_id, byte_offset);

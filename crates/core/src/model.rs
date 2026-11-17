@@ -438,7 +438,7 @@ pub struct Turn {
 }
 /// A main-thread API call that read less from the cache than the call before it sent: the cached
 /// prefix was lost and had to be written again.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheBreak {
     pub ts: Option<i64>,
     /// Tokens of the ancestor call's prompt that this call did not read from the cache.
@@ -449,7 +449,8 @@ pub struct CacheBreak {
     pub cost_usd: Option<f64>,
     pub cause: CacheBreakCause,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CacheBreakCause {
     /// First actual rebuild after compaction, unless a later user turn cleared the marker.
     Compaction,
@@ -542,4 +543,70 @@ pub struct LedgerSession {
 pub struct SessionUsage {
     pub session: LedgerSession,
     pub hours: Vec<HourlyUsage>,
+}
+
+/// A text-free projection of a transcript record. Retained before filtering so replay can
+/// restore both UUID sets, including UUIDs consumed by sidechain records.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CacheEvent {
+    pub byte_offset: u64,
+    pub uuid: Option<String>,
+    pub parent_uuid: Option<String>,
+    pub user_input: bool,
+    pub sidechain: bool,
+    pub kind: CacheEventKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CacheEventKind {
+    Node,
+    Request(CacheRequest),
+    Call(CacheCallFacts),
+    Compact { boundary: bool },
+    Turn,
+    Auto,
+}
+
+/// Original request facts, not process/version-specific hashes. None and empty stay distinct.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CacheRequest {
+    pub id: Option<String>,
+    pub ts: Option<i64>,
+    pub query_source: Option<String>,
+    pub shape: Option<String>,
+    pub betas: Option<Vec<String>>,
+    pub keep: Option<u32>,
+    pub len: u32,
+}
+
+/// The first eligible response block, independent of last-block billing in api_usage.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CacheCallFacts {
+    pub msg_id: String,
+    pub ts: Option<i64>,
+    pub model: String,
+    pub effort: Option<String>,
+    pub speed: Option<String>,
+    pub request_id: Option<String>,
+    pub tokens: Tokens,
+    pub prompt: u64,
+    pub read: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IndexedCacheCall {
+    pub byte_offset: u64,
+    pub turn: Option<u32>,
+    pub parent_msg_id: Option<String>,
+    pub facts: CacheCallFacts,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct IndexedCacheBreak {
+    pub msg_id: String,
+    pub byte_offset: u64,
+    pub turn: Option<u32>,
+    pub model: String,
+    pub rebuilt: CacheBreak,
 }

@@ -862,6 +862,17 @@ def iteration_rows():
                            'content': [{'type': 'text', 'text': 'done'}], 'usage': usage}}
 
 
+def cache_store_rows():
+    yield {'type': 'user', 'uuid': 'prompt', 'message': {'content': 'Check cache facts'}}
+    for i in range(3):
+        yield {'type': 'api-request', 'id': f'request-{i}', 'querySource': 'repl_main_thread',
+               'shapeHash': 'shape', 'keep': i, 'tail': ['hash'], 'params': {'betas': []}}
+        yield {'type': 'assistant', 'uuid': f'block-{i}', 'parentUuid': 'prompt' if i == 0 else f'block-{i-1}',
+               'requestRef': f'request-{i}', 'timestamp': f'2026-11-17T10:00:0{i}Z',
+               'message': {'id': f'message-{i}', 'model': 'claude-sonnet-5',
+                           'content': [], 'usage': {'cache_creation_input_tokens': 50000, 'output_tokens': 10}}}
+
+
 if __name__ == '__main__':
     main()
     write_jsonl(OUT.parent / 'turn_rules.jsonl', turn_rule_rows())
@@ -870,3 +881,5 @@ if __name__ == '__main__':
     with (OUT.parent / 'conversation.jsonl').open('a') as fp:
         fp.write('{"type":')
     write_jsonl(OUT.parent / 'iterations.jsonl', iteration_rows())
+
+    write_jsonl(OUT.parent / 'cache_store.jsonl', cache_store_rows())

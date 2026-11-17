@@ -1,9 +1,9 @@
 //! Streaming transcript parser. Bytes go in (whole file or an appended tail), searchable
 //! `MessageRow`s, one `UsageRow` per API response and a `SessionDelta` (aggregate fields) come out.
 //!
-//! Only user / assistant text (thinking included) and a handful of metadata records are
-//! materialised; tool results, attachments and file-history records (98% of the bytes) are skipped
-//! after a byte-level look at the line prefix. Prompt-counting rules follow the reference script's
+//! Searchable text and billing retain their byte-level prefilter. An independent, text-free
+//! cache projection also retains requests and graph nodes (including tool-only records) before
+//! that filter, so cache replay can restore ancestry across scans. Prompt-counting follows the reference script's
 //! `human_prompt_text`; which user rows are `prompt`s follows the turn rule of the detail panel.
 
 use std::borrow::Cow;
@@ -32,6 +32,7 @@ pub(crate) const SYNTHETIC_MODEL: &str = "<synthetic>";
 /// consumed (up to and including the last newline; a partial last line waits for the next feed).
 #[derive(Debug, Default)]
 pub struct Feed {
+    pub cache_events: Vec<crate::model::CacheEvent>,
     pub messages: Vec<MessageRow>,
     /// One row per response within this feed. A response whose records straddle two feeds shows
     /// up in both, with the same `msg_id`: whoever keeps the rows must dedupe on it.
@@ -42,6 +43,7 @@ pub struct Feed {
 /// A fully parsed transcript file.
 #[derive(Debug)]
 pub struct ParsedTranscript {
+    pub cache_events: Vec<crate::model::CacheEvent>,
     pub summary: SessionSummary,
     pub messages: Vec<MessageRow>,
     pub usage: Vec<UsageRow>,
@@ -203,6 +205,11 @@ impl TranscriptParser {
                 line = &line[..line.len() - 1];
             }
             if !line.is_empty() {
+                if !self.usage_only {
+                    if let Some(event) = super::cache_events::project(line, base_offset + start as u64) {
+                        feed.cache_events.push(event);
+                    }
+                }
                 self.process_line(line, base_offset + start as u64, &mut feed.messages, &mut usage);
             }
             start = nl + 1;
@@ -509,7 +516,7 @@ pub fn parse_transcript(path: &Path) -> Result<ParsedTranscript> {
     summary.set_usage(&feed.usage);
     summary.updated_at = mtime_ms(&meta);
     summary.file_size = Some(meta.len());
-    Ok(ParsedTranscript { summary, messages: feed.messages, usage: feed.usage, consumed: feed.consumed })
+    Ok(ParsedTranscript { cache_events: feed.cache_events, summary, messages: feed.messages, usage: feed.usage, consumed: feed.consumed })
 }
 
 /// Memory-map a file (an empty file maps to an empty buffer, which mmap refuses).

@@ -13,12 +13,17 @@ fn turn(c: &Conversation, i: usize) -> &Turn {
 fn tool(c: &Conversation, i: usize) -> &ToolCall {
     let StepKind::Tool(t) = &turn(c, 1).steps[i].kind else { panic!("expected tool") }; t
 }
+#[path = "support/cache_store.rs"]
+mod cache_store;
+
 fn read(rows: Vec<Value>) -> Conversation {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sample.jsonl");
     let text = rows.iter().map(|r| format!("{r}\n")).collect::<String>();
-    std::fs::write(&path, text).unwrap();
-    read_conversation(&path, None).unwrap()
+    std::fs::write(&path, &text).unwrap();
+    let conversation = read_conversation(&path, None).unwrap();
+    cache_store::check(text.as_bytes(), &conversation);
+    conversation
 }
 fn u(s: &str) -> Value { json!({"type":"user","message":{"content":s}}) }
 fn a(s: &str) -> Value { json!({"type":"assistant","message":{"content":[{"type":"text","text":s}]}}) }
@@ -572,4 +577,50 @@ fn malformed_request_fields_preserve_independent_time_and_shape_facts() {
             } else { CacheBreakCause::SystemOrTools }, "{field}: {value}");
         }
     }
+}
+
+#[test]
+fn cache_store_first_snapshot_survives_changed_later_block_and_backwards_time() {
+    let mut first = call("first", 60, OPUS, 0, 50_000, false);
+    first["uuid"] = json!("a");
+    let mut duplicate = call("first", 1, "unknown-price", 1, 1, false);
+    duplicate["uuid"] = json!("b"); duplicate["parentUuid"] = json!("a");
+    let mut next = call("next", 2, OPUS, 0, 50_000, false);
+    next["parentUuid"] = json!("b");
+    let c = read(vec![u("start"), first, duplicate, next]);
+    assert_eq!(breaks(&c)[0].1.cause, CacheBreakCause::Unknown);
+}
+
+#[test]
+fn cache_store_missing_times_unknown_prices_and_auto_turns_remain_nullable() {
+    let mut first = call("a", 1, "unknown-price", 0, 50_000, false);
+    first.as_object_mut().unwrap().remove("timestamp");
+    let mut next = call("b", 2, "unknown-price", 0, 50_000, false);
+    next.as_object_mut().unwrap().remove("timestamp");
+    let c = read(vec![first, u("start"), json!({"type":"user","origin":{"kind":"task-notification"},"message":{"content":"finished"}}), next]);
+    assert_eq!((breaks(&c)[0].1.ts, breaks(&c)[0].1.cost_usd), (None, None));
+    assert_eq!(turn(&c, 2).number, None);
+}
+
+#[test]
+fn cache_store_request_history_keeps_idless_duplicate_and_none_source_events() {
+    let request = |id: Value, keep: Value, tail: Value| json!({"type":"api-request","id":id,"keep":keep,"tail":tail,
+        "timestamp":at(0),"shapeHash":"s","params":{"betas":[]}});
+    let mut first = call("a", 1, OPUS, 0, 50_000, false); first["requestRef"] = json!("r");
+    let mut next = call("b", 2, OPUS, 0, 50_000, false); next["requestRef"] = json!("r");
+    let c = read(vec![request(json!("r"), json!(0), json!([1])), first,
+        request(Value::Null, json!(0), json!([1,2,3])), request(json!("r"), json!(1), json!([])), next]);
+    assert_eq!(breaks(&c)[0].1.cause, CacheBreakCause::EarlierMessages);
+}
+
+#[test]
+fn cache_store_record_groups_sidechains_and_nontext_ancestor_nodes_match_reader() {
+    let mut first = call("a", 1, OPUS, 0, 50_000, false); first["uuid"] = json!("shared");
+    let mut hidden = call("hidden", 2, OPUS, 0, 90_000, false); hidden["uuid"] = json!("hidden"); hidden["isSidechain"] = json!(true);
+    let mut hidden_again = hidden.clone(); hidden_again["isSidechain"] = json!(false);
+    let mut next = call("b", 3, OPUS, 50_003, 1, false); next["parentUuid"] = json!("tool");
+    let c = read(vec![json!({"type":"user","uuid":"shared","message":{"content":"start"}}), first,
+        hidden, hidden_again, json!({"type":"attachment","uuid":"attachment","parentUuid":"shared"}),
+        json!({"type":"user","uuid":"tool","parentUuid":"attachment","message":{"content":[{"type":"tool_result","content":"ok"}]}}), next]);
+    assert!(breaks(&c).is_empty());
 }

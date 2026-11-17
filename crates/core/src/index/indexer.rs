@@ -77,6 +77,7 @@ enum Plan {
 }
 
 struct Parsed {
+    cache_events: Vec<crate::model::CacheEvent>,
     file: TranscriptFile,
     plan: Plan,
     delta: SessionDelta,
@@ -285,6 +286,7 @@ fn parse_file(file: TranscriptFile, plan: Plan, seen_user: HashSet<String>) -> R
     Ok(Parsed {
         plan,
         delta: parser.into_delta(),
+        cache_events: feed.cache_events,
         messages: feed.messages,
         usage: feed.usage,
         indexed_offset: from + feed.consumed,
@@ -317,6 +319,7 @@ fn write_parsed(db: &Db, p: &Parsed) -> Result<()> {
     };
     let mut s = existing.unwrap_or_else(|| SessionSummary::transcript(&f.session_id, &f.project_key, &f.path));
     if !matches!(p.plan, Plan::Append(_)) {
+        db.delete_cache_facts(&f.session_id)?;
         db.delete_messages(&f.session_id)?;
         db.delete_usage(&f.session_id, Some(""))?;
     }
@@ -332,6 +335,8 @@ fn write_parsed(db: &Db, p: &Parsed) -> Result<()> {
     db.upsert_session(&s, project_id)?;
     db.insert_messages(&f.session_id, &p.messages)?;
     db.insert_usage(&f.session_id, "", &p.usage)?;
+    db.insert_cache_events(&f.session_id, &p.cache_events)?;
+    db.refresh_cache_breaks(&f.session_id)?;
     db.refresh_session_usage(&f.session_id)?;
     db.set_index_state(&f.path, &index_state(p))?;
     Ok(())

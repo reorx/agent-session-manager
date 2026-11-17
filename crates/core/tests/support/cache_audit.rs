@@ -1,5 +1,6 @@
 //! Optional real-data audit. Expected verdicts are never read here: the reference TSV is
 //! compared externally. Frozen call facts independently exercise Reader's input extraction.
+#![allow(dead_code)]
 use std::{collections::HashMap, fs::File, hash::{DefaultHasher, Hash, Hasher}, io::{BufRead, BufReader, Read, Write}, path::PathBuf};
 use agent_session_core::{claude::{cache::{CacheTracker, CallInput, RequestFacts}, conversation::read_conversation}, model::{CacheBreak, CacheBreakCause, ConvItem, Tokens}};
 use serde::Deserialize;
@@ -65,12 +66,13 @@ fn prefix(previous: &[(u64, i64)], c: &Call) -> Vec<(u64, i64)> {
 }
 fn optional(n: Option<i64>) -> String { n.map_or_else(String::new, |n| n.to_string()) }
 
-fn audit_calls(calls: &[Call], actual: &[CacheBreak], out: &mut impl Write) {
+fn audit_calls(calls: &[Call], actual: &[CacheBreak], indexed_ids: Option<&[String]>, out: &mut impl Write) {
     let mut tracker = CacheTracker::default();
     let mut seen: HashMap<&str, (usize, Vec<(u64, i64)>)> = HashMap::new();
     let mut last = None;
     let mut replay = Vec::new();
     let mut rows = Vec::new();
+    let mut ids = Vec::new();
     for (i, c) in calls.iter().enumerate() {
         assert!(!seen.contains_key(c.id.as_str()), "duplicate frozen call {}", c.id);
         for (_, event) in &c.events {
@@ -89,16 +91,22 @@ fn audit_calls(calls: &[Call], actual: &[CacheBreak], out: &mut impl Write) {
                 assert_eq!((Some(*gap_ms), *ttl_ms), (gap, lifetime), "{} {}", c.session, c.id);
             }
             rows.push(format!("{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n", c.session, optional(b.ts), cause(&b.cause), b.dropped, b.written, optional(gap), lifetime, c.id));
+            ids.push(c.id.clone());
             replay.push(b);
         }
         let next = prefix(segments, c);
         seen.insert(&c.id, (i, next)); last = Some(c.id.as_str());
     }
     assert_eq!(actual, replay, "Reader vs frozen-fact replay: {}", calls.first().map_or("empty", |c| c.session.as_str()));
+    if let Some(indexed) = indexed_ids { assert_eq!(indexed, ids, "persisted rebuild message keys"); }
     for row in rows { out.write_all(row.as_bytes()).unwrap(); }
 }
 
-pub fn run() {
+pub fn run() { run_with_index(false); }
+
+pub fn run_index() { run_with_index(true); }
+
+fn run_with_index(index: bool) {
     let env = |key| PathBuf::from(std::env::var(key).unwrap_or_else(|_| panic!("set {key}")));
     let manifest: Vec<Manifest> = serde_json::from_reader(File::open(env("ASM_CACHE_AUDIT_MANIFEST")).unwrap()).unwrap();
     let mut facts = HashMap::new();
@@ -121,10 +129,13 @@ pub fn run() {
         assert_eq!(String::from_utf8(digest.stdout).unwrap().split_whitespace().next().unwrap(), entry.sha256, "changed prefix {}", entry.path.display());
         let conv = read_conversation(&prefix_path, None).unwrap();
         assert_eq!(conv.skipped_lines, 0, "{}", entry.path.display());
-        let actual: Vec<_> = conv.items.into_iter().flat_map(|item| match item { ConvItem::Turn(t) => t.cache_breaks, _ => vec![] }).collect();
         let session = entry.path.file_stem().unwrap().to_str().unwrap();
         let calls = facts.remove(session).unwrap_or_default();
-        audit_calls(&calls, &actual, &mut out);
+        let indexed = index.then(|| audit_index(&bytes, &conv, &calls));
+        let actual: Vec<_> = conv.items.into_iter().flat_map(|item| match item { ConvItem::Turn(t) => t.cache_breaks, _ => vec![] }).collect();
+        let ids = indexed.as_ref().map(|rows| rows.iter().map(|b| b.msg_id.clone()).collect::<Vec<_>>());
+        let persisted = indexed.as_ref().map(|rows| rows.iter().map(|b| b.rebuilt.clone()).collect::<Vec<_>>());
+        audit_calls(&calls, persisted.as_deref().unwrap_or(&actual), ids.as_deref(), &mut out);
         total += actual.len();
         if i % 100 == 0 { eprintln!("audited {}/{} files, {total} rebuilds", i + 1, manifest.len()); }
     }
@@ -167,4 +178,41 @@ pub fn ledger_correction() {
             "delta_output":new.tokens.output-old.tokens.output,"responses":new.responses}));
     }
     std::fs::write(out, serde_json::to_vec_pretty(&rows).unwrap()).unwrap();
+}
+
+fn audit_index(bytes: &[u8], conv: &agent_session_core::model::Conversation, frozen: &[Call]) -> Vec<agent_session_core::model::IndexedCacheBreak> {
+    use agent_session_core::{index::Db, claude::parse::TranscriptParser, model::SessionSummary};
+    let db = Db::open_in_memory().unwrap();
+    let project = db.upsert_project("audit", None).unwrap();
+    db.upsert_session(&SessionSummary::transcript("audit", "audit", std::path::Path::new("frozen.jsonl")), project).unwrap();
+    let feed = TranscriptParser::new("audit").feed(bytes, 0);
+    db.insert_cache_events("audit", &feed.cache_events).unwrap(); db.refresh_cache_breaks("audit").unwrap();
+    let expected_calls = db.cache_calls("audit").unwrap();
+    let expected = db.cache_breaks("audit").unwrap();
+    assert_eq!(expected_calls.len(), frozen.len(), "all frozen calls were persisted");
+    for (stored, reference) in expected_calls.iter().zip(frozen) {
+        let c = &stored.facts;
+        let r = reference.input();
+        assert_eq!((&c.msg_id, &c.model, c.ts, &c.effort, &c.speed, &stored.parent_msg_id, c.prompt, c.read),
+            (&r.msg_id, &r.model, r.ts, &r.effort, &r.speed, &r.parent, r.prompt, r.read), "stored call facts");
+        // The frozen input predates web_search in its helper, compare its sampling fields.
+        assert_eq!((c.tokens.input, c.tokens.cache_read, c.tokens.cache_write_5m, c.tokens.cache_write_1h, c.tokens.output),
+            (r.tokens.input, r.tokens.cache_read, r.tokens.cache_write_5m, r.tokens.cache_write_1h, r.tokens.output));
+    }
+    let reader: Vec<_> = conv.items.iter().flat_map(|item| match item {
+        ConvItem::Turn(t) => t.cache_breaks.iter().map(|b| (t.number, b.clone())).collect(), _ => vec![]
+    }).collect();
+    assert_eq!(expected.iter().map(|b| (b.turn, b.rebuilt.clone())).collect::<Vec<_>>(), reader, "persisted replay vs Reader");
+    db.delete_cache_facts("audit").unwrap();
+    // Several arbitrary byte cuts, including partial records; reconstruct the parser on each.
+    let mut consumed = 0;
+    for end in [bytes.len()/3, bytes.len()*2/3, bytes.len()] {
+        let part = TranscriptParser::new("audit").feed(&bytes[consumed..end], consumed as u64);
+        db.insert_cache_events("audit", &part.cache_events).unwrap(); db.refresh_cache_breaks("audit").unwrap();
+        consumed += part.consumed as usize;
+    }
+    assert_eq!(db.cache_events("audit").unwrap(), feed.cache_events, "frozen incremental events");
+    assert_eq!(db.cache_calls("audit").unwrap(), expected_calls, "frozen incremental calls");
+    assert_eq!(db.cache_breaks("audit").unwrap(), expected, "frozen incremental breaks");
+    expected
 }

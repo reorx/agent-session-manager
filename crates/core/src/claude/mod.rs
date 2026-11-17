@@ -10,3 +10,5 @@ pub mod model_catalog;
 pub mod conversation;
 
 pub mod cache;
+
+pub(crate) mod cache_events;
