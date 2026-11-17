@@ -5,3 +5,5 @@ pub use db::*;
 pub use indexer::*;
 
 mod cache;
+
+mod cache_query;

@@ -152,3 +152,10 @@ asm show ID [--in KINDS] [-n N]
         "`asm gone`: no `### asm gone` section",
     ]);
 }
+
+#[test]
+fn cache_calls_requires_its_own_spec_row() {
+    let text = spec();
+    let without = text.lines().filter(|line| !line.starts_with("| `--calls`")).collect::<Vec<_>>().join("\n");
+    assert!(missing_from(&without, &Cli::command()).contains(&"`asm cache`: `--calls` has no row in its section".to_string()));
+}

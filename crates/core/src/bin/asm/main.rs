@@ -16,6 +16,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 mod agent;
 mod cost;
+mod cache;
 mod manage;
 mod old;
 mod projects;
@@ -69,6 +70,8 @@ enum Cmd {
     Session(session::SessionArgs),
     /// Projects that have sessions, most recently active first (for agents)
     Projects(projects::ProjectsArgs),
+    /// Inspect input cache hits and rebuilds
+    Cache(cache::CacheArgs),
     Favorite { id: String },
     Unfavorite { id: String, #[arg(long)] yes: bool },
     FavoritesDir { path: Option<PathBuf>, #[arg(long, conflicts_with = "path")] reset: bool },
@@ -167,6 +170,7 @@ fn main() -> ExitCode {
         Cmd::SearchOld(args) => app.search_old(args),
         Cmd::Cost(args) => app.cost(args),
         Cmd::Stats => app.stats(),
+        Cmd::Cache(args) => app.cache(args),
         Cmd::Favorite { id } => app.favorite(&id, false, false),
         Cmd::Unfavorite { id, yes } => app.favorite(&id, true, yes),
         Cmd::FavoritesDir { path, reset } => app.favorites_dir(path, reset),

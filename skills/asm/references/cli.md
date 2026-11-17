@@ -9,7 +9,7 @@ So this file may describe options before they exist, but never lag behind them.
 
 Commands come in two groups:
 
-- **For agents**: `search`, `session`, `projects`, and `transcript` with its reading options.
+- **For agents**: `search`, `session`, `projects`, `cache`, and `transcript` with its reading options.
   They print compact plain text meant to be read as is, and `--json` where noted.
 - **For people and parity checks**: `search-old`, `session-old`, `list`, `cost`, `stats`,
   `index`, `favorite`, `unfavorite`, `favorites-dir`. `list`, `search-old` and `session-old`
@@ -35,7 +35,7 @@ Output piped to another program or captured by an agent is never colored unless
 
 ### Checking the CLI
 
-`asm projects --help` exits 0 only on a binary that has the commands for agents this reference
+`asm cache --help` exits 0 only on a binary that has the commands for agents this reference
 describes; an older one exits 2 (unrecognized subcommand). Do not check with
 `asm search --help`: older binaries have a `search` too, with other options. When this reference
 adds commands, it names the one to check here. In a checkout of the repository,
@@ -58,7 +58,7 @@ rebuilt. The indexes in one directory share it, so the CLI's index and the app's
 ledger. Commands that refresh the index add what the refresh read; none of the commands here
 print from the ledger.
 
-The first command on a new index builds it from every transcript: about 20 seconds for 3,400
+The first command on a new index builds it from every transcript: about 25 seconds for 3,400
 sessions and 8 GB of records (measured 2026-11-17). Later refreshes take well under a second.
 
 ### The index and the write lock
@@ -676,6 +676,96 @@ JSON output:
 | `updated_at` | Last activity: the latest last update of the sessions counted |
 
 Exit codes: 0; 1 on an index error; 2 for invalid arguments.
+
+### asm cache
+
+Inspect cached input and main-thread cache rebuilds, from the index. Examples:
+
+```sh
+asm cache --project fieldcam --by day --json
+asm cache 3c7e91a2 --calls
+```
+
+| Option | Meaning |
+|---|---|
+| `ID` | Optional session ID or unique prefix; inspect its entire lifetime. |
+| `-d, --days N` | Rolling N × 24 hours; decimals allowed, 0 means all time. Default 7. |
+| `--since DATE` | Include calls from local midnight on DATE. |
+| `--until DATE` | Include DATE in full; exclusive upper bound is the following local midnight. |
+| `-p, --project P` | Repeatable project directory or substring, same matching as search. |
+| `--model M` | Normalized model of each call, including subagents; not the session's main model. |
+| `--include-self` | Include CLAUDE_CODE_SESSION_ID, otherwise excluded in overview. |
+| `--by GROUP` | Add groups: day, project, model. |
+| `--sort ORDER` | Session ranking: rebuild-cost (default, descending), hit (ascending), tokens (descending). |
+| `-n, --limit N` | Show at most N sessions; default 10, 0 means unlimited. |
+| `--calls` | ID only: include every indexed main-thread call. |
+| `--json` | One pretty JSON object. |
+| `--no-scan` | Skip refresh on an index scanned before; cold indexes still build. |
+
+Overview filters **calls**, including calls in sessions that began before the range.
+Date ranges are `[since, next midnight after until)`, as in search; `--days`
+conflicts with dates. `--by day` uses local calendar days, not Usage's 04:00 day.
+Unknown timestamps are excluded from bounded ranges; all-time queries retain them
+in the null day group. api_usage timestamp 0 denotes unknown.
+
+Tokens come from billing responses, including subagents. Main-thread call counts
+and rebuilds come from the independent cache snapshots. Subagents never add
+main-thread calls or rebuilds. Hit rate is cache_read / (input + cache_write_5m +
+cache_write_1h + cache_read). Rebuild cost is the stored cost of that call's cache
+writes, identical to the conversation card. Rebuilds group by their current model. Model values retain the `claude-` prefix,
+strip catalog suffixes/date versions; filters accept names with or without `claude-`.
+The separate facts are aggregated independently, never multiplied by a join.
+
+The overview prints range, session and main-thread call counts, input token
+composition, rebuild count/written tokens/cost, all observed causes (idle includes
+median gap), optional groups, then ranked sessions with ID, time, project, hit,
+rebuilds, cost and title. Unknown ratios/times/turns render `—`, unknown costs
+`unpriced`. If there are no billing or main-thread calls, print `0 calls in range`.
+Zero denominators are JSON null. Zero rebuilds cost 0; any unpriced rebuild makes
+its aggregate cost null (the count remains available). Unknown prices do not
+remove tokens. Ranking puts unknown costs/hits last, then breaks ties by session
+updated time descending and ID ascending. Groups sort by key ascending, unknown
+last; causes by code ascending. Limit truncates only the session ranking, never
+totals, causes or groups. Sessions are counted if any matching fact exists.
+
+ID mode ignores the current-session exclusion and rejects explicit time, project,
+model, include-self, by, sort and limit options (exit 2), even when their values
+would equal defaults. It prints metadata, lifetime statistics, then rebuilds in
+transcript byte order; `--calls` adds calls in that same order. Calls before the
+first prompt and in AUTO have null turns, never turn 0. History-only sessions have
+empty details; missing transcripts still show persisted facts. Calls use the first
+cache snapshot, while total Hit uses the billing snapshot (last response block).
+
+JSON overview has `meta`, `totals`, `groups`, `results`. ID mode additionally has
+`session`, `rebuilds`, `calls`; these are null / empty arrays in overview. `calls`
+is an empty array unless requested. `meta` contains command (`cache`), query
+(ID or null), range, projects, model (normalized or null), excluded_session, by,
+sort, limit, index_refresh, elapsed_ms, total, shown, truncated. ID has all-time
+range, null sort/limit/by and total=shown=1. `results` is empty in ID mode.
+
+A statistics object has `calls` (billing responses, including subagents),
+`main_thread_calls`, `tokens` (input, cache_write_5m, cache_write_1h, cache_read,
+output, web_search), `input_tokens`, `hit_rate`, `write_rate`, `uncached_rate`,
+`write_1h_share`, `rebuilds`, `written`, `cost_usd`, `unpriced_rebuilds`, `causes`.
+Each cause is `{cause, rebuilds, written, cost_usd, unpriced_rebuilds,
+median_gap_ms}`; non-idle median is null. Codes: compaction, model_switch, effort,
+fast_mode, sign_in, request_settings, idle, system_or_tools, earlier_messages,
+request_unchanged, unknown.
+
+Groups are `{key, stats}`, where key is a date, project path (encoded name if
+unknown), normalized model, or null for unknown day. Results are `{session_id,
+title, project, project_path, started_at, updated_at, stats}`. `session` has the
+same metadata without stats. Rebuilds are `{msg_id, offset, turn, time, model,
+dropped, written, cost_usd, cause}`. Cause has `kind` (the code above), plus
+`from` for model_switch, `from/to` for effort, `on` for fast_mode, `gap_ms/ttl_ms`
+for idle; other causes have only kind. Calls are `{msg_id, offset, turn, time,
+model, prompt_tokens, prompt_cache_read, tokens, rebuild}`; rebuild is boolean.
+Times use the common RFC3339 convention; all named fields are present.
+
+Exit/error behavior matches session: 0 success (including empty), 1 runtime or
+lookup error, 2 invalid arguments; JSON runtime errors carry `error.code` of
+not_found, ambiguous (with candidates), or failed. Lock fallback warns on stderr
+and returns indexed data with meta.index_refresh=busy; no-scan reports skipped.
 
 ### asm transcript
 

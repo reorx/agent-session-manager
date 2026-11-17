@@ -610,3 +610,50 @@ pub struct IndexedCacheBreak {
     pub model: String,
     pub rebuilt: CacheBreak,
 }
+
+/// Call-level cache query. Session selection (project/current-session/ID) is resolved by caller.
+#[derive(Clone, Debug, Default)]
+pub struct CacheQuery {
+    pub since_ms: Option<i64>,
+    pub until_ms: Option<i64>,
+    pub model: Option<String>,
+    pub group: Option<CacheGroup>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum CacheGroup { Day, Project, Model }
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CacheRebuildStats {
+    pub rebuilds: u64,
+    pub written: u64,
+    pub cost_usd: Option<f64>,
+    pub unpriced_rebuilds: u64,
+    pub median_gap_ms: Option<f64>,
+    #[serde(skip)]
+    pub(crate) gaps: Vec<i64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct CacheStats {
+    pub calls: u64,
+    pub main_thread_calls: u64,
+    pub tokens: Tokens,
+    pub input_tokens: u64,
+    pub hit_rate: Option<f64>,
+    pub write_rate: Option<f64>,
+    pub uncached_rate: Option<f64>,
+    pub write_1h_share: Option<f64>,
+    pub rebuilds: u64,
+    pub written: u64,
+    pub cost_usd: Option<f64>,
+    pub unpriced_rebuilds: u64,
+    pub causes: std::collections::BTreeMap<String, CacheRebuildStats>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CacheReport {
+    pub totals: CacheStats,
+    pub sessions: std::collections::BTreeMap<String, CacheStats>,
+    pub groups: std::collections::BTreeMap<Option<String>, CacheStats>,
+}

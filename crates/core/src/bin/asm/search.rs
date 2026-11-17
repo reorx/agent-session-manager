@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
 use std::time::Instant;
 
 use agent_session_core::claude::clean::one_line;
@@ -21,7 +20,7 @@ use clap::{Args, ValueEnum};
 use serde_json::{Value, json};
 
 use crate::agent::{
-    NO_PROMPT, Range, RangeArgs, excluded_session, has_own_title, json_prompt, marked, now_ms, plural, project_name, resume, resume_text,
+    current_dir_for, NO_PROMPT, Range, RangeArgs, excluded_session, has_own_title, json_prompt, marked, now_ms, plural, project_name, resume, resume_text,
     rfc3339, title, usage,
 };
 use crate::{App, Refresh};
@@ -326,13 +325,6 @@ fn snippet_label(hit: &Hit) -> String {
         label.push_str(&format!(" · {}", fmt_time(Some(ts))));
     }
     label
-}
-
-/// The current directory, read only when a `--project` is relative to it: a search run from a
-/// directory deleted since needs it for nothing else.
-fn current_dir_for(projects: &[String]) -> Result<PathBuf> {
-    let Some(relative) = projects.iter().find(|p| ProjectMatcher::needs_cwd(p)) else { return Ok(PathBuf::new()) };
-    std::env::current_dir().map_err(|e| anyhow::anyhow!("--project {relative} is relative, and the current directory cannot be read: {e}"))
 }
 
 /// What an empty result could widen, in the order of the spec. A project that does not exist

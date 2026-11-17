@@ -1,9 +1,10 @@
-//! What the commands for agents (`search`, `session`, `projects`) share: the time range, the
+//! What the commands for agents (`search`, `session`, `projects`, `cache`) share: the time range, the
 //! current session, how a session is titled and resumed, times in JSON, and failures in JSON.
 //! The conventions are in `skills/asm/references/cli.md` ("Conventions").
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use agent_session_core::search::sessions::ProjectMatcher;
 
 use agent_session_core::claude::clean::one_line;
 use agent_session_core::claude::paths::ClaudeDir;
@@ -366,4 +367,11 @@ mod tests {
         assert_eq!(cut("连不上网络", 3), "连不上…");
         assert_eq!(cut("abc", 3), "abc");
     }
+}
+
+/// The current directory, read only when a `--project` is relative to it: a search run from a
+/// directory deleted since needs it for nothing else.
+pub fn current_dir_for(projects: &[String]) -> Result<PathBuf> {
+    let Some(relative) = projects.iter().find(|p| ProjectMatcher::needs_cwd(p)) else { return Ok(PathBuf::new()) };
+    std::env::current_dir().map_err(|e| anyhow::anyhow!("--project {relative} is relative, and the current directory cannot be read: {e}"))
 }
