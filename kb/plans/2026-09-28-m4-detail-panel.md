@@ -35,7 +35,7 @@ PRD 里程碑 M4，对应需求 R6（`2026-09-08-agent-session-manager-prd.md`�
 - D7 用户输入：详情按导出的规则（排除 compact 摘要与 `origin.kind != human`，按 uuid 去重），只给真实输入编号；非 human 发起的段落显示为不编号的 AUTO 卡，compact 显示为分隔线。Prompts 列不动（保持与 Python 脚本一致），两边的差异记入 known-issues
 - D8 Resume：复制 `cd <path> && claude --resume <id>`，目录不存在时退回不带 cd（"按当前目录找 session"未验证，实现前确认）
 
-**消息流改为回合卡**（用户补充，参考 `~/Code/vibench/kb/plans/2026-10-21-workbench-activity-and-turn-cards.md` 的 Session 回合卡）：每个回合（一条真实输入到下一条之间）折成一张卡，标题 `TURN n`；卡里依次是 prompt（折叠到 4 行）、状态灯 + 步数 + 用时 + 出错数、一格一步的刻度条（工具调用竖杠，出错红色；过程文字实心点；thinking 空心点；最终回复不进刻度条）、工具统计行（指着某格时改写为该步）、最终回复（折叠到 6 行）。点开后按顺序显示每一步，工具 / thinking 仍是 22px 折叠行。原 chip 过滤与"连续工具调用分组"由回合卡取代。
+**消息流改为回合卡**（用户补充，参考用户另一个项目里 Session 回合卡的设计）：每个回合（一条真实输入到下一条之间）折成一张卡，标题 `TURN n`；卡里依次是 prompt（折叠到 4 行）、状态灯 + 步数 + 用时 + 出错数、一格一步的刻度条（工具调用竖杠，出错红色；过程文字实心点；thinking 空心点；最终回复不进刻度条）、工具统计行（指着某格时改写为该步）、最终回复（折叠到 6 行）。点开后按顺序显示每一步，工具 / thinking 仍是 22px 折叠行。原 chip 过滤与"连续工具调用分组"由回合卡取代。
 
 **范围**：M4a = 读取线程与数据通路、回合卡与虚拟列表、工具 / thinking 内命中（刻度上标出命中，跳到时自动展开回合）、扫描期间可显示。M4b = 操作（头部按钮 + 表格右键菜单 + `cmd-c` / `cmd-shift-c`）、History session 的 prompt 列表、Metadata 加修改过的文件、`[` / `]` 按回合跳转、轻量分段与折叠、图片占位。不做：完整 Markdown、shfmt 重排、subagent 查看（随 R9 放 M5）、拉起终端、实时追加、每轮费用。
 

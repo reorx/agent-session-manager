@@ -50,13 +50,13 @@ asm search TERM... [--in KINDS] [--tool NAME]... [--regex] [--same-message]
 ```
 2 sessions · terms [连不上|无法连接|offline] [健康检查|healthz] · in prompt,reply,thinking · all time · 0.03s
 
-1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26
-  updated 2026-11-14 17:09 · started 2026-11-13 07:40 · cw-edge (main) · 21 prompts · $4.10
-  title: 现场抓帧任务停止排查
+3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875
+  updated 2026-11-14 17:09 · started 2026-11-13 07:40 · fieldcam (master) · 21 prompts · $4.10
+  title: 录制任务停止排查
   hits: prompt 1 · reply 4 · thinking 0
-  [reply · turn 6 · 11-13 08:06] …第 12 轮开始前健康检查«连不上»现场（`«healthz»_error:URLError`）…
-  [prompt · turn 5 · 11-13 08:01] …为什么抓帧停了，«healthz» 报错…
-  resume: cd /Users/reorx/Code/cw-edge && claude --resume 1b2bda5d-c5e6-4c50-83dd-6e01c9dabf26
+  [reply · turn 6 · 11-13 08:06] …第 12 轮开始前健康检查«连不上»摄像头网关（`«healthz»_error:URLError`）…
+  [prompt · turn 5 · 11-13 08:01] …为什么录制停了，«healthz» 报错…
+  resume: cd /Users/me/Code/fieldcam && claude --resume 3c7e91a2-58d4-4b6f-a0e3-9f12c4d6b875
 
 …
 ```

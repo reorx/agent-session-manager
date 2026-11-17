@@ -43,7 +43,7 @@ asm cache [--days 7 | --since DATE [--until DATE]] [--project P]... [--model M] 
 ```
 
 - 默认最近 7 天。统计范围内发生的调用（会话可以开始得更早）；subagent 的调用计入 token 总量，不判断重建。`--model` 按范围内调用的规范化模型过滤，包含 subagent token；重建按当次调用模型归组，不按会话主模型或 model switch 的原模型。
-- 时间沿用 P1：`--days N` 为滚动 N×24h（支持小数和 0），`--since` / `--until` 为本地午夜，区间 [since, until)，支持单独 until；`--by day` 按本地自然日，与 app Usage 的 4:00 用量日不同。
+- 时间沿用 P1：`--days N` 为滚动 N×24h（支持小数和 0），`--since` 从所写日期的本地午夜起，`--until` 包含所写日期的全天（到次日本地午夜为止，不含），支持单独 until；`--by day` 按本地自然日，与 app Usage 的 4:00 用量日不同。
 - 输出（示意）：
 
 ```
@@ -58,7 +58,7 @@ rebuilds 96 · 9.8M tokens written · $61.20
   (every cause with at least one rebuild gets a line)
 
 top sessions by rebuild cost:
-  1b2bda5d  11-13 08:06  cw-edge         hit 91.2%  rebuilds 7  $9.80  现场抓帧任务停止排查
+  3c7e91a2  11-13 08:06  fieldcam        hit 91.2%  rebuilds 7  $9.80  录制任务停止排查
   …
 ```
 
@@ -154,8 +154,10 @@ top sessions by rebuild cost:
   - 2026-11-17，证据：同报告 §3、`audit-frozen.log` / `audit.json`（1,346,307 行，零差异）。
 - [x] 3. 缓存事实持久化、重放、全量 == 各断点增量、Reader 对照、生命周期清理、冻结 842 条审计、大小与耗时测量。
   - 2026-11-17，证据：[P2-1 总结](../../sessions/2026-11-17-asm-p2-store.md)；681 项测试通过，842 条 TSV 零差异，parity 第二轮 21/21。
-- [ ] 4. cli.md → cache 聚合与命令、JSON、CLI 行为测试、规范反向检查。
-- [ ] 5. cache-health skill、路由及相关文档（含决定 33 的虚构例子清理）。
+- [x] 4. cli.md → cache 聚合与命令、JSON、CLI 行为测试、规范反向检查。
+  - 2026-11-17，提交 `ece1712`，证据：[P2-2 总结](../../sessions/2026-11-17-asm-p2-store.md)「协调者摘要（asmcli-p2-store-cli）」；691 项测试通过，30 天 `--no-scan` 中位 0.12 s，冻结 842 条重建与原因分布一致。
+- [x] 5. cache-health skill、路由及相关文档（含决定 33 的虚构例子清理）。
+  - 2026-11-17，提交为 P2-3 的文档提交（`Add cache health guide to the asm skill`），证据：[P2-3 总结](../../sessions/2026-11-17-asm-p2-skill.md)；`skills/asm/references/cache-health.md`、SKILL.md 路由、README、product-prd，官方依据于当日核对线上页面。
 - [ ] 6. 真实数据与新会话 skill 验收。
 - [ ] 7. 协调者更新共享文档和状态、安排 CLI 安装及收尾。
 

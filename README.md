@@ -19,9 +19,9 @@ The app checks for updates once a day and asks before installing; you can also c
 ## `asm` CLI and agent skill
 
 `asm` reads the same data from the command line, in a form meant for agents: find sessions by
-what was said in them, show one session's details, list projects, and read a session a few turns
-at a time. It is not installed with the app yet; build it from a checkout of this repository
-(see Requirements):
+what was said in them, show one session's details, list projects, read a session a few turns
+at a time, and check how well the prompt cache was reused. It is not installed with the app
+yet; build it from a checkout of this repository (see Requirements):
 
 ```sh
 make install-cli    # release build, copied to ~/.local/bin/asm; run it again after pulling updates
@@ -30,25 +30,29 @@ make install-cli    # release build, copied to ~/.local/bin/asm; run it again af
 ```sh
 asm search '连不上|无法连接|offline' 'healthz|健康检查' -d 30   # sessions that contain every TERM; | separates ways of saying one
 asm search 'ECONNRESET' --in tool-output -d 7                  # also search tool calls and their output
-asm session 1b2bda5d                    # an ID or unique prefix from search: title, project, cost, files, resume command
+asm session 3c7e91a2                    # an ID or unique prefix from search: title, project, cost, files, resume command
 asm projects -d 30                      # projects active in the last 30 days
-asm transcript 1b2bda5d --outline       # one line per turn
-asm transcript 1b2bda5d --turns 4 --grep healthz   # only the parts of turn 4 around the hits
+asm transcript 3c7e91a2 --outline       # one line per turn
+asm transcript 3c7e91a2 --turns 4 --grep healthz   # only the parts of turn 4 around the hits
+asm cache                               # last 7 days: cache hit rate, cache rebuilds by cause and their cost, sessions to look at
+asm cache 3c7e91a2 --calls              # one session: each rebuild with its turn, cause and cost, then every call
 ```
 
 - The first command builds the CLI's own index (`index-cli.sqlite` in the app's data directory,
-  about 20 seconds); after that each command catches up in well under a second. It keeps its own
+  under a minute); after that each command catches up in well under a second. It keeps its own
   index while the app's is on an older layout, and shares the app's favorites.
-- `search`, `session` and `projects` take `--json`. Output is colored only in a terminal.
-- The session you run `asm` from is left out of `search` and `projects` unless you add
-  `--include-self`.
+- `search`, `session`, `projects` and `cache` take `--json`. Output is colored only in a terminal.
+- The session you run `asm` from is left out of `search`, `projects` and the `cache` overview
+  unless you add `--include-self`.
 - `ASM_CLAUDE_DIR` / `ASM_DB` override the data directory and the index. `asm --help` lists the
   other commands (`list`, `cost`, `stats`, `index`, favorites), and
   [`skills/asm/references/cli.md`](skills/asm/references/cli.md) describes every option.
 
 The **`asm` skill** in [`skills/asm/`](skills/asm/SKILL.md) teaches Claude Code to use the CLI:
 ask "帮我找一下近期关于某个 app 连不上网的问题解决会话" or "where did we fix the flaky ECONNRESET?" and it
-searches, reads the matching turns, and answers with the session and the command to resume it.
+searches, reads the matching turns, and answers with the session and the command to resume it;
+ask "看看最近 7 天缓存命中得好不好" and it reports the hit rate, why and where the cache was rebuilt,
+what that cost, and what could be done differently, citing Anthropic's documentation.
 Claude Code sessions started in this repository load it automatically.
 
 ## Transcript Reader
@@ -63,7 +67,7 @@ make build-transcript-reader
 ./dist/transcript-reader SESSION_ID -o session.txt
 # Or install the standalone command:
 cargo install --path crates/core --bin transcript-reader
-transcript-reader 1cbab92c -o session.txt
+transcript-reader 3c7e91a2 -o session.txt
 transcript-reader /path/to/transcript.jsonl > session.txt
 ```
 
